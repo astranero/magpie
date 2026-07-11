@@ -11,7 +11,7 @@ npm run test:e2e   # Playwright — loads dist/ into headless Chromium
 
 CI (`.github/workflows/ci.yml`) runs all three on push/PR, workspace-aware.
 
-## Unit tests (~173)
+## Unit tests (~184)
 
 Pure-lib suites only, by policy: chunker, citations, content-cleaner,
 frontmatter (+parse), quality-gate, bibtex, paper-rank, rerank-gate,
@@ -41,6 +41,9 @@ One worker, no parallelism (global extension state).
   needed), then drives the UI: library search finds it by content, clicking
   the hit opens DocumentView at the matched passage. Runs BM25-lexical when
   the offscreen embedding model is unavailable (deterministic in CI).
+- `research-plan.spec.ts` — `/research` posts the in-chat plan card; the
+  preview's no-LLM fallback still reaches an actionable draft, the input
+  stays enabled while the plan is pending, and Cancel is terminal.
 
 E2E exists specifically for the **coordinate-space / wiring class of bug**
 (e.g. highlight offsets vs frontmatter stripping) that unit tests cannot

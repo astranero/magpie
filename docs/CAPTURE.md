@@ -13,7 +13,7 @@ chunk → embed → save. Nothing enters the library implicitly.
 | **Local `.md` files/folder** | File System Access picker; relative images inlined as data URLs (`lib/import-helpers.ts`); existing frontmatter preserved |
 | **Local PDF/images** | Base64 path (guarded: >48 MB errors with size instead of OOM), async with BroadcastChannel progress; images described by the vision model |
 | **Right-click** | "Capture page to Library" / capture selection |
-| **Research** | Sources indexed ephemerally (see RESEARCH-PIPELINE.md); only the synthesis report is saved |
+| **Research** | Every gathered source is saved as a first-class document and linked to the workspace (keeps citation anchors permanently resolvable); the run also saves the synthesis report and a consolidated `research-sources` list (see RESEARCH-PIPELINE.md) |
 
 Capture destination: Global Lore always; linked to the active workspace when
 "Auto-add captures" is ON. `/recall <topic>` links relevant global docs later.

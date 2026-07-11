@@ -5,7 +5,8 @@ files into a **local-first knowledge base**, then chat with your research using 
 
 Everything lives in your browser (IndexedDB + a local embedding model in an
 offscreen document). The only network calls are to your configured LLM endpoint
-and the research fetchers.
+and the research fetchers — the full egress inventory and trust model are in
+[docs/SECURITY.md](docs/SECURITY.md).
 
 ## Install
 
@@ -53,9 +54,10 @@ so Obsidian and other tools can index it.
 
 | Command | Does |
 |---|---|
-| `/research <topic>` | Quick single-pass web research |
-| `/deepresearch <topic>` | Multi-agent: WEB + ACADEMIC (Semantic Scholar, HuggingFace) + NEWS (Google News RSS), balanced sources, confidence-tagged synthesis |
+| `/research <topic>` | Quick web research — posts an editable plan into the chat first: refine it by typing ("drop question 2"), then start |
+| `/deepresearch <topic>` | Multi-agent: WEB + ACADEMIC (Semantic Scholar, HuggingFace) + NEWS (Google News RSS), balanced sources, confidence-tagged synthesis. Same in-chat plan step |
 | `/analyze [focus]` | Overview of everything in the workspace: clusters, findings, gaps |
+| `/create-skill [focus]` | Distill this workspace's research into a reusable custom command (+ a browsable skill file in Lore) |
 | `/compare A vs B` · `/timeline <topic>` | Structured views over your sources |
 | `/challenge` · `/connect` · `/extract` · `/brief` | Reasoning modes over your sources |
 | `/page <q>` | Ask about the page you're viewing (nothing saved) |
@@ -78,7 +80,11 @@ gets rewritten into a standalone topic using your recent chat + workspace docs
 (the interpretation is shown in the log and report).
 
 Citations render as numbered chips — click one to open the source document with
-the exact cited paragraph highlighted.
+the exact cited paragraph highlighted. Every research run also saves a
+**Research Sources** document in Lore: the consolidated source list per agent
+with quality tiers (★ high = authority domain / arXiv / DOI / ≥10 citations)
+and citation counts. Chat stays usable while research runs — progress shows as
+a live card with its own Stop button.
 
 ## Crash-safe deep research
 

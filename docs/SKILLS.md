@@ -11,16 +11,23 @@ Three command kinds:
 - **`prompt`** — injects a `systemPrompt` override into a normal chat turn
   (still RAG + citations): `/compare`, `/timeline`, `/challenge`,
   `/connect`, `/extract`, `/brief`.
-- **`research`** — starts a run: `/research` (quick), `/deepresearch`
-  (staged multi-agent).
+- **`research`** — posts an editable plan card into the chat, then starts a
+  run on confirm: `/research` (quick), `/deepresearch` (staged multi-agent).
+  While the plan is a draft, plain chat input refines it (see
+  RESEARCH-PIPELINE.md, "Plan negotiation").
 - **`builtin`** — special-cased in App: `/page` (ephemeral current-page
   context), `/recall` (pull Global Lore into the workspace), `/analyze`,
-  `/clear`, `/help`.
+  `/create-skill`, `/clear`, `/help`.
 
 ## Custom skills (Config → Custom Commands)
 
 User-defined prompt-kind commands stored under `customSkills` in
-`chrome.storage.local`:
+`chrome.storage.local`. Two ways in: hand-written in Config, or generated
+by **`/create-skill [focus]`** — the worker distills the workspace's
+research (top chunks + doc titles) into a skill prompt (persona, "Key
+knowledge" facts, answering rules), registers it collision-safely, and
+saves a browsable `Skill: /name` document (`enabled: false`, zero chunks)
+in Lore:
 
 ```ts
 CustomSkill { cmd: '/competitors', desc, systemPrompt }
