@@ -53,13 +53,27 @@ export function buildAnchoredContext(chunks: { anchorId: string; docId: string; 
   return context;
 }
 
+/** Titles for [Source: …] headers — citing a bare UUID is what the model
+ *  does when a chunk's source label IS a bare UUID. */
+async function docTitleMap(projectId: string): Promise<Map<string, string>> {
+  try {
+    const docs = await listDocuments(projectId);
+    return new Map(docs.map(d => [d.id, d.title]));
+  } catch {
+    return new Map();
+  }
+}
+
 const RESEARCH_CITATION_RULES =
   `CITATION RULES (mandatory — this report is graded on source-grounding, not confidence claims):\n` +
   `1. Every factual claim MUST end with the citation anchor of the excerpt it came from, e.g. "...grew 40% in 2023 [d3ab01.s1.p2]."\n` +
   `2. Citation format: [anchor_id] taken verbatim from the <c>anchor_id</c> tag preceding the excerpt you used. ONE anchor per bracket. For multiple corroborating sources write [anchor1][anchor2] — never comma-separate inside one bracket.\n` +
   `3. Never fabricate an anchor ID or cite one that wasn't given to you.\n` +
   `4. When multiple sources support the same claim, cite all of them — that IS the credibility signal. Do NOT use vague labels like "[High confidence]" or "[Low confidence]"; showing 2-3 independent anchors on a claim is more useful than a confidence tag.\n` +
-  `5. If the excerpts don't cover something, say so explicitly instead of citing something unrelated.\n`;
+  `5. If the excerpts don't cover something, say so explicitly instead of citing something unrelated.\n` +
+  `6. SOURCES DESCRIBE DIFFERENT SYSTEMS. Each [Source: …] block is a separate paper/page about its OWN system, method, or subject. NEVER merge mechanisms from different sources into one system as if they were parts of the same thing — attribute every mechanism, metric, and name to the specific system its source describes ("The X paper proposes…", "Separately, Y reports…").\n` +
+  `7. If the research topic PRESUMES a connection the excerpts do not support (e.g. "how does system A use technique B" when no source shows A using B), state that mismatch plainly in the first paragraph instead of inventing the connection.\n` +
+  `8. Ignore sources that are topically unrelated to the research question (a keyword match is not relevance) — do not force them into the narrative.\n`;
 
 // ─────────────────────────────────────────────
 // Deep Researcher — tab-free
@@ -1226,7 +1240,7 @@ export async function runDeepResearch(
 
   const relevantChunks = await searchSessionChunks(projectId, topic, activeLimits.quickChunks, agent.docIds);
 
-  const contextText = buildAnchoredContext(relevantChunks).trim();
+  const contextText = buildAnchoredContext(relevantChunks, await docTitleMap(projectId)).trim();
 
   // Guard: never ask the LLM to synthesize from nothing (that produced the
   // "please provide the context excerpts" reply). Bail with a clear error.
@@ -1783,7 +1797,7 @@ async function synthesizeStageBrief(
     ...c,
     heading: `[${labelByDoc.get(c.docId) || 'WEB'}] ${c.heading || ''}`.trim()
   }));
-  const contextText = buildAnchoredContext(anchoredChunks).trim();
+  const contextText = buildAnchoredContext(anchoredChunks, await docTitleMap(projectId)).trim();
 
   const sys =
     `You are a research analyst writing Stage ${stage} of ${totalStages} in a staged investigation of: "${topic}".
@@ -2097,7 +2111,7 @@ async function runDeeperResearch(
       ...c,
       heading: `[${labelByDoc.get(c.docId) || 'WEB'}] ${c.heading || ''}`.trim()
     }));
-    const contextText = buildAnchoredContext(anchoredChunks).trim();
+    const contextText = buildAnchoredContext(anchoredChunks, await docTitleMap(projectId)).trim();
     if (contextText.length < 100) {
       throw new Error(`Agents found ${allSources.length} source(s) but could not extract readable text.`);
     }
