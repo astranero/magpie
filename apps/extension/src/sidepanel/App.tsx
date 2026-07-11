@@ -94,12 +94,13 @@ export default function App() {
   const synthFlushTimerRef = useRef<number | null>(null);
   // User-defined slash commands (Settings → Custom Commands)
   const [customCommands, setCustomCommands] = useState<SlashCommand[]>([]);
-  // Chrome may evict IndexedDB (the whole library + cached models) under
-  // disk pressure. persist() marks the origin's storage durable.
+  // Storage durability: the real guarantee for extensions is the
+  // `unlimitedStorage` manifest permission (exempts our IndexedDB from
+  // quota eviction). navigator.storage.persist() is a website API driven by
+  // site-engagement heuristics — it routinely returns false for extension
+  // pages, which is expected and NOT a problem, so no warning on false.
   useEffect(() => {
-    navigator.storage?.persist?.().then(granted => {
-      if (!granted) console.warn('Persistent storage not granted — library may be evicted under disk pressure');
-    }).catch(() => {});
+    navigator.storage?.persist?.().catch(() => {});
   }, []);
   useEffect(() => {
     if (typeof chrome === 'undefined' || !chrome.storage) return;
