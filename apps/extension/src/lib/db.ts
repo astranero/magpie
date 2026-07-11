@@ -479,8 +479,9 @@ export async function findExistingDocumentByUrl(url: string): Promise<StoredDocu
   const db = await openDB();
   const transaction = tx(db, 'documents');
   const store = transaction.objectStore('documents');
-  const docs = await reqToPromise<StoredDocument[]>(store.getAll());
-  return docs.find(d => d.url === url);
+  // The `url` index makes this an O(log n) lookup — a getAll() scan here ran
+  // on EVERY document save and loaded the full library into memory.
+  return reqToPromise<StoredDocument | undefined>(store.index('url').get(url));
 }
 
 export async function saveDocument(
