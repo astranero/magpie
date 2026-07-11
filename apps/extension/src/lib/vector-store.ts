@@ -1,0 +1,297 @@
+import { create, insert, search as oramaSearch } from '@orama/orama';
+import { Chunk, listDocuments, getChunksForDocs } from './db';
+
+// ─────────────────────────────────────────────
+// Session Vector Store (Orama BM25)
+// ─────────────────────────────────────────────
+// The MV3 service worker is killed after ~30s of inactivity, which wipes
+// this in-memory index. `ensureProjectIndexed` transparently rehydrates
+// the index from the IndexedDB chunk store on the next search.
+
+const sessionVectorDBs = new Map<string, any>();
+// Tracks which docIds are already indexed per session, to avoid duplicate inserts.
+const indexedDocIds = new Map<string, Set<string>>();
+
+async function initSessionDB(sessionId: string) {
+  const db = await create({
+    schema: {
+      id: 'string',
+      docId: 'string',
+      anchorId: 'string',
+      text: 'string',
+      heading: 'string',
+      sectionPath: 'string',
+      embedding: 'vector[384]'
+    }
+  });
+  sessionVectorDBs.set(sessionId, db);
+  indexedDocIds.set(sessionId, new Set());
+  return db;
+}
+
+export async function getSessionDB(sessionId: string) {
+  if (!sessionVectorDBs.has(sessionId)) {
+    await initSessionDB(sessionId);
+  }
+  return sessionVectorDBs.get(sessionId);
+}
+
+function getIndexedSet(sessionId: string): Set<string> {
+  let set = indexedDocIds.get(sessionId);
+  if (!set) {
+    set = new Set();
+    indexedDocIds.set(sessionId, set);
+  }
+  return set;
+}
+
+async function insertChunks(db: any, chunks: Chunk[]) {
+  let n = 0;
+  for (const chunk of chunks) {
+    // Bulk indexing is CPU-bound; yield a macrotask periodically so worker
+    // message handlers stay responsive during research runs.
+    if (++n % 25 === 0) await new Promise<void>(r => setTimeout(r, 0));
+    await insert(db, {
+      id: chunk.id ?? crypto.randomUUID(),
+      docId: chunk.docId ?? '',
+      anchorId: chunk.anchorId,
+      text: chunk.text,
+      heading: chunk.heading,
+      sectionPath: chunk.sectionPath,
+      embedding: chunk.embedding && chunk.embedding.length === 384 ? chunk.embedding : new Array(384).fill(0)
+    });
+  }
+}
+
+/**
+ * Rehydrate the in-memory index with all persisted chunks of the project's
+ * documents that are not indexed yet (e.g. after a service worker restart).
+ */
+export async function ensureProjectIndexed(projectId: string): Promise<void> {
+  const db = await getSessionDB(projectId);
+  const indexed = getIndexedSet(projectId);
+
+  const docs = await listDocuments(projectId);
+  const missing = docs.filter(d => !indexed.has(d.id)).map(d => d.id);
+  if (missing.length === 0) return;
+
+  const chunks = await getChunksForDocs(missing);
+  await insertChunks(db, chunks);
+  missing.forEach(id => indexed.add(id));
+}
+
+/**
+ * Add chunks to the in-memory index. Chunks MUST have their final `id` and
+ * `docId` assigned (use the chunks returned by `saveDocument`).
+ * Ephemeral chunks (deep research sources) may use a synthetic docId.
+ */
+export async function addChunksToVectorStore(sessionId: string, chunks: Chunk[]) {
+  const db = await getSessionDB(sessionId);
+  const indexed = getIndexedSet(sessionId);
+
+  // Skip docs already indexed (e.g. rehydrated before this call landed)
+  const newChunks = chunks.filter(c => !c.docId || !indexed.has(c.docId));
+  await insertChunks(db, newChunks);
+  newChunks.forEach(c => { if (c.docId) indexed.add(c.docId); });
+}
+
+export async function searchSessionChunks(
+  sessionId: string,
+  query: string,
+  limit: number = 20,
+  filterDocIds?: string[]
+): Promise<Chunk[]> {
+  // Rehydrate persisted chunks lost to a service worker restart
+  await ensureProjectIndexed(sessionId);
+  const db = await getSessionDB(sessionId);
+
+  let queryVector: number[] | null = null;
+  try {
+    const res: any = await chrome.runtime.sendMessage({ action: 'OFFSCREEN_GET_EMBEDDINGS', texts: [query] });
+    if (res?.ok && res.embeddings && res.embeddings[0]) {
+      queryVector = res.embeddings[0];
+    }
+  } catch (e) {
+    console.warn('Failed to generate query embedding, falling back to lexical search', e);
+  }
+
+  const retrieveLimit = limit * 3; // Retrieve more because we filter + rerank post-search
+
+  // ── Strategy 1: Full query search with typo tolerance ──
+  let candidateChunks = await runSearch(db, query, queryVector, retrieveLimit, 2);
+
+  // ── Strategy 2: Keyword fallback — search individual words if full query returns few results ──
+  if (candidateChunks.length < limit) {
+    const words = query.split(/\s+/).filter(w => w.length > 3); // Only meaningful words
+    if (words.length > 1) {
+      const existingIds = new Set(candidateChunks.map(c => (c as any).id || c.anchorId));
+      for (const word of words) {
+        const wordResults = await runSearch(db, word, null, Math.ceil(retrieveLimit / words.length), 1);
+        for (const chunk of wordResults) {
+          const cid = (chunk as any).id || chunk.anchorId;
+          if (!existingIds.has(cid)) {
+            candidateChunks.push(chunk);
+            existingIds.add(cid);
+          }
+        }
+      }
+    }
+  }
+
+  // Application-level docId filtering (Orama doesn't support array IN filters)
+  if (filterDocIds && filterDocIds.length > 0) {
+    const docIdSet = new Set(filterDocIds);
+    candidateChunks = candidateChunks.filter(c => docIdSet.has(c.docId));
+  }
+
+  if (candidateChunks.length === 0) return [];
+
+  // Local Cross-Encoder Reranking + relevance gate (see gateRerankedChunks).
+  try {
+    const rerankRes: any = await chrome.runtime.sendMessage({
+      action: 'OFFSCREEN_RERANK',
+      query,
+      passages: candidateChunks.map(c => c.text)
+    });
+
+    if (rerankRes?.ok && rerankRes.scores) {
+      const scored = candidateChunks.map((chunk, idx) => ({
+        chunk,
+        score: rerankRes.scores[idx] ?? 0
+      }));
+      return gateRerankedChunks(scored, limit);
+    }
+  } catch (e) {
+    console.warn('Local reranking failed, returning candidate chunks directly', e);
+  }
+
+  return candidateChunks.slice(0, limit);
+}
+
+// ── Rerank relevance gate (pure — unit tested) ──
+// ms-marco-MiniLM logits: genuinely relevant pairs score ≳ 0, borderline
+// sits around -4, and off-topic/boilerplate lands ≤ -8. Chunks below the
+// gate are dropped entirely rather than padded up to `limit` — feeding the
+// model irrelevant chunks is what produces bogus citations.
+export const RERANK_MIN_SCORE = -4;
+export const RERANK_JUNK_SCORE = -8;
+
+/**
+ * Relative "score cliff": when the top hit is confident (>0), candidates
+ * scoring far below it are keyword-coincidence noise even if they clear the
+ * absolute gate. Logit-space analog of the sigmoid-cliff pattern used in
+ * production rerankers.
+ */
+const RERANK_CLIFF = 7;
+
+export function gateRerankedChunks<T>(scored: Array<{ chunk: T; score: number }>, limit: number): T[] {
+  const sorted = [...scored].sort((a, b) => b.score - a.score);
+  let relevant = sorted.filter(s => s.score > RERANK_MIN_SCORE);
+  if (relevant.length > 0 && relevant[0].score > 0) {
+    relevant = relevant.filter(s => s.score > relevant[0].score - RERANK_CLIFF);
+  }
+  if (relevant.length > 0) {
+    return relevant.slice(0, limit).map(s => s.chunk);
+  }
+  // Nothing cleared the gate. Keep the 2 best only if they're at least
+  // borderline — a query with no relevant sources should return none.
+  return sorted
+    .filter(s => s.score > RERANK_JUNK_SCORE)
+    .slice(0, 2)
+    .map(s => s.chunk);
+}
+
+// ── Library-wide search ──────────────────────
+// A dedicated session key indexes EVERY stored document (not just one
+// workspace) so the Lore view can search the whole collection. Rehydration
+// is cheap: chunks carry persisted embeddings.
+const LIBRARY_SESSION = '__library__';
+
+export interface LibrarySearchHit {
+  docId: string;
+  anchorId: string;
+  snippet: string;
+}
+
+async function ensureLibraryIndexed(): Promise<void> {
+  const db = await getSessionDB(LIBRARY_SESSION);
+  const indexed = getIndexedSet(LIBRARY_SESSION);
+  const docs = await listDocuments(); // no projectId → all documents
+  const missing = docs.filter(d => !indexed.has(d.id)).map(d => d.id);
+  if (missing.length === 0) return;
+  const chunks = await getChunksForDocs(missing);
+  await insertChunks(db, chunks);
+  missing.forEach(id => indexed.add(id));
+}
+
+/**
+ * Search the entire library; returns one hit per document (best chunk),
+ * ranked by the hybrid+rerank pipeline. `limit` = max documents.
+ */
+export async function searchLibrary(query: string, limit: number = 8): Promise<LibrarySearchHit[]> {
+  await ensureLibraryIndexed();
+  const chunks = await searchSessionChunks(LIBRARY_SESSION, query, limit * 3);
+  const perDoc = new Map<string, LibrarySearchHit>();
+  for (const c of chunks) {
+    if (!c.docId || perDoc.has(c.docId)) continue;
+    perDoc.set(c.docId, {
+      docId: c.docId,
+      anchorId: c.anchorId,
+      snippet: c.text.replace(/\s+/g, ' ').slice(0, 220)
+    });
+    if (perDoc.size >= limit) break;
+  }
+  return [...perDoc.values()];
+}
+
+/** Drop every in-memory index (project sessions + library). */
+export function resetAllSessionIndexes(): void {
+  sessionVectorDBs.clear();
+  indexedDocIds.clear();
+}
+
+/** New captures/deletions must invalidate the library-wide index too. */
+export function resetLibraryIndex(): void {
+  sessionVectorDBs.delete(LIBRARY_SESSION);
+  indexedDocIds.delete(LIBRARY_SESSION);
+}
+
+/**
+ * Drop the in-memory index for a session. Ephemeral chunks (deep-research
+ * sources) are only in memory, so this evicts them; persisted document
+ * chunks are transparently rehydrated from IndexedDB on the next search.
+ * Cheap: stored chunks carry their embeddings, so no re-embedding happens.
+ */
+export function resetSessionIndex(sessionId: string): void {
+  sessionVectorDBs.delete(sessionId);
+  indexedDocIds.delete(sessionId);
+}
+
+/**
+ * Run an Orama search with optional vector and typo tolerance.
+ */
+async function runSearch(db: any, term: string, queryVector: number[] | null, limit: number, tolerance: number = 1): Promise<Chunk[]> {
+  const searchParams: any = {
+    term,
+    properties: ['text', 'heading', 'sectionPath'],
+    limit,
+    tolerance  // Orama fuzzy matching — allows N character edits per token
+  };
+
+  if (queryVector) {
+    searchParams.mode = 'hybrid';
+    searchParams.vector = {
+      value: queryVector,
+      property: 'embedding'
+    };
+  }
+
+  try {
+    const results = await oramaSearch(db, searchParams);
+    return results.hits.map(hit => hit.document as unknown as Chunk);
+  } catch (e) {
+    console.warn('Orama search failed for term:', term, e);
+    return [];
+  }
+}
+

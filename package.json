@@ -1,0 +1,14 @@
+{
+  "name": "magpie-monorepo",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Monorepo for the AI Research Assistant Chrome/Edge Extension",
+  "workspaces": [
+    "apps/*"
+  ],
+  "scripts": {
+    "dev:extension": "npm run dev --workspace=apps/extension",
+    "build:extension": "npm run build --workspace=apps/extension",
+    "build": "npm run build --workspaces --if-present"
+  }
+}

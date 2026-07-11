@@ -1,0 +1,6 @@
+{
+  "files": ["sidepanel.html", "offscreen.html"],
+  "insertBefore": "</body>",
+  "commentSyntax": "html",
+  "cspChecked": true
+}
