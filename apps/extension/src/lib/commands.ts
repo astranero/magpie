@@ -73,6 +73,9 @@ export const SLASH_COMMANDS: SlashCommand[] = [
     systemPrompt: 'Create a concise executive briefing. Summarize the key points in a format suitable for rapid decision-making. Use: ## Situation (2-3 sentences), ## Key Findings (bullet points), ## Implications, ## Recommended Actions.'
   },
   {
+    cmd: '/create-skill', desc: 'Distill this workspace\'s research into a reusable slash command', takesArg: false, kind: 'builtin'
+  },
+  {
     cmd: '/clear', desc: 'Clear chat history', takesArg: false, kind: 'builtin'
   },
   {

@@ -333,6 +333,8 @@ const messageHandlers: Record<string, MessageHandler> = {
   // ── Deep Research ──
   START_DEEP_RESEARCH: handleDeepResearch,
   PREVIEW_DEEP_RESEARCH: handlePreviewDeepResearch,
+  REFINE_RESEARCH_PLAN: handleRefineResearchPlan,
+  CREATE_SKILL: handleCreateSkill,
   GET_RESEARCH_STATUS: async () => {
     const job = await getResearchJob().catch(() => null);
     const running = job ? abortControllers.has(job.projectId) : false;
@@ -1293,10 +1295,149 @@ async function handlePreviewDeepResearch(request: Record<string, unknown>): Prom
   return { effectiveTopic, subQuestions };
 }
 
+/**
+ * Refine a draft research plan from conversational feedback. The user sees
+ * the plan card in chat and types adjustments ("drop question 3", "focus on
+ * EU regulation instead") — one LLM call returns the revised plan.
+ */
+async function handleRefineResearchPlan(request: Record<string, unknown>): Promise<Record<string, unknown>> {
+  const effectiveTopic = request.effectiveTopic as string;
+  const subQuestions = (request.subQuestions as string[]) || [];
+  const feedback = request.feedback as string;
+  if (!effectiveTopic || !feedback) throw new Error('effectiveTopic and feedback are required');
+
+  const sys = `You are revising a research plan based on user feedback. Apply the feedback faithfully: reword/add/remove sub-questions, narrow or broaden the topic — whatever the user asked. Keep 3-7 sub-questions.
+Return STRICT JSON only: {"topic": "<revised research topic, one sentence>", "subQuestions": ["...", ...]}`;
+  const user = `CURRENT PLAN
+Topic: ${effectiveTopic}
+Sub-questions:
+${subQuestions.map((q, i) => `${i + 1}. ${q}`).join('\n') || '(none)'}
+
+USER FEEDBACK: ${feedback}`;
+
+  const res = await chatWithCustom(sys, [], user);
+  const start = res.indexOf('{');
+  const end = res.lastIndexOf('}');
+  if (start === -1 || end === -1) throw new Error('Could not parse revised plan');
+  const json = JSON.parse(res.slice(start, end + 1));
+  const revisedTopic = typeof json.topic === 'string' && json.topic.length > 3 ? json.topic : effectiveTopic;
+  const revisedQuestions = Array.isArray(json.subQuestions)
+    ? json.subQuestions.filter((q: unknown) => typeof q === 'string' && (q as string).length > 3).slice(0, 7)
+    : subQuestions;
+  return { effectiveTopic: revisedTopic, subQuestions: revisedQuestions };
+}
+
+// ─────────────────────────────────────────────
+// /create-skill — distill workspace research into a reusable slash command
+// ─────────────────────────────────────────────
+
+const SKILL_CMD_SHAPE = /^\/[a-z0-9-]{2,24}$/;
+
+async function handleCreateSkill(request: Record<string, unknown>): Promise<Record<string, unknown>> {
+  const projectId = request.projectId as string;
+  const instruction = (request.instruction as string) || '';
+  if (!projectId) throw new Error('projectId is required');
+
+  // Context: workspace doc titles + the most relevant chunks for the
+  // instruction (or a broad sample when no focus is given).
+  const allDocs = await listDocuments(projectId);
+  const enabledDocs = allDocs.filter(d => d.enabled !== false);
+  if (enabledDocs.length === 0) {
+    throw new Error('This workspace has no sources yet — capture pages or run /research first, then create a skill from the findings.');
+  }
+  const docIds = enabledDocs.map(d => d.id);
+  const query = instruction || enabledDocs.slice(0, 5).map(d => d.title).join('; ');
+  const chunks = await searchSessionChunks(projectId, query, 20, docIds).catch(() => [] as any[]);
+  const evidence = chunks.map((c: any) => c.text).join('\n\n').slice(0, 12_000);
+  const titles = enabledDocs.slice(0, 15).map(d => `- ${d.title}`).join('\n');
+
+  const sys = `You are building a reusable "skill" — a custom slash command for a research assistant. A skill is a system prompt that captures domain knowledge distilled from the user's research, so future chats can apply that knowledge instantly.
+
+Given the workspace research below, produce STRICT JSON:
+{
+  "cmd": "/<short-kebab-name>",
+  "desc": "<one-line description of what the skill does>",
+  "systemPrompt": "<the skill itself — see requirements>"
+}
+
+systemPrompt requirements:
+- Start with a role/persona sentence grounded in this domain.
+- Include a "Key knowledge:" section with the most important facts, terminology, numbers, and findings from the research (bullet list, specific — not generic).
+- Include a "When answering:" section with 3-5 behavioral rules (structure, what to check, common pitfalls in this domain).
+- 150-400 words. Self-contained: it will run in future chats WITHOUT the research documents attached.
+- cmd: 2-24 chars, lowercase letters/digits/hyphens only, memorable.
+
+Return ONLY the JSON.`;
+
+  const user = `${instruction ? `USER'S SKILL REQUEST: ${instruction}\n\n` : ''}WORKSPACE DOCUMENTS:\n${titles}\n\nRESEARCH EXCERPTS:\n${evidence || '(no indexed excerpts — use document titles)'}`;
+
+  const res = await chatWithCustom(sys, [], user);
+  const start = res.indexOf('{');
+  const end = res.lastIndexOf('}');
+  if (start === -1 || end === -1) throw new Error('Skill generation failed — the model returned no JSON');
+  const json = JSON.parse(res.slice(start, end + 1));
+
+  let cmd = String(json.cmd || '').trim().toLowerCase();
+  if (!cmd.startsWith('/')) cmd = '/' + cmd;
+  cmd = cmd.replace(/[^a-z0-9/-]/g, '-').replace(/-{2,}/g, '-');
+  const desc = String(json.desc || '').trim().slice(0, 100) || 'Custom skill';
+  const systemPrompt = String(json.systemPrompt || '').trim();
+  if (!SKILL_CMD_SHAPE.test(cmd) || systemPrompt.length < 50) {
+    throw new Error('Skill generation failed — malformed command or empty prompt');
+  }
+
+  // Persist into customSkills (same store Settings manages) with collision-safe naming
+  const s = await chrome.storage.local.get(['customSkills']);
+  const skills: Array<{ cmd: string; desc: string; systemPrompt: string }> =
+    Array.isArray(s.customSkills) ? s.customSkills : [];
+  const taken = new Set(skills.map(sk => sk.cmd));
+  const BUILTINS = new Set(['/page', '/research', '/deepresearch', '/analyze', '/recall', '/compare', '/timeline', '/challenge', '/connect', '/extract', '/brief', '/clear', '/help', '/create-skill']);
+  let finalCmd = cmd;
+  let n = 2;
+  while (taken.has(finalCmd) || BUILTINS.has(finalCmd)) finalCmd = `${cmd}-${n++}`;
+  skills.push({ cmd: finalCmd, desc, systemPrompt });
+  await chrome.storage.local.set({ customSkills: skills });
+
+  // Also save the skill as a browsable document (portable, exportable) —
+  // enabled:false so the prompt text never enters chat retrieval.
+  const skillBody = `${desc}\n\n## Command\n\n\`${finalCmd} <your question>\`\n\n## System Prompt\n\n${systemPrompt}\n`;
+  const content = buildFrontmatter({
+    title: `Skill: ${finalCmd}`,
+    type: 'skill',
+    wordCount: skillBody.split(/\s+/).filter(Boolean).length,
+    tags: ['skill']
+  }) + skillBody;
+  try {
+    const { id } = await saveDocument({
+      title: `Skill: ${finalCmd}`,
+      url: '',
+      content,
+      capturedAt: new Date().toISOString(),
+      favicon: '',
+      wordCount: skillBody.split(/\s+/).filter(Boolean).length,
+      syncedToDrive: false,
+      enabled: false
+    }, []);
+    await linkDocumentToProject(projectId, id);
+  } catch (e) {
+    console.warn('Skill doc save failed (skill itself is registered):', e);
+  }
+
+  return { cmd: finalCmd, desc, systemPrompt };
+}
+
 async function handleDeepResearch(request: Record<string, unknown>): Promise<Record<string, unknown>> {
   const { projectId, topic, chatId } = request;
   const mode = (request.mode as 'quick' | 'deep') || 'quick';
   if (!projectId || !topic) throw new Error('projectId and topic are required');
+
+  // One research run at a time: the job checkpoint is a singleton, and a
+  // second run would stomp the first one's resume state. Chat stays usable
+  // during a run — this only guards research-on-research.
+  const runningJob = await getResearchJob().catch(() => null);
+  if ((runningJob as any)?.active || abortControllers.has(projectId as string)) {
+    throw new Error('A research run is already active. Wait for it to finish or press Stop first.');
+  }
 
   const chatFn = (s: string, u: string) => chatWithCustom(s, [], u);
 

@@ -35,6 +35,22 @@ export interface ChatMessage {
   /** True while the assistant message is being streamed. Render as plain
    *  text mid-stream; swap to full markdown when DONE flips this to false. */
   streaming?: boolean;
+  /** Research plan card — rendered instead of the text body when present. */
+  plan?: ResearchPlan;
+}
+
+/**
+ * In-chat research plan. Lives in UI state only (never persisted): the chat
+ * history keeps the /research command and the final report; the plan card is
+ * the interactive negotiation in between. While status is 'draft', normal
+ * chat input refines the plan instead of starting a chat turn.
+ */
+export interface ResearchPlan {
+  topic: string;
+  effectiveTopic: string;
+  subQuestions: string[];
+  mode: 'quick' | 'deep';
+  status: 'loading' | 'draft' | 'refining' | 'started' | 'cancelled';
 }
 
 export interface ResolvedCitation {

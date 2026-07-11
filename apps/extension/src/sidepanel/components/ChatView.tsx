@@ -3,8 +3,8 @@ import ReactMarkdown, { defaultUrlTransform } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import remarkMath from 'remark-math';
 import rehypeKatex from 'rehype-katex';
-import { LocalDocument, ChatMessage, ResolvedCitation } from '../types';
-import { Send, StopCircle, Sparkles, ChevronDown, ChevronUp, Loader2 } from 'lucide-react';
+import { LocalDocument, ChatMessage, ResearchPlan, ResolvedCitation } from '../types';
+import { Send, StopCircle, Sparkles, ChevronDown, ChevronUp, Loader2, Microscope, Search } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { paletteEntries, SlashCommand } from '../../lib/commands';
 
@@ -37,7 +37,114 @@ interface ChatViewProps {
 
   /** Whether this tab is currently visible — used to scroll to bottom on tab switch. */
   isActive?: boolean;
+
+  /** Research plan card actions. */
+  onStartPlan?: (msgId: string, plan: ResearchPlan) => void;
+  onCancelPlan?: (msgId: string) => void;
 }
+
+// ─────────────────────────────────────────────
+// Research plan card — the plan lives IN the chat.
+// Draft plans are refined by simply typing in the chat input.
+// ─────────────────────────────────────────────
+
+interface PlanCardProps {
+  msgId: string;
+  plan: ResearchPlan;
+  onStart?: (msgId: string, plan: ResearchPlan) => void;
+  onCancel?: (msgId: string) => void;
+}
+
+const PlanCard: React.FC<PlanCardProps> = ({ msgId, plan, onStart, onCancel }) => {
+  const Icon = plan.mode === 'deep' ? Microscope : Search;
+  const modeName = plan.mode === 'deep' ? 'Deep Research' : 'Research';
+  const isPending = plan.status === 'draft' || plan.status === 'refining';
+  const isBusy = plan.status === 'loading' || plan.status === 'refining';
+
+  return (
+    <div className={`w-full rounded-lg border-2 shadow-card overflow-hidden transition-colors ${
+      plan.status === 'cancelled' ? 'border-border/60 opacity-60' :
+      plan.status === 'started' ? 'border-primary/40' : 'border-primary/60'
+    }`}>
+      {/* Header strip */}
+      <div className="flex items-center gap-2 px-3 py-2 bg-primary/10 border-b border-primary/20">
+        <Icon size={13} className="text-primary shrink-0" aria-hidden="true" />
+        <span className="text-[10px] font-bold font-mono uppercase tracking-widest text-primary flex-1">
+          {modeName} Plan
+        </span>
+        <span className={`text-[10px] font-bold font-mono uppercase tracking-widest px-1.5 py-0.5 rounded ${
+          plan.status === 'started' ? 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-400' :
+          plan.status === 'cancelled' ? 'bg-muted text-muted-foreground' :
+          isBusy ? 'bg-primary/15 text-primary animate-pulse' :
+          'bg-amber-500/15 text-amber-600 dark:text-amber-400'
+        }`}>
+          {plan.status === 'started' ? 'Running' :
+           plan.status === 'cancelled' ? 'Cancelled' :
+           plan.status === 'loading' ? 'Planning…' :
+           plan.status === 'refining' ? 'Revising…' : 'Draft'}
+        </span>
+      </div>
+
+      <div className="p-3 space-y-2.5 bg-card">
+        {plan.status === 'loading' ? (
+          <div className="flex items-center gap-2 text-xs text-muted-foreground py-2 font-mono">
+            <Sparkles size={12} className="animate-pulse text-primary" aria-hidden="true" />
+            Resolving topic &amp; drafting sub-questions…
+          </div>
+        ) : (
+          <>
+            <div>
+              <div className="text-[10px] font-mono font-bold uppercase tracking-widest text-muted-foreground mb-1">Topic</div>
+              <div className="text-sm font-mono text-foreground leading-snug">{plan.effectiveTopic}</div>
+              {plan.effectiveTopic !== plan.topic && (
+                <div className="text-[10px] text-muted-foreground mt-0.5 font-mono">from: "{plan.topic}"</div>
+              )}
+            </div>
+
+            {plan.subQuestions.length > 0 && (
+              <div>
+                <div className="text-[10px] font-mono font-bold uppercase tracking-widest text-muted-foreground mb-1">Sub-questions</div>
+                <ol className="space-y-1">
+                  {plan.subQuestions.map((q, i) => (
+                    <li key={i} className="text-xs font-mono text-foreground flex gap-2 leading-snug">
+                      <span className="text-primary font-bold shrink-0 w-3 text-right">{i + 1}</span>
+                      <span>{q}</span>
+                    </li>
+                  ))}
+                </ol>
+              </div>
+            )}
+
+            {isPending && (
+              <>
+                <div className="text-[10px] font-mono text-muted-foreground border-t border-border/60 pt-2">
+                  💬 Type below to change the plan — "drop question 2", "focus on X instead" — or start it.
+                </div>
+                <div className="flex gap-2">
+                  <Button
+                    className="flex-1 h-8 text-[10px] font-bold font-mono uppercase tracking-widest"
+                    disabled={isBusy}
+                    onClick={() => onStart?.(msgId, plan)}
+                  >
+                    {plan.mode === 'deep' ? 'Start Deep Research' : 'Start Research'}
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    className="h-8 text-[10px] font-mono border-2 border-border uppercase tracking-widest"
+                    disabled={isBusy}
+                    onClick={() => onCancel?.(msgId)}
+                  >
+                    Cancel
+                  </Button>
+                </div>
+              </>
+            )}
+          </>
+        )}
+      </div>
+    </div>
+  );
+};
 
 // ─────────────────────────────────────────────
 // Collapsible long message wrapper
@@ -321,7 +428,9 @@ export const ChatView: React.FC<ChatViewProps> = ({
   scrollPosRef,
   scrollToBottomRef,
   customCommands = [],
-  isActive = false
+  isActive = false,
+  onStartPlan,
+  onCancelPlan
 }) => {
   const msgEnd = useRef<HTMLDivElement>(null);
   const scrollBox = useRef<HTMLDivElement>(null);
@@ -362,9 +471,9 @@ export const ChatView: React.FC<ChatViewProps> = ({
     if (restoredScroll.current) { restoredScroll.current = false; return; }
     // F4: smooth-scroll animations contend with layout during streaming.
     // Use instant scroll while tokens are still arriving; smooth when idle.
-    const behavior: ScrollBehavior = generating || researching ? 'auto' : 'smooth';
+    const behavior: ScrollBehavior = generating[activeChatId] || researching[activeProjectId] ? 'auto' : 'smooth';
     msgEnd.current?.scrollIntoView({ behavior });
-  }, [messages, generating, researching]);
+  }, [messages, generating, researching, activeChatId, activeProjectId]);
 
 
 
@@ -380,6 +489,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
   };
 
   const isEmpty = messages.length === 0 || (messages.length === 1 && messages[0].id === 'welcome');
+  const hasDraftPlan = messages.some(m => m.plan && (m.plan.status === 'draft' || m.plan.status === 'refining'));
 
   return (
     <div className="flex-1 flex flex-col h-full bg-background overflow-hidden relative">
@@ -435,6 +545,14 @@ export const ChatView: React.FC<ChatViewProps> = ({
       >
         {/* Command hint card — shown in empty state to surface slash commands */}
         {isEmpty && (
+          <div className="flex flex-col items-center gap-1 pt-6 pb-2 text-center">
+            <div className="text-sm font-bold font-mono uppercase tracking-widest text-foreground">Ask your treasure trove</div>
+            <div className="text-xs font-mono text-muted-foreground max-w-[260px]">
+              Everything you've collected is searchable. Answers cite their sources.
+            </div>
+          </div>
+        )}
+        {isEmpty && (
           <div className="rounded-lg border border-border bg-card shadow-card p-4 text-xs font-mono">
             <div className="font-bold uppercase tracking-widest text-muted-foreground mb-2">Start here</div>
             <div className="space-y-1">
@@ -442,6 +560,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
                 { cmd: '/research', desc: 'Search the web, get a cited report' },
                 { cmd: '/deepresearch', desc: 'Deeper: web + papers + news, cross-checked' },
                 { cmd: '/analyze', desc: 'Summarize everything in this workspace' },
+                { cmd: '/create-skill', desc: 'Turn your findings into a reusable command' },
               ].map(({ cmd, desc }) => (
                 <button
                   key={cmd}
@@ -464,7 +583,13 @@ export const ChatView: React.FC<ChatViewProps> = ({
           </div>
         )}
 
-        {messages.map(m => (
+        {messages.map(m => m.plan ? (
+          <div key={m.id} className="flex justify-start">
+            <div className="w-full max-w-[95%]">
+              <PlanCard msgId={m.id} plan={m.plan} onStart={onStartPlan} onCancel={onCancelPlan} />
+            </div>
+          </div>
+        ) : (
           <div key={m.id} className={`flex ${m.role === 'user' ? 'justify-end' : 'justify-start'}`}>
             <div
               className={`max-w-[85%] rounded-lg border px-4 py-2.5 text-sm shadow-card ${
@@ -503,14 +628,35 @@ export const ChatView: React.FC<ChatViewProps> = ({
         )}
         {researching[activeProjectId] && (
           <div className="flex justify-start">
-            <div className="max-w-[85%] rounded-lg rounded-bl-sm border bg-card border-border text-card-foreground px-4 py-3 text-sm flex items-center gap-3 shadow-card">
-              <Loader2 size={14} className="animate-spin text-primary shrink-0" />
-              <div className="flex flex-col gap-0.5 min-w-0">
-                <span className="text-[10px] text-muted-foreground font-bold font-mono uppercase tracking-widest">Researching...</span>
-                {(researchLogs[activeProjectId] || []).length > 0 && (
-                  <span className="text-[10px] text-muted-foreground font-mono truncate max-w-[240px]">
-                    {researchLogs[activeProjectId][researchLogs[activeProjectId].length - 1]}
-                  </span>
+            <div className="w-full max-w-[95%] rounded-lg border-2 border-primary/40 bg-card text-card-foreground shadow-card overflow-hidden">
+              <div className="flex items-center gap-2 px-3 py-2 bg-primary/10 border-b border-primary/20">
+                <Loader2 size={13} className="animate-spin text-primary shrink-0" aria-hidden="true" />
+                <span className="text-[10px] text-primary font-bold font-mono uppercase tracking-widest flex-1">
+                  Researching — chat stays open
+                </span>
+                <span className="text-[10px] font-mono text-muted-foreground">
+                  {(researchLogs[activeProjectId] || []).length} steps
+                </span>
+                <button
+                  type="button"
+                  onClick={cancelTask}
+                  className="text-[10px] font-bold font-mono uppercase tracking-widest text-destructive border border-destructive/40 rounded px-1.5 py-0.5 hover:bg-destructive hover:text-destructive-foreground transition-colors"
+                  aria-label="Stop research"
+                >
+                  Stop
+                </button>
+              </div>
+              <div className="px-3 py-2 space-y-0.5" aria-live="polite">
+                {(researchLogs[activeProjectId] || []).slice(-3).map((line, i, arr) => (
+                  <div
+                    key={`${line}-${i}`}
+                    className={`text-[10px] font-mono truncate ${i === arr.length - 1 ? 'text-foreground' : 'text-muted-foreground/70'}`}
+                  >
+                    {line}
+                  </div>
+                ))}
+                {(researchLogs[activeProjectId] || []).length === 0 && (
+                  <div className="text-[10px] font-mono text-muted-foreground">Warming up…</div>
                 )}
               </div>
             </div>
@@ -551,7 +697,9 @@ export const ChatView: React.FC<ChatViewProps> = ({
             id="chat-input"
             rows={1}
             className="flex w-full max-h-40 resize-none bg-transparent px-3 py-2.5 text-sm leading-relaxed placeholder:text-muted-foreground focus:outline-none disabled:cursor-not-allowed disabled:opacity-50 font-mono no-scrollbar"
-            placeholder="Ask a question or type / for commands… (Shift+Enter for a new line)"
+            placeholder={hasDraftPlan
+              ? 'Refine the plan, or type "start"…'
+              : 'Ask a question, or / for commands…'}
             value={input}
             onChange={e => {
               setInput(e.target.value);
@@ -569,12 +717,12 @@ export const ChatView: React.FC<ChatViewProps> = ({
                 requestAnimationFrame(() => { el.style.height = 'auto'; });
               }
             }}
-            disabled={generating[activeChatId] || researching[activeProjectId]}
+            disabled={generating[activeChatId]}
             autoComplete="off"
             aria-label="Chat input"
           />
           <div className="pr-1 flex shrink-0">
-            {generating[activeChatId] || researching[activeProjectId] ? (
+            {generating[activeChatId] ? (
               <Button
                 variant="ghost"
                 size="icon"

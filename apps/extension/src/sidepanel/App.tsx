@@ -1,7 +1,7 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef, useCallback, Fragment } from 'react';
 import { get, set } from 'idb-keyval';
-import { Edit2, Sparkles, Trash2, FileText } from 'lucide-react';
-import { LocalDocument, Project, Chat, ChatMessage, ResolvedCitation, TabInfo, View } from './types';
+import { Edit2, Trash2, FileText, Library, MessageSquare, SlidersHorizontal } from 'lucide-react';
+import { LocalDocument, Project, Chat, ChatMessage, ResearchPlan, ResolvedCitation, TabInfo, View } from './types';
 import { LoreView } from './components/LoreView';
 import { MagpieMark } from './components/BrandMark';
 
@@ -195,14 +195,17 @@ export default function App() {
     }
   }, []);
 
-  // Pre-research confirmation modal state
-  const [researchConfirm, setResearchConfirm] = useState<{
-    topic: string;
-    effectiveTopic: string;
-    subQuestions: string[];
-    mode: 'quick' | 'deep';
-    loading: boolean;
-  } | null>(null);
+  // Update one message in a chat in place (used by the in-chat plan card)
+  const updateMessage = useCallback((chatId: string, msgId: string, updater: (m: ChatMessage) => ChatMessage) => {
+    setMessages(prev => {
+      const list = prev[chatId] || [];
+      const idx = list.findIndex(x => x.id === msgId);
+      if (idx === -1) return prev;
+      const copy = [...list];
+      copy[idx] = updater(copy[idx]);
+      return { ...prev, [chatId]: copy };
+    });
+  }, []);
 
   useEffect(() => {
     refreshTabInfo();
@@ -565,10 +568,18 @@ export default function App() {
   const loadChatHistory = async (chatId: string) => {
     const res = await msg('GET_CHAT_HISTORY', { chatId });
     if (res.success && Array.isArray(res.messages)) {
-      setMessages(prev => ({
-        ...prev,
-        [chatId]: (res.messages as any[]).length > 0 ? (res.messages as ChatMessage[]) : [{ id: 'welcome', role: 'system', text: 'Capture some web pages, then ask questions. Answers will cite your sources.' }]
-      }));
+      setMessages(prev => {
+        // Plan cards live only in UI state — re-append pending ones so a
+        // history reload (chat switch, research completion) doesn't eat a
+        // draft the user is still negotiating.
+        const pendingPlans = (prev[chatId] || []).filter(
+          m => m.plan && (m.plan.status === 'draft' || m.plan.status === 'refining' || m.plan.status === 'loading')
+        );
+        const hist = (res.messages as any[]).length > 0
+          ? (res.messages as ChatMessage[])
+          : pendingPlans.length > 0 ? [] : [{ id: 'welcome', role: 'system' as const, text: 'Capture some web pages, then ask questions. Answers will cite your sources.' }];
+        return { ...prev, [chatId]: [...hist, ...pendingPlans] };
+      });
     }
   };
 
@@ -1007,7 +1018,26 @@ export default function App() {
 
   const send = async () => {
     const text = input.trim();
-    if (!text || generating[activeChatId] || researching[activeProjectId]) return;
+    // Research running does NOT block chat — only an in-flight generation in
+    // THIS chat does. Other chats (and this one) stay usable during research.
+    if (!text || generating[activeChatId]) return;
+
+    // ── Pending research plan: chat input drives the plan ──
+    const draftPlanMsg = findDraftPlan(activeChatId);
+    if (draftPlanMsg?.plan && !text.startsWith('/')) {
+      const plan = draftPlanMsg.plan;
+      if (plan.status === 'loading' || plan.status === 'refining') {
+        showToast('error', 'Plan is still updating — one moment');
+        return;
+      }
+      setInput('');
+      if (/^(start|go|run|yes|confirm|start research|looks good|lgtm)[.!]?$/i.test(text)) {
+        await executeDeepResearch(draftPlanMsg.id, plan);
+      } else {
+        await refineResearchPlan(draftPlanMsg, text);
+      }
+      return;
+    }
 
     // /page <question> — one-shot: include the current page for this message
     // only, regardless of the toggle
@@ -1064,6 +1094,30 @@ export default function App() {
       }
       setInput('');
       await startDeepResearchCommand(topic, 'quick');
+      return;
+    }
+
+    // /create-skill [focus] — distill the workspace's research into a
+    // reusable custom slash command (saved to Settings → Custom Commands)
+    if (text.toLowerCase() === '/create-skill' || text.toLowerCase().startsWith('/create-skill ')) {
+      const instruction = text.slice('/create-skill'.length).trim();
+      setInput('');
+      const currentChatId = activeChatId;
+      setMessages(prev => ({
+        ...prev,
+        [currentChatId]: [...(prev[currentChatId] || []), { id: Date.now().toString(), role: 'user', text }]
+      }));
+      setGenerating(prev => ({ ...prev, [currentChatId]: true }));
+      const res = await msg('CREATE_SKILL', { projectId: activeProjectId, chatId: currentChatId, instruction });
+      setGenerating(prev => ({ ...prev, [currentChatId]: false }));
+      const body = res.success !== false && res.cmd
+        ? `**Skill created: \`${res.cmd}\`**\n\n${res.desc}\n\nUse it right away — type \`${res.cmd} <your question>\` in any chat. It's saved under Config → Custom Commands (edit or delete there), and a copy lives in Lore as **Skill: ${res.cmd}**.\n\n<details><summary>What the skill knows</summary>\n\n${res.systemPrompt}\n\n</details>`
+        : `Skill creation failed: ${res.error || 'unknown error'}`;
+      setMessages(prev => ({
+        ...prev,
+        [currentChatId]: [...(prev[currentChatId] || []), { id: `${Date.now() + 1}`, role: 'system', text: body }]
+      }));
+      if (res.success !== false && res.cmd) loadDocuments(activeProjectId);
       return;
     }
 
@@ -1189,66 +1243,126 @@ export default function App() {
     }));
   };
 
+  /**
+   * /research and /deepresearch: post the command + a live plan card into the
+   * chat. The user refines the plan by talking to it (normal input while a
+   * draft is pending), then starts it from the card.
+   */
   const startDeepResearchCommand = async (topic: string, mode: 'quick' | 'deep' = 'quick') => {
     if (!activeProjectId || !activeChatId) return;
+    const currentChatId = activeChatId;
+    const planMsgId = `plan-${Date.now()}`;
 
-    // Show loading state immediately
-    setResearchConfirm({ topic, effectiveTopic: topic, subQuestions: [], mode, loading: true });
+    setMessages(prev => ({
+      ...prev,
+      [currentChatId]: [...(prev[currentChatId] || []),
+        { id: Date.now().toString(), role: 'user', text: `${mode === 'deep' ? '/deepresearch' : '/research'} ${topic}` },
+        {
+          id: planMsgId, role: 'assistant', text: '',
+          plan: { topic, effectiveTopic: topic, subQuestions: [], mode, status: 'loading' }
+        }
+      ]
+    }));
 
-    // Fetch preview in background — update modal when ready
-    msg('PREVIEW_DEEP_RESEARCH', {
-      projectId: activeProjectId,
-      chatId: activeChatId,
-      topic,
-      mode
-    }).then((preview) => {
-      setResearchConfirm(prev => prev ? {
-        ...prev,
-        effectiveTopic: (preview.effectiveTopic as string) || topic,
-        subQuestions: (preview.subQuestions as string[]) || [],
-        loading: false
-      } : null);
-    }).catch(() => {
-      // Preview failed — just show the raw topic with no sub-questions
-      setResearchConfirm(prev => prev ? { ...prev, loading: false } : null);
-    });
+    try {
+      const preview = await msg('PREVIEW_DEEP_RESEARCH', {
+        projectId: activeProjectId, chatId: currentChatId, topic, mode
+      });
+      updateMessage(currentChatId, planMsgId, m => ({
+        ...m,
+        plan: {
+          ...m.plan!,
+          effectiveTopic: (preview.effectiveTopic as string) || topic,
+          subQuestions: (preview.subQuestions as string[]) || [],
+          status: 'draft'
+        }
+      }));
+    } catch {
+      // Preview failed — show the raw topic, still startable
+      updateMessage(currentChatId, planMsgId, m => ({ ...m, plan: { ...m.plan!, status: 'draft' } }));
+    }
   };
 
-  const executeDeepResearch = async (topic: string, effectiveTopic: string, _subQuestions: string[], mode: 'quick' | 'deep') => {
+  /** Find the pending (draft/refining) plan card in a chat, newest first. */
+  const findDraftPlan = (chatId: string): ChatMessage | undefined =>
+    [...(messages[chatId] || [])].reverse().find(m => m.plan && (m.plan.status === 'draft' || m.plan.status === 'refining' || m.plan.status === 'loading'));
+
+  /** Chat-driven plan refinement: user feedback → revised topic + questions. */
+  const refineResearchPlan = async (planMsg: ChatMessage, feedback: string) => {
+    const currentChatId = activeChatId;
+    const plan = planMsg.plan!;
+    setMessages(prev => ({
+      ...prev,
+      [currentChatId]: [...(prev[currentChatId] || []), { id: Date.now().toString(), role: 'user', text: feedback }]
+    }));
+    updateMessage(currentChatId, planMsg.id, m => ({ ...m, plan: { ...m.plan!, status: 'refining' } }));
+
+    const res = await msg('REFINE_RESEARCH_PLAN', {
+      effectiveTopic: plan.effectiveTopic,
+      subQuestions: plan.subQuestions,
+      feedback
+    });
+
+    if (res.success !== false && res.effectiveTopic) {
+      updateMessage(currentChatId, planMsg.id, m => ({
+        ...m,
+        plan: {
+          ...m.plan!,
+          effectiveTopic: res.effectiveTopic as string,
+          subQuestions: (res.subQuestions as string[]) || m.plan!.subQuestions,
+          status: 'draft'
+        }
+      }));
+    } else {
+      updateMessage(currentChatId, planMsg.id, m => ({ ...m, plan: { ...m.plan!, status: 'draft' } }));
+      setMessages(prev => ({
+        ...prev,
+        [currentChatId]: [...(prev[currentChatId] || []), {
+          id: `${Date.now() + 1}`, role: 'system',
+          text: `Couldn't apply that change (${res.error || 'no revision returned'}). The plan is unchanged — try rephrasing, or press Start.`
+        }]
+      }));
+    }
+  };
+
+  const cancelResearchPlan = (planMsgId: string) => {
+    updateMessage(activeChatId, planMsgId, m => ({ ...m, plan: { ...m.plan!, status: 'cancelled' } }));
+  };
+
+  const executeDeepResearch = async (planMsgId: string, plan: ResearchPlan) => {
     if (!activeProjectId || !activeChatId) return;
 
-    setResearchConfirm(null);
+    updateMessage(activeChatId, planMsgId, m => ({ ...m, plan: { ...m.plan!, status: 'started' } }));
     setResearching(prev => ({ ...prev, [activeProjectId]: true }));
     setResearchLogs(prev => ({ ...prev, [activeProjectId]: [] }));
 
     const currentChatId = activeChatId;
-    setMessages(prev => ({
-      ...prev,
-      [currentChatId]: [...(prev[currentChatId] || []), {
-        id: Date.now().toString(),
-        role: 'user',
-        text: `${mode === 'deep' ? '/deepresearch' : '/research'} ${topic}`
-      }]
-    }));
 
     const researchRes = await msg('START_DEEP_RESEARCH', {
       projectId: activeProjectId,
       chatId: currentChatId,
-      topic: effectiveTopic,
-      mode
+      topic: plan.effectiveTopic,
+      mode: plan.mode
     });
 
-    // Note: setResearching(false) handled by DEEP_RESEARCH_DONE handler
+    if (!researchRes.success) {
+      // Failed to start or failed mid-run — DEEP_RESEARCH_DONE won't fire
+      setResearching(prev => ({ ...prev, [activeProjectId]: false }));
+      showToast('error', `Research failed: ${researchRes.error}`);
+      setMessages(prev => ({
+        ...prev,
+        [currentChatId]: [...(prev[currentChatId] || []), {
+          id: `${Date.now()}`, role: 'system', text: `Research failed: ${researchRes.error}`
+        }]
+      }));
+      return;
+    }
+
+    // setResearching(false) handled by DEEP_RESEARCH_DONE handler
     setResearchLogs(prev => ({
       ...prev,
       [activeProjectId]: [...(prev[activeProjectId] || []), '[SUCCESS] Deep research complete — results added to chat.']
     }));
-
-    if (!researchRes.success) {
-      showToast('error', `Research failed: ${researchRes.error}`);
-      return;
-    }
-
     showToast('success', 'Deep research complete!');
     loadDocuments(activeProjectId);
     const docsRes = await msg('LIST_DOCUMENTS', { projectId: activeProjectId });
@@ -1441,6 +1555,8 @@ export default function App() {
               scrollPosRef={chatScrollTopRef}
               scrollToBottomRef={chatScrollToBottomRef}
               customCommands={customCommands}
+              onStartPlan={(msgId, plan) => executeDeepResearch(msgId, plan)}
+              onCancelPlan={cancelResearchPlan}
 
               onOpenDocument={async (docId, anchorId) => {
                 // If doc is not in current lists, fetch it to globalDocuments so DocumentView can display it
@@ -1508,96 +1624,30 @@ export default function App() {
         </div>
       </main>
 
-      {/* ── Pre-Research Confirmation Modal ── */}
-      {researchConfirm && (
-        <div className="absolute inset-0 z-50 flex items-end justify-center bg-background/80 backdrop-blur-sm p-4">
-          <div className="w-full bg-card border-2 border-border rounded-lg shadow-card p-4 flex flex-col gap-3 max-h-[80vh] overflow-y-auto">
-            <div className="flex items-center justify-between">
-              <span className="text-[10px] font-bold font-mono uppercase tracking-widest text-primary">
-                {researchConfirm.mode === 'deep' ? '🔬 Deep Research' : '🔍 Research'} — Confirm Plan
-              </span>
-              <button onClick={() => setResearchConfirm(null)} className="text-muted-foreground hover:text-foreground text-xs font-mono">✕</button>
-            </div>
-
-            {researchConfirm.loading ? (
-              <div className="flex items-center gap-2 text-xs text-muted-foreground py-4 justify-center">
-                <Sparkles size={12} className="animate-pulse text-primary" />
-                <span>Analyzing topic & generating research plan…</span>
-              </div>
-            ) : (
-              <>
-                <div>
-                  <div className="text-[10px] font-mono font-bold uppercase tracking-widest text-muted-foreground mb-1">Research Topic</div>
-                  <div className="text-sm font-mono bg-background border border-border rounded px-3 py-2 text-foreground">
-                    {researchConfirm.effectiveTopic}
-                  </div>
-                  {researchConfirm.effectiveTopic !== researchConfirm.topic && (
-                    <div className="text-[10px] text-muted-foreground mt-1 font-mono">Resolved from: "{researchConfirm.topic}"</div>
-                  )}
-                </div>
-
-                {researchConfirm.subQuestions.length > 0 && (
-                  <div>
-                    <div className="text-[10px] font-mono font-bold uppercase tracking-widest text-muted-foreground mb-1">Research Sub-Questions</div>
-                    <div className="space-y-1">
-                      {researchConfirm.subQuestions.map((q, i) => (
-                        <div key={i} className="text-xs font-mono bg-background border border-border rounded px-3 py-1.5 text-foreground flex gap-2">
-                          <span className="text-primary font-bold shrink-0">{i + 1}.</span>
-                          <span>{q}</span>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                )}
-
-                <div className="flex gap-2 pt-1">
-                  <Button
-                    className="flex-1 h-9 text-xs font-bold font-mono uppercase tracking-widest"
-                    onClick={() => executeDeepResearch(
-                      researchConfirm.topic,
-                      researchConfirm.effectiveTopic,
-                      researchConfirm.subQuestions,
-                      researchConfirm.mode
-                    )}
-                  >
-                    Start Research
-                  </Button>
-                  <Button
-                    variant="ghost"
-                    className="h-9 text-xs font-mono border-2 border-border"
-                    onClick={() => setResearchConfirm(null)}
-                  >
-                    Cancel
-                  </Button>
-                </div>
-              </>
-            )}
-          </div>
-        </div>
-      )}
-
       {/* ── Bottom Navigation Bar ── */}
       <nav className="flex items-center justify-between px-3 py-2.5 bg-card border-t border-border shrink-0">
-        <button 
-          className={`flex-1 text-center py-2 text-xs font-bold font-mono tracking-widest uppercase transition-colors rounded-md border-2 ${view === 'lore' ? 'border-primary/25 bg-primary/10 text-primary' : 'border-transparent text-muted-foreground hover:bg-accent hover:text-foreground'}`}
-          onClick={() => setView('lore')}
-        >
-          Lore
-        </button>
-        <div className="w-px h-4 bg-border mx-2"></div>
-        <button 
-          className={`flex-1 text-center py-2 text-xs font-bold font-mono tracking-widest uppercase transition-colors rounded-md border-2 ${view === 'chat' ? 'border-primary/25 bg-primary/10 text-primary' : 'border-transparent text-muted-foreground hover:bg-accent hover:text-foreground'}`}
-          onClick={() => { chatScrollTopRef.current = null; setView('chat'); chatScrollToBottomRef.current?.(); }}
-        >
-          Chat
-        </button>
-        <div className="w-px h-4 bg-border mx-2"></div>
-        <button 
-          className={`flex-1 text-center py-2 text-xs font-bold font-mono tracking-widest uppercase transition-colors rounded-md border-2 ${view === 'settings' ? 'border-primary/25 bg-primary/10 text-primary' : 'border-transparent text-muted-foreground hover:bg-accent hover:text-foreground'}`}
-          onClick={() => setView('settings')}
-        >
-          Config
-        </button>
+        {([
+          { key: 'lore' as View, label: 'Lore', Icon: Library, onClick: () => setView('lore') },
+          { key: 'chat' as View, label: 'Chat', Icon: MessageSquare, onClick: () => { chatScrollTopRef.current = null; setView('chat'); chatScrollToBottomRef.current?.(); } },
+          { key: 'settings' as View, label: 'Config', Icon: SlidersHorizontal, onClick: () => setView('settings') },
+        ]).map(({ key, label, Icon, onClick }, i) => (
+          <Fragment key={key}>
+            {i > 0 && <div className="w-px h-4 bg-border mx-2" />}
+            <button
+              className={`flex-1 flex items-center justify-center gap-1.5 py-2 text-xs font-bold font-mono tracking-widest uppercase transition-colors rounded-md border-2 relative ${
+                view === key ? 'border-primary/25 bg-primary/10 text-primary' : 'border-transparent text-muted-foreground hover:bg-accent hover:text-foreground'
+              }`}
+              onClick={onClick}
+              aria-current={view === key ? 'page' : undefined}
+            >
+              <Icon size={13} aria-hidden="true" />
+              {label}
+              {key === 'chat' && researching[activeProjectId] && (
+                <span className="absolute top-1 right-2 w-1.5 h-1.5 rounded-full bg-primary animate-pulse" title="Research running" aria-label="Research running" />
+              )}
+            </button>
+          </Fragment>
+        ))}
       </nav>
     </div>
   );

@@ -13,6 +13,7 @@ export type DocKind =
   | 'image'
   | 'deep-research'
   | 'research-sources'
+  | 'skill'
   | 'academic';
 
 export interface FrontmatterFields {
