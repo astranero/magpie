@@ -1021,7 +1021,7 @@ async function handleCancelTask(request: Record<string, unknown>): Promise<Recor
 // ─────────────────────────────────────────────
 
 /** Build the RAG system prompt + formatted history for a chat turn. */
-async function buildChatRequest(chatId: string, projectId: string, prompt: string, signal: AbortSignal, pageContext?: PageContext | null): Promise<{ systemPrompt: string; formattedHistory: Array<{ role: string; content: string }> }> {
+async function buildChatRequest(chatId: string, projectId: string, prompt: string, signal: AbortSignal, pageContext?: PageContext | null): Promise<{ systemPrompt: string; formattedHistory: Array<{ role: string; content: string }>; linkedPages: Array<{ title: string; url: string }> }> {
   // Get all documents for this project
   const allDocs = await listDocuments(projectId);
   const enabledDocs = allDocs.filter(d => d.enabled !== false);
@@ -1109,6 +1109,7 @@ async function buildChatRequest(chatId: string, projectId: string, prompt: strin
   // Ephemeral page context: the tab the user is looking at right now.
   // Deliberately fenced off from library sources — it has no citation
   // anchors and is never persisted.
+  const linkedPages: Array<{ title: string; url: string }> = [];
   if (pageContext) {
     // Long pages switch to per-question retrieval (see selectPageMarkdown)
     const md = await selectPageMarkdown(pageContext, prompt);
@@ -1129,7 +1130,8 @@ async function buildChatRequest(chatId: string, projectId: string, prompt: strin
           `\n\n--- LINKED PAGE (followed from the current page because it looked relevant to the question; NOT saved) ---\n` +
           `Title: ${l.title}\nURL: ${l.url}\n\n${lmd}\n` +
           `--- END LINKED PAGE ---\n` +
-          `Attribute claims from it in plain text, e.g. "according to ${l.title} (linked from the page)". No [anchor] citations.`;
+          `Attribute claims from it in plain text — you may link it inline as [${l.title}](${l.url}). No [anchor] citations.`;
+        linkedPages.push({ title: l.title, url: l.url });
       }
       if (linked.length > 0) {
         console.log(`[LINK-EXPAND] Inlined ${linked.length} linked page(s): ${linked.map(l => l.url).join(', ')}`);
@@ -1139,7 +1141,21 @@ async function buildChatRequest(chatId: string, projectId: string, prompt: strin
     }
   }
 
-  return { systemPrompt, formattedHistory };
+  return { systemPrompt, formattedHistory, linkedPages };
+}
+
+/**
+ * Clickable trail of the links the expansion step actually followed —
+ * appended to the reply so the user can open them (in-panel preview) even
+ * when the model doesn't cite them inline. Part of the saved message, so it
+ * survives reloads.
+ */
+function linkedPagesFooter(pages: Array<{ title: string; url: string }>): string {
+  if (pages.length === 0) return '';
+  const items = pages
+    .map(p => `[${(p.title || p.url).replace(/[\[\]]/g, '')}](${p.url.replace(/\(/g, '%28').replace(/\)/g, '%29')})`)
+    .join(' · ');
+  return `\n\n---\n🔗 *Also read for this answer:* ${items}`;
 }
 
 // ─────────────────────────────────────────────
@@ -1255,7 +1271,7 @@ async function handleChat(request: Record<string, unknown>): Promise<Record<stri
 
   try {
     const pageCtx = request.includePageContext ? await getPageContext().catch(() => null) : null;
-    const { systemPrompt, formattedHistory } = await buildChatRequest(chatId, projectId, prompt, signal, pageCtx);
+    const { systemPrompt, formattedHistory, linkedPages } = await buildChatRequest(chatId, projectId, prompt, signal, pageCtx);
 
     // Persist the user message immediately so it survives errors/reloads
     await saveChatMessage({
@@ -1266,7 +1282,8 @@ async function handleChat(request: Record<string, unknown>): Promise<Record<stri
       provider: 'custom'
     });
 
-    const reply = await chatWithCustom(systemPrompt, formattedHistory, prompt, signal);
+    const reply = await chatWithCustom(systemPrompt, formattedHistory, prompt, signal)
+      + linkedPagesFooter(linkedPages);
 
     await saveChatMessage({
       chatId,
@@ -1321,7 +1338,7 @@ chrome.runtime.onConnect.addListener((port) => {
 
     try {
       const pageCtx = req.includePageContext ? await getPageContext().catch(() => null) : null;
-      let { systemPrompt, formattedHistory } = await buildChatRequest(chatId, projectId, prompt, localController.signal, pageCtx);
+      let { systemPrompt, formattedHistory, linkedPages } = await buildChatRequest(chatId, projectId, prompt, localController.signal, pageCtx);
 
       if (systemPromptOverride) {
         systemPrompt = systemPromptOverride + '\n\n' + systemPrompt;
@@ -1339,6 +1356,14 @@ chrome.runtime.onConnect.addListener((port) => {
         full += delta;
         safePost({ type: 'DELTA', text: delta });
       });
+
+      // Deterministic clickable trail of auto-followed links — streamed as a
+      // final delta so it renders live AND lands in the saved message.
+      const footer = linkedPagesFooter(linkedPages);
+      if (footer && full.trim()) {
+        full += footer;
+        safePost({ type: 'DELTA', text: footer });
+      }
 
       if (full.trim()) {
         await saveChatMessage({
