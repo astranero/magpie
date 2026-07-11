@@ -3,7 +3,7 @@
 > Chrome MV3 extension: local-first research knowledge base with
 > citation-grounded chat and multi-agent staged deep research.
 > Component detail lives in `docs/` (STORAGE, CAPTURE, RESEARCH-PIPELINE,
-> CITATIONS, MCP, SKILLS, TESTING).
+> CITATIONS, MCP, SKILLS, SECURITY, TESTING).
 
 ## Execution contexts
 
@@ -22,6 +22,8 @@ long-lived ports for chat streaming (`chat-stream`, also acts as SW
 keep-alive), `BroadcastChannel` for progress fan-out (imports, re-index,
 sync). Multi-MB payloads (PDFs) never cross the message boundary — the
 offscreen document fetches URLs itself (`OFFSCREEN_PARSE_PDF_URL`).
+Offscreen calls go through `lib/offscreen-client.ts` (retry, failure
+counting, forced recreation, health check) rather than raw `sendMessage`.
 
 ## Service worker layout
 
@@ -75,7 +77,12 @@ question ──▶ hybrid retrieval (Orama BM25 + vectors, in-memory per project
    stable anchor; the model may only cite anchors present in context;
    unresolvable anchors are dropped by the renderer.
 3. **The index only holds citable knowledge** — noise (nav, link farms,
-   number-soup tables, YAML frontmatter) is filtered at chunk time; research
-   source chunks are evicted after synthesis.
-4. **Human curates the library** — capture/import/recall are explicit acts;
-   nothing auto-saves into the knowledge base.
+   number-soup tables, YAML frontmatter) is filtered at chunk time; artifact
+   documents (`research-sources` lists, `skill` files) are saved
+   `enabled: false` with zero chunks so they can never surface in retrieval
+   or citations.
+4. **The user initiates every write** — capture, import, `/recall`, a
+   research run, `/create-skill`: all explicit acts. A research run saves
+   its sources as first-class documents (that's what makes citations
+   permanently resolvable), but only because the user started that run;
+   nothing enters the library from ambient browsing.
