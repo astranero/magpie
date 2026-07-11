@@ -1,0 +1,56 @@
+# Testing
+
+## Running
+
+```bash
+cd apps/extension
+npm test           # vitest — unit suites (src/**/__tests__)
+npm run build      # tsc + vite × 3 (background, sidepanel, content/inject)
+npm run test:e2e   # Playwright — loads dist/ into headless Chromium
+```
+
+CI (`.github/workflows/ci.yml`) runs all three on push/PR, workspace-aware.
+
+## Unit tests (~173)
+
+Pure-lib suites only, by policy: chunker, citations, content-cleaner,
+frontmatter (+parse), quality-gate, bibtex, paper-rank, rerank-gate,
+research-store, commands, mcp-client, doc-meta-index, reference-harvest,
+format, semaphore, deep-researcher pure helpers, scrape-fallback. No
+chrome-API mocking framework — worker/UI logic is covered by E2E instead.
+
+**The suite was audited, not just kept green** (`docs/TEST-AUDIT.md`):
+contract review per suite plus an 8-target mutation kill-matrix. Lessons
+encoded there: untestable placement produces tautological tests (extract
+the logic, then test it); redundant defensive patterns need per-pattern
+isolation tests; composite scoring formulas need property assertions.
+
+## E2E (Playwright, `e2e/`)
+
+Loads the built extension via `chromium.launchPersistentContext` with
+`--load-extension`; extension id read from the registered service worker.
+One worker, no parallelism (global extension state).
+
+- `smoke.spec.ts` — sidepanel mounts, bottom-nav switches views, chat empty
+  state, command palette.
+- `chat.spec.ts` — spins up an in-test **mock OpenAI-compatible SSE server**,
+  points the extension at it via `chrome.storage`, sends a message, asserts
+  the streamed reply renders (guards llm-client + stream port + delta
+  rendering).
+- `capture.spec.ts` — seeds a document via `IMPORT_LOCAL_MD` (no tab/picker
+  needed), then drives the UI: library search finds it by content, clicking
+  the hit opens DocumentView at the matched passage. Runs BM25-lexical when
+  the offscreen embedding model is unavailable (deterministic in CI).
+
+E2E exists specifically for the **coordinate-space / wiring class of bug**
+(e.g. highlight offsets vs frontmatter stripping) that unit tests cannot
+see by construction.
+
+## Adding tests
+
+- New pure logic → put it in `lib/`, add a `__tests__` suite, and make sure
+  a deliberate mutation of the behavior fails it.
+- New UI/worker flow → extend an E2E spec; prefer message-API seeding over
+  UI setup for fixtures.
+- Not covered yet (known): research pipeline E2E (needs mock fetchers),
+  PDF/image import, page-context, MCP against a live server.

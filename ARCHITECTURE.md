@@ -1,49 +1,81 @@
-# Vault — Architecture & Philosophy Reference
+# Magpie — Architecture
 
-## The Context Layer Model
+> Chrome MV3 extension: local-first research knowledge base with
+> citation-grounded chat and multi-agent staged deep research.
+> Component detail lives in `docs/` (STORAGE, CAPTURE, RESEARCH-PIPELINE,
+> CITATIONS, MCP, SKILLS, TESTING).
 
-This project implements the **Context Layer Model** as described in the solopreneur enterprise architecture:
+## Execution contexts
 
-> "The company becomes the context layer. This shared brain is the company now. Humans and agents plug into it."
+MV3 forbids persistent background pages, so the extension is partitioned by
+lifetime and capability:
 
-### Core Principles Applied
+| Context | Lifetime | Role |
+|---|---|---|
+| **Service worker** (`src/background/`) | Ephemeral (~30 s idle kill) | Message router, capture orchestration, chat/research lifecycle, checkpointing |
+| **Offscreen document** (`src/offscreen/`) | Unbounded (`DOM_PARSER` reason) | Heavy compute: pdf.js parsing, HTML→markdown (Readability), embedding + reranker models (transformers.js) |
+| **Content script** (`src/content/`) | Bound to tab | DOM scraping (Readability + Turndown), YouTube transcripts |
+| **Side panel** (`src/sidepanel/`) | While open | React UI: Lore / Chat / Config views |
 
-1. **Markdown as Universal Language** — All knowledge is stored as plain-text markdown files, universally readable and machine-parseable. The local vault serves as a persistent, machine-readable operating system for knowledge.
+Communication: `chrome.runtime.sendMessage` for request/response,
+long-lived ports for chat streaming (`chat-stream`, also acts as SW
+keep-alive), `BroadcastChannel` for progress fan-out (imports, re-index,
+sync). Multi-MB payloads (PDFs) never cross the message boundary — the
+offscreen document fetches URLs itself (`OFFSCREEN_PARSE_PDF_URL`).
 
-2. **Local-First Architecture** — All processing happens on the user's hardware. No cloud dependency for core functionality. The browser extension serves as the Context Layer interface.
+## Service worker layout
 
-3. **The Golden Rule: Agents Read, Humans Write** — The vault serves as the unpolluted source of truth. AI agents retrieve, analyze, and generate answers based on the vault, but the human decides what enters the knowledge base.
+`service-worker.ts` is the router + the coupled cores (capture, chat
+request building, research job lifecycle). Cohesive low-coupling units are
+extracted:
 
-4. **Learning Velocity** — The competitive advantage comes from how fast the user can capture, structure, and query knowledge. Vault accelerates this cycle by:
-   - One-click web page capture → markdown
-   - PDF/image OCR → searchable text
-   - Semantic chunking → instant retrieval
-   - Source-grounded citations → verifiable answers
+- `background/llm-client.ts` — OpenAI-compatible provider: settings, chat,
+  SSE streaming (token-coalesced), model listing.
+- `background/library-handlers.ts` — library-wide search, `/recall`.
+- `background/document-handlers.ts` — document CRUD.
+- `background/project-handlers.ts` — project/chat CRUD.
+- `background/deep-researcher.ts` — staged research pipeline + agents.
 
-### Architecture Mapping
+## Data flow (capture → answer)
 
-| Context Layer Concept | Vault Implementation |
-|---|---|
-| Shared Brain | IndexedDB document store + vector embeddings |
-| Markdown Vault | Captured pages stored as `.md` with frontmatter |
-| CLI Bridge | Chrome Extension Service Worker API |
-| Context Loading | Semantic search → relevant chunks → LLM context |
-| Preloaded Context | System prompts + citation anchors |
-| Agent Execution | Deep Research (autonomous web search + synthesis) |
+```
+page/PDF/YouTube ──content script / offscreen──▶ markdown
+  ▶ quality gate (anti-bot, paywall, thin, table-soup rejected)
+  ▶ frontmatter (Obsidian-compatible YAML)
+  ▶ chunker (heading/paragraph-aware, stable citation anchors d{id}.s{n}.p{n})
+  ▶ embeddings (384-dim, local all-MiniLM-L6-v2 in offscreen)
+  ▶ IndexedDB (documents + chunks WITH vectors)
 
-### Quality-First Research
+question ──▶ hybrid retrieval (Orama BM25 + vectors, in-memory per project,
+             rehydrated from IDB after SW restarts — no re-embedding)
+  ▶ cross-encoder rerank (ms-marco-MiniLM) + relevance gate + score cliff
+  ▶ citation-anchored context → LLM (user's OpenAI-compatible endpoint)
+  ▶ streamed reply; [anchor] citations resolve to chips → click opens the
+    document at the cited passage (text-match highlighting in the
+    frontmatter-stripped coordinate space)
+```
 
-Deep Research prioritizes high-quality sources:
-- Academic papers (arxiv, nature, ieee, acm)
-- Official documentation and technical blogs
-- Expert analysis from reputable publications
-- Primary sources and government data
+## MV3 survival model
 
-Low-quality content farms, social media, and forums are actively filtered.
+- **Keep-alive during research**: 20 s `getPlatformInfo()` heartbeat
+  (known-bug-based; durable path is moving long work into the offscreen
+  document — planned).
+- **Crash-safe research**: job state in `chrome.storage.local`, scraped
+  pages in a dedicated IndexedDB; auto-resume on worker start gated by an
+  `active` flag, heartbeat freshness, job age, and a 3-attempt cap
+  (see `docs/MV3-PERSISTENT-AGENT-STATE.md`).
+- **Storage durability**: `unlimitedStorage` permission exempts the library
+  from quota eviction.
 
-### API Economics
+## Design invariants
 
-The extension supports multiple LLM providers with configurable routing:
-- **Ollama** (local, free) for routine tasks
-- **Gemini/OpenAI** (API) for complex reasoning
-- Source-grounded citations prevent hallucination, reducing retry costs
+1. **Local-first** — content, chunks, vectors, models: all on-device. Only
+   the user's configured LLM endpoint and research fetchers touch the network.
+2. **Citations are anchors, not vibes** — every retrievable chunk carries a
+   stable anchor; the model may only cite anchors present in context;
+   unresolvable anchors are dropped by the renderer.
+3. **The index only holds citable knowledge** — noise (nav, link farms,
+   number-soup tables, YAML frontmatter) is filtered at chunk time; research
+   source chunks are evicted after synthesis.
+4. **Human curates the library** — capture/import/recall are explicit acts;
+   nothing auto-saves into the knowledge base.
