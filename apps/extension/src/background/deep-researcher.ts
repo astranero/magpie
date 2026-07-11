@@ -286,23 +286,35 @@ async function searchGoogleNewsRss(query: string, signal?: AbortSignal): Promise
 export async function scrapeUrl(url: string, signal?: AbortSignal): Promise<ParsedPage | null> {
   let parsed: ParsedPage | null = null;
 
-  // 1) Jina Reader
-  try {
-    const md = await fetchText(`https://r.jina.ai/${url}`, 20000, signal);
-    const cleaned = md.trim();
-    if (cleaned.length > 200) {
-      // Jina prepends "Title: ...\nURL Source: ...\nMarkdown Content:\n"
-      const titleMatch = cleaned.match(/^Title:\s*(.+)$/m);
-      const bodyIdx = cleaned.indexOf('Markdown Content:');
-      const body = bodyIdx !== -1 ? cleaned.slice(bodyIdx + 'Markdown Content:'.length).trim() : cleaned;
-      parsed = {
-        title: titleMatch?.[1]?.trim() || url,
-        markdown: body,
-        wordCount: body.split(/\s+/).filter(Boolean).length
-      };
+  // Google News RSS items are opaque redirect URLs; Jina answers them with
+  // 403, burning its 20s timeout per article. Resolve the redirect locally
+  // first so the publisher URL is what gets scraped (and cached/deduped).
+  if (/news\.google\.com\/rss\//i.test(url)) {
+    try {
+      const res = await fetch(url, { redirect: 'follow', signal, headers: FETCH_HEADERS });
+      if (res.ok && res.url && !/news\.google\.com/i.test(res.url)) url = res.url;
+    } catch { /* keep the original URL; the local path below still tries */ }
+  }
+
+  // 1) Jina Reader (skipped for unresolved Google News redirects — known 403)
+  if (!/news\.google\.com/i.test(url)) {
+    try {
+      const md = await fetchText(`https://r.jina.ai/${url}`, 20000, signal);
+      const cleaned = md.trim();
+      if (cleaned.length > 200) {
+        // Jina prepends "Title: ...\nURL Source: ...\nMarkdown Content:\n"
+        const titleMatch = cleaned.match(/^Title:\s*(.+)$/m);
+        const bodyIdx = cleaned.indexOf('Markdown Content:');
+        const body = bodyIdx !== -1 ? cleaned.slice(bodyIdx + 'Markdown Content:'.length).trim() : cleaned;
+        parsed = {
+          title: titleMatch?.[1]?.trim() || url,
+          markdown: body,
+          wordCount: body.split(/\s+/).filter(Boolean).length
+        };
+      }
+    } catch (e) {
+      console.warn(`Jina Reader failed for ${url}, falling back`, e);
     }
-  } catch (e) {
-    console.warn(`Jina Reader failed for ${url}, falling back`, e);
   }
 
   // 2) Local fallback (skip binary PDFs — offscreen can't parse those)
@@ -431,7 +443,15 @@ async function indexResearchDoc(
     bibtex
   }, rawChunks));
 
-  if (isDuplicate) return docId; // already indexed — skip link + vector steps
+  if (isDuplicate) {
+    // Already in the GLOBAL library (e.g. captured by an earlier run in a
+    // different project) — but this project still needs the link, or its
+    // retrieval sees 0 docs after a research run full of dedup hits. The
+    // vector store rehydrates the linked doc's stored chunks from IndexedDB
+    // on the next search, so only the link is needed here.
+    await linkDocumentToProject(projectId, docId);
+    return docId;
+  }
 
   await linkDocumentToProject(projectId, docId);
   await addChunksToVectorStore(projectId, savedChunks);
