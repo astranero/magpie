@@ -638,6 +638,16 @@ interface AcademicPaper {
 }
 
 /**
+ * Cap every keyless academic-API request at 25s (combined with the run's
+ * abort signal). A hung socket to S2/CrossRef/HF otherwise stalls the whole
+ * gathering stage with no way to time out.
+ */
+function apiSignal(signal?: AbortSignal): AbortSignal {
+  const timeout = AbortSignal.timeout(25_000);
+  return signal ? AbortSignal.any([signal, timeout]) : timeout;
+}
+
+/**
  * Semantic Scholar Graph API. The free unauthenticated pool 429s constantly,
  * so retry with backoff; an optional `s2ApiKey` in chrome.storage.local is
  * sent as x-api-key for the much higher authenticated limit.
@@ -654,7 +664,7 @@ async function s2Fetch(url: string, signal?: AbortSignal): Promise<any> {
   for (let attempt = 0; attempt < delays.length; attempt++) {
     if (delays[attempt] > 0) await new Promise(r => setTimeout(r, delays[attempt]));
     if (signal?.aborted) throw new Error('AbortError');
-    res = await fetch(url, { signal, headers });
+    res = await fetch(url, { signal: apiSignal(signal), headers });
     if (res.status !== 429) break;
   }
   if (!res || !res.ok) throw new Error(`Semantic Scholar ${res ? res.status : 'unreachable'}`);
@@ -717,7 +727,7 @@ async function searchCrossRef(query: string, rows: number, signal?: AbortSignal)
   if (rows <= 0) return [];
   const res = await fetch(
     `https://api.crossref.org/works?query=${encodeURIComponent(query)}&rows=${rows}&filter=type:journal-article&select=title,abstract,author,issued,DOI,container-title,URL,is-referenced-by-count`,
-    { signal, headers: { 'Accept': 'application/json' } }
+    { signal: apiSignal(signal), headers: { 'Accept': 'application/json' } }
   );
   if (!res.ok) throw new Error(`CrossRef ${res.status}`);
   const data = await res.json();
@@ -739,7 +749,7 @@ async function searchCrossRef(query: string, rows: number, signal?: AbortSignal)
 
 /** HuggingFace papers search — public endpoint, no key. */
 async function searchHuggingFacePapers(query: string, signal?: AbortSignal): Promise<AcademicPaper[]> {
-  const res = await fetch(`https://huggingface.co/api/papers/search?q=${encodeURIComponent(query)}`, { signal });
+  const res = await fetch(`https://huggingface.co/api/papers/search?q=${encodeURIComponent(query)}`, { signal: apiSignal(signal) });
   if (!res.ok) throw new Error(`HuggingFace ${res.status}`);
   const data = await res.json();
   const items = Array.isArray(data) ? data : [];

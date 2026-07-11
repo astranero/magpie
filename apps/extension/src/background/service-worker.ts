@@ -1852,32 +1852,82 @@ interface ResearchParams {
   mode: 'quick' | 'deep';
 }
 
+// A single LLM call may not run forever: a stalled connection (provider
+// hangs, socket half-open) is indistinguishable from "thinking" without a
+// deadline, and one stuck call freezes the whole run while the heartbeat
+// keeps reporting it healthy.
+const LLM_CALL_TIMEOUT_MS = 4 * 60 * 1000;
+// Streaming variant: reset on every delta — generous silence budget so slow
+// models survive, but a dead stream gets cut.
+const LLM_STREAM_IDLE_MS = 3 * 60 * 1000;
+// Run-level watchdog: no progress line for this long = the run is wedged in
+// something a per-call deadline didn't cover. Abort loudly.
+const RESEARCH_STALL_MS = 8 * 60 * 1000;
+// Absolute wall-clock cap per run (incl. resumes within this worker).
+const RESEARCH_MAX_WALL_MS = 60 * 60 * 1000;
+
+/** Child signal that fires on parent abort OR a deadline. */
+function deadlineSignal(parent: AbortSignal, ms: number): { signal: AbortSignal; done: () => void } {
+  const ctl = new AbortController();
+  const onAbort = () => ctl.abort();
+  if (parent.aborted) ctl.abort();
+  else parent.addEventListener('abort', onAbort, { once: true });
+  const timer = setTimeout(() => ctl.abort(new Error('deadline')), ms);
+  return {
+    signal: ctl.signal,
+    done: () => { clearTimeout(timer); parent.removeEventListener('abort', onAbort); }
+  };
+}
+
 /** Run (or resume) a research job. Job checkpoint must already exist. */
 async function executeResearch({ projectId, chatId, topic, effectiveTopic, mode }: ResearchParams): Promise<Record<string, unknown>> {
   const controller = new AbortController();
   abortControllers.set(projectId, controller);
   const signal = controller.signal;
 
-  const chatFn = (s: string, u: string) => chatWithCustom(s, [], u, signal);
+  // Every planning/analysis LLM call carries its own deadline; timing out
+  // fails THAT call (callers all have fallbacks) instead of the whole run.
+  const chatFn = async (s: string, u: string) => {
+    const d = deadlineSignal(signal, LLM_CALL_TIMEOUT_MS);
+    try {
+      return await chatWithCustom(s, [], u, d.signal);
+    } finally {
+      d.done();
+    }
+  };
 
   // Streaming synthesis: forward coalesced deltas so the panel renders the
   // report live during [SYNTHESIZING]. Deltas are droppable — the persisted
-  // chat message written after completion is the source of truth.
+  // chat message written after completion is the source of truth. An idle
+  // watchdog (reset per delta) cuts dead streams instead of waiting forever.
   const synthesisFn = async (sys: string, user: string): Promise<string> => {
     let full = '';
+    const ctl = new AbortController();
+    const onAbort = () => ctl.abort();
+    signal.addEventListener('abort', onAbort, { once: true });
+    let idleTimer = setTimeout(() => ctl.abort(new Error('stream idle timeout')), LLM_STREAM_IDLE_MS);
     try {
-      await chatWithCustomStream(sys, [], user, signal, (delta) => {
+      await chatWithCustomStream(sys, [], user, ctl.signal, (delta) => {
         full += delta;
+        clearTimeout(idleTimer);
+        idleTimer = setTimeout(() => ctl.abort(new Error('stream idle timeout')), LLM_STREAM_IDLE_MS);
         chrome.runtime.sendMessage({ action: 'DEEP_RESEARCH_DELTA', projectId, delta }).catch(() => {});
       });
     } catch (e) {
+      if (signal.aborted) throw e;      // user cancelled — don't retry
       if (full.length === 0) throw e;
       // Partial stream then failure: fall back to non-streaming call
       return chatFn(sys, user);
+    } finally {
+      clearTimeout(idleTimer);
+      signal.removeEventListener('abort', onAbort);
     }
     return full;
   };
+
+  let lastProgressAt = Date.now();
   const onProgress = (status: string) => {
+    lastProgressAt = Date.now();
     chrome.runtime.sendMessage({ action: 'DEEP_RESEARCH_LOG', projectId, status }).catch(() => {});
     appendJobLog(status).catch(() => {});
   };
@@ -1892,9 +1942,23 @@ async function executeResearch({ projectId, chatId, topic, effectiveTopic, mode 
   // Also updates lastHeartbeatAt so resumePendingResearch can tell apart a
   // genuinely interrupted job (stale heartbeat) from one whose clearJob write
   // lost a race with a worker death (fresh heartbeat → skip resume).
+  const runStartedAt = Date.now();
   const heartbeatInterval = setInterval(() => {
     chrome.runtime.getPlatformInfo?.().catch(() => {});
     updateHeartbeat().catch(() => {});
+
+    // Run-level watchdog: the heartbeat proves the WORKER is alive, not the
+    // run. If no progress line has appeared for RESEARCH_STALL_MS, or the
+    // run blew its wall-clock budget, abort so it fails loudly instead of
+    // spinning forever behind a healthy-looking heartbeat.
+    const stalled = Date.now() - lastProgressAt > RESEARCH_STALL_MS;
+    const overtime = Date.now() - runStartedAt > RESEARCH_MAX_WALL_MS;
+    if (stalled || overtime) {
+      onProgress(stalled
+        ? `[WATCHDOG] No progress for ${Math.round(RESEARCH_STALL_MS / 60000)} min — aborting the stuck run.`
+        : `[WATCHDOG] Run exceeded ${Math.round(RESEARCH_MAX_WALL_MS / 60000)} min wall-clock budget — aborting.`);
+      controller.abort(new Error('watchdog'));
+    }
   }, 20000);
 
   try {
