@@ -24,6 +24,11 @@ export interface ResearchJob {
   phase: 'planning' | 'gathering' | 'synthesizing';
   subQuestions?: string[];
   webQueries?: string[];
+  processedQueries?: string[];  // track which queries have been processed for deduplication
+  /** Per-stage markdown briefs — each entry is the full brief for that stage (0-indexed). */
+  stageBriefs?: string[];
+  /** Index (1-based) of the last fully completed stage. 0 = none done yet. */
+  currentStage?: number;
   logs: string[];
   resumeAttempts?: number;
   active?: boolean;

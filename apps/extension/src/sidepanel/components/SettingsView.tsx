@@ -20,6 +20,8 @@ interface SettingsViewProps {
   fetchCustomModels: () => void;
 
   docCount: number;
+  globalDocCount: number;
+  onCleanupOrphans: () => void;
   authed: boolean;
   profile: { name: string; email: string; picture: string } | null;
   login: () => void;
@@ -35,20 +37,22 @@ interface SettingsViewProps {
 
 export const SettingsView: React.FC<SettingsViewProps> = ({
   customUrl, setCustomUrl, customKey, setCustomKey, customModel, setCustomModel, visionModel, setVisionModel, customModels, fetchCustomModels,
-  docCount, authed, profile, login, logout, folderName, setFolderName, localFolderName, pickLocalFolder,
+  docCount, globalDocCount, onCleanupOrphans, authed, profile, login, logout, folderName, setFolderName, localFolderName, pickLocalFolder,
   autoLinkCaptures, setAutoLinkCaptures, saveSettings
 }) => {
 
   // Research settings are self-contained: read/write chrome.storage directly.
   const [researchDepth, setResearchDepth] = useState<'standard' | 'deep' | 'exhaustive'>('standard');
   const [sourceQuality, setSourceQuality] = useState<'all' | 'high'>('all');
+  const [academicDepth, setAcademicDepth] = useState<'abstract' | 'full'>('full');
   const [contextTokens, setContextTokens] = useState('32768');
   const [s2ApiKey, setS2ApiKey] = useState('');
   useEffect(() => {
     if (typeof chrome === 'undefined' || !chrome.storage) return;
-    chrome.storage.local.get(['researchDepth', 'contextTokens', 's2ApiKey', 'sourceQuality']).then(r => {
+    chrome.storage.local.get(['researchDepth', 'contextTokens', 's2ApiKey', 'sourceQuality', 'academicDepth']).then(r => {
       if (r.researchDepth === 'deep' || r.researchDepth === 'exhaustive') setResearchDepth(r.researchDepth);
       if (r.sourceQuality === 'high') setSourceQuality('high');
+      if (r.academicDepth === 'abstract') setAcademicDepth('abstract');
       if (r.contextTokens) setContextTokens(String(r.contextTokens));
       if (r.s2ApiKey) setS2ApiKey(r.s2ApiKey);
     });
@@ -291,6 +295,21 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           </p>
         </div>
         <div className="space-y-1.5">
+          <label className="text-xs font-bold font-mono uppercase tracking-widest">Academic paper depth</label>
+          <Select value={academicDepth} onValueChange={(v) => { setAcademicDepth(v as any); saveResearchSetting({ academicDepth: v }); }}>
+            <SelectTrigger className="w-full border-2 rounded-md font-mono">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent className="border-2 border-border rounded-md shadow-card">
+              <SelectItem value="abstract" className="font-mono text-xs">Abstracts only — fast, stable, ~2 chunks per paper</SelectItem>
+              <SelectItem value="full" className="font-mono text-xs">Full text — richer but slower, may crash on very long PDFs</SelectItem>
+            </SelectContent>
+          </Select>
+          <p className="text-[10px] text-muted-foreground font-mono leading-normal">
+            Full text adds experimental detail, related work, and exact results — highest quality synthesis. Abstracts are a fallback if your machine crashes on long PDFs (each full paper = 15–30 chunks).
+          </p>
+        </div>
+        <div className="space-y-1.5">
           <label className="text-xs font-bold font-mono uppercase tracking-widest">Model context window (tokens)</label>
           <Input
             type="number"
@@ -490,8 +509,33 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           )}
 
           <div className="flex items-center justify-between mt-4">
-            <span className="text-xs font-bold font-mono uppercase tracking-widest">Documents</span>
+            <div>
+              <span className="text-xs font-bold font-mono uppercase tracking-widest">Workspace Docs</span>
+              <p className="text-[10px] text-muted-foreground font-mono mt-0.5">Documents linked to the active workspace</p>
+            </div>
             <span className="text-sm font-bold font-mono">{docCount}</span>
+          </div>
+
+          <div className="flex items-center justify-between mt-2">
+            <div>
+              <span className="text-xs font-bold font-mono uppercase tracking-widest">Global Library</span>
+              <p className="text-[10px] text-muted-foreground font-mono mt-0.5">All docs across all workspaces</p>
+            </div>
+            <span className="text-sm font-bold font-mono">{globalDocCount}</span>
+          </div>
+
+          <div className="flex items-center justify-between mt-2 gap-3">
+            <div className="min-w-0">
+              <span className="text-xs font-bold font-mono uppercase tracking-widest">Clean up global library</span>
+              <p className="text-[10px] text-muted-foreground font-mono mt-0.5 leading-normal">Remove documents not linked to any workspace. Use when switching topics or after deleting a workspace.</p>
+            </div>
+            <Button
+              variant="outline"
+              className="shrink-0 h-8 text-[10px] rounded-md border-2 font-mono font-bold uppercase tracking-widest"
+              onClick={onCleanupOrphans}
+            >
+              Clean up
+            </Button>
           </div>
 
           <div className="h-0.5 bg-border w-full my-4" />

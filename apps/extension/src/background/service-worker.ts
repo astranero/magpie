@@ -7,17 +7,18 @@
 import {
   saveDocument, listDocuments, updateDocumentSync,
   getUnsyncedDocuments, getChatHistory, clearChatHistory, saveChatMessage,
-  linkDocumentToProject, updateDocumentContent,
-  getChunkByAnchor
+  linkDocumentToProject,
+  getChunkByAnchor, deleteOrphanDocuments
 } from '../lib/db';
 import { chunkDocument, makeDocShortId } from '../lib/chunker';
 import { buildCitationContext, CITATION_SYSTEM_PROMPT, parseResponseCitations } from '../lib/citations';
 import { buildFrontmatter, hasFrontmatter } from '../lib/frontmatter';
 import { get as idbGet } from 'idb-keyval';
-import { runDeepResearch } from './deep-researcher';
+import { runDeepResearch, generateSubQuestions } from './deep-researcher';
 import { addChunksToVectorStore, searchSessionChunks, resetSessionIndex, resetAllSessionIndexes } from '../lib/vector-store';
 import { replaceChunksForDoc } from '../lib/db';
 import { pdfBase64ToBody, pdfUrlToBody, ensureOffscreen as ensureOffscreenDoc } from '../lib/pdf-parser';
+import { setEnsureOffscreen, sendToOffscreen } from '../lib/offscreen-client';
 import { getProviderSettings, chatWithCustom, chatWithCustomStream, handleFetchCustomModels } from './llm-client';
 import { handleSearchLibrary, handleRecallDocs } from './library-handlers';
 import { handleLinkDocument, handleUnlinkDocument, handleListDocuments, handleGetDocument, handleDeleteDocument, handleGetDocumentCount, handleUpdateDocumentSelection } from './document-handlers';
@@ -27,6 +28,45 @@ import {
   clearJob as clearResearchJob, appendJobLog, incrementResumeAttempts,
   markJobActive, markJobFinished, updateHeartbeat, JOB_MAX_AGE_MS, HEARTBEAT_STALE_MS
 } from '../lib/research-store';
+
+// ─────────────────────────────────────────────
+// Robust error handling & offscreen management
+// ─────────────────────────────────────────────
+
+// Global unhandled rejection handler - catches silent failures
+self.addEventListener('unhandledrejection', (event) => {
+  const err = event.reason;
+  console.error('[SW] Unhandled rejection:', err?.message || err);
+  // Prevent default browser behavior (which might kill the worker)
+  event.preventDefault();
+});
+
+// Global error handler
+self.addEventListener('error', (event) => {
+  console.error('[SW] Global error:', event.message, event.filename, event.lineno);
+});
+
+// Offscreen document health tracking
+let offscreenHealthCheckInterval: number | null = null;
+
+// Register ensureOffscreen with the robust client for auto-recreation
+setEnsureOffscreen(ensureOffscreenDoc);
+
+// Start periodic offscreen health check (every 60s)
+function startOffscreenHealthCheck() {
+  if (offscreenHealthCheckInterval) return;
+  offscreenHealthCheckInterval = self.setInterval(async () => {
+    try {
+      await sendToOffscreen({ action: 'OFFSCREEN_HEALTH_CHECK' });
+    } catch {
+      // Health check failed - will trigger recreation on next real request
+      console.warn('[SW] Offscreen health check failed');
+    }
+  }, 60000);
+}
+
+// Call on startup
+startOffscreenHealthCheck();
 
 // ─────────────────────────────────────────────
 // Defaults and State
@@ -144,113 +184,12 @@ chrome.alarms.get('sync-workspace', (alarm) => {
 
 chrome.alarms.onAlarm.addListener(async (alarm) => {
   if (alarm.name === 'sync-workspace') {
-    await performTwoWaySync();
+    // File System Access API requires a page context (user-gesture permission).
+    // The service worker can never hold 'granted' file permissions — tell the
+    // sidepanel to do the write instead via BroadcastChannel.
+    notifySidepanelSync();
   }
 });
-
-async function performTwoWaySync() {
-  try {
-    // NOTE: dynamic import() is banned in MV3 service workers — use the
-    // static idb-keyval import from the top of this file.
-    const handle: any = await idbGet('ara-local-directory-handle');
-    if (!handle) return;
-
-    // Check permission status
-    // @ts-ignore
-    const hasPermission = await handle.queryPermission({ mode: 'readwrite' });
-    if (hasPermission !== 'granted') return;
-
-    const activeProjectId = await idbGet('ara-active-project-id');
-    if (!activeProjectId) return;
-
-    const docs = await listDocuments(activeProjectId);
-    const dbDocsMap = new Map(docs.map(d => [d.title, d]));
-
-    const localFiles = new Map<string, { handle: any; file: File }>();
-
-    // @ts-ignore
-    for await (const entry of handle.values()) {
-      if (entry.kind === 'file' && entry.name.endsWith('.md')) {
-        const file = await entry.getFile();
-        const title = entry.name.slice(0, -3);
-        localFiles.set(title, { handle: entry, file });
-      }
-    }
-
-    // 1. Local Folder -> IndexedDB
-    for (const [title, local] of localFiles.entries()) {
-      const dbDoc = dbDocsMap.get(title);
-      const localLastModified = local.file.lastModified;
-      const localTimeIso = new Date(localLastModified).toISOString();
-
-      if (!dbDoc) {
-        const text = await local.file.text();
-        const docShortId = makeDocShortId(crypto.randomUUID?.() ?? `${Date.now()}`);
-        const chunks = chunkDocument({ docShortId, content: text });
-
-        const { id: docId, chunks: savedChunks } = await saveDocument({
-          title,
-          url: '',
-          content: text,
-          capturedAt: localTimeIso,
-          favicon: '',
-          syncedToDrive: false,
-          enabled: true,
-          wordCount: text.split(/\s+/).filter(Boolean).length
-        }, chunks);
-
-        await linkDocumentToProject(activeProjectId, docId);
-        await addChunksToVectorStore(activeProjectId, savedChunks);
-
-        notifySidepanelSync();
-      } else {
-        const dbTime = new Date(dbDoc.capturedAt).getTime();
-        if (localLastModified > dbTime + 2000) {
-          const text = await local.file.text();
-          if (text !== dbDoc.content) {
-            const docShortId = makeDocShortId(dbDoc.id);
-            const chunks = chunkDocument({ docShortId, content: text });
-
-            const savedChunks = await updateDocumentContent(dbDoc.id, text, chunks, localTimeIso);
-            await addChunksToVectorStore(activeProjectId, savedChunks);
-
-            notifySidepanelSync();
-          }
-        }
-      }
-    }
-
-    // 2. IndexedDB -> Local Folder
-    for (const dbDoc of docs) {
-      const local = localFiles.get(dbDoc.title);
-      const dbTime = new Date(dbDoc.capturedAt).getTime();
-
-      const cleanTitle = dbDoc.title.trim()
-        .normalize('NFC')
-        .replace(/[\u200E\u200F\u200B\u200C\u200D\uFEFF]/g, '')
-        .replace(/[^\w\s\-().,'!&+#@\[\]{}]/g, '')
-        .replace(/\s+/g, ' ')
-        .replace(/^\.+/, '')
-        .replace(/\.+$/, '')
-        .trim();
-      const fileName = `${cleanTitle.slice(0, 100) || 'untitled'}.md`;
-
-      if (!local) {
-        // @ts-ignore
-        const fileHandle = await handle.getFileHandle(fileName, { create: true });
-        const writable = await fileHandle.createWritable();
-        await writable.write(dbDoc.content);
-        await writable.close();
-      } else if (dbTime > local.file.lastModified + 2000) {
-        const writable = await local.handle.createWritable();
-        await writable.write(dbDoc.content);
-        await writable.close();
-      }
-    }
-  } catch (e) {
-    console.error('Two-way sync failed', e);
-  }
-}
 
 function notifySidepanelSync() {
   const channel = new BroadcastChannel('ai_research_assistant_sync');
@@ -341,7 +280,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
       .then((result: unknown) => sendResponse({ success: true, ...(result as object) }))
       .catch((err: unknown) => sendResponse({
         success: false,
-        error: String(err instanceof Error ? err.message : err)
+        error: err instanceof Error ? err.message : err instanceof DOMException ? err.message : String(err)
       }));
     return true; // async response
   }
@@ -380,6 +319,10 @@ const messageHandlers: Record<string, MessageHandler> = {
   SEARCH_LIBRARY: handleSearchLibrary,
   REINDEX_LIBRARY: handleReindexLibrary,
   RECALL_DOCS: handleRecallDocs,
+  CLEANUP_ORPHANS: async () => {
+    const deleted = await deleteOrphanDocuments();
+    return { deleted };
+  },
 
   // ── Chat ──
   CHAT_WITH_KNOWLEDGE: handleChat,
@@ -389,6 +332,7 @@ const messageHandlers: Record<string, MessageHandler> = {
 
   // ── Deep Research ──
   START_DEEP_RESEARCH: handleDeepResearch,
+  PREVIEW_DEEP_RESEARCH: handlePreviewDeepResearch,
   GET_RESEARCH_STATUS: async () => {
     const job = await getResearchJob().catch(() => null);
     const running = job ? abortControllers.has(job.projectId) : false;
@@ -531,13 +475,13 @@ async function selectPageMarkdown(ctx: PageContext, question: string): Promise<s
     if (!chunks) {
       const raw = chunkDocument({ docShortId: 'dpage00', content: md });
       const texts = raw.map(c => c.text);
-      const res: any = await chrome.runtime.sendMessage({ action: 'OFFSCREEN_GET_EMBEDDINGS', texts });
+      const res: any = await sendToOffscreen({ action: 'OFFSCREEN_GET_EMBEDDINGS', texts });
       const embeddings: (number[] | null)[] = res?.ok && Array.isArray(res.embeddings) ? res.embeddings : [];
       chunks = raw.map((c, i) => ({ text: c.text, position: c.chunkIndex, embedding: embeddings[i] ?? null }));
       if (entry) entry.chunks = chunks;
     }
 
-    const qRes: any = await chrome.runtime.sendMessage({ action: 'OFFSCREEN_GET_EMBEDDINGS', texts: [question] });
+    const qRes: any = await sendToOffscreen({ action: 'OFFSCREEN_GET_EMBEDDINGS', texts: [question] });
     const qVec: number[] | undefined = qRes?.ok ? qRes.embeddings?.[0] : undefined;
     if (!qVec) throw new Error('no query embedding');
 
@@ -952,8 +896,8 @@ async function handleReindexLibrary(): Promise<Record<string, unknown>> {
           if (!doc.content) { done++; continue; }
           const raw = chunkDocument({ docShortId: makeDocShortId(doc.id), content: doc.content });
           let embeddings: (number[] | undefined)[] = [];
-          try {
-            const res: any = await chrome.runtime.sendMessage({ action: 'OFFSCREEN_GET_EMBEDDINGS', texts: raw.map(c => c.text) });
+    try {
+            const res: any = await sendToOffscreen({ action: 'OFFSCREEN_GET_EMBEDDINGS', texts: raw.map(c => c.text) });
             if (res?.ok && Array.isArray(res.embeddings)) embeddings = res.embeddings;
           } catch { /* vectorless chunks are valid — BM25 still works */ }
           const withVecs = raw.map((c, i) => ({ ...c, embedding: embeddings[i] }));
@@ -1002,7 +946,7 @@ async function handleCancelTask(request: Record<string, unknown>): Promise<Recor
 // ─────────────────────────────────────────────
 
 /** Build the RAG system prompt + formatted history for a chat turn. */
-async function buildChatRequest(chatId: string, projectId: string, prompt: string, pageContext?: PageContext | null): Promise<{ systemPrompt: string; formattedHistory: Array<{ role: string; content: string }> }> {
+async function buildChatRequest(chatId: string, projectId: string, prompt: string, signal: AbortSignal, pageContext?: PageContext | null): Promise<{ systemPrompt: string; formattedHistory: Array<{ role: string; content: string }> }> {
   // Get all documents for this project
   const allDocs = await listDocuments(projectId);
   const enabledDocs = allDocs.filter(d => d.enabled !== false);
@@ -1023,7 +967,7 @@ async function buildChatRequest(chatId: string, projectId: string, prompt: strin
     // Adaptive multi-query: only expand when initial results are sparse
     if (relevantChunks.length < 5 && prompt.length > 10) {
       try {
-        const expandedQueries = await expandQuery(prompt);
+        const expandedQueries = await expandQuery(prompt, signal);
         if (expandedQueries.length > 0) {
           console.log(`[RAG] Expanding query into ${expandedQueries.length} variants:`, expandedQueries);
           const existingIds = new Set(relevantChunks.map(c => c.id));
@@ -1108,7 +1052,7 @@ async function buildChatRequest(chatId: string, projectId: string, prompt: strin
  * Use the LLM to expand a user query into 2-3 search reformulations.
  * This catches synonym mismatches, misspellings, and conceptual gaps.
  */
-async function expandQuery(userQuery: string): Promise<string[]> {
+async function expandQuery(userQuery: string, signal: AbortSignal): Promise<string[]> {
   const { apiKey, endpoint, model } = await getProviderSettings();
   if (!endpoint || !model) return [];
 
@@ -1118,6 +1062,7 @@ async function expandQuery(userQuery: string): Promise<string[]> {
   const res = await fetch(endpoint, {
     method: 'POST',
     headers,
+    signal,
     body: JSON.stringify({
       model,
       messages: [{
@@ -1160,7 +1105,7 @@ async function handleChat(request: Record<string, unknown>): Promise<Record<stri
 
   try {
     const pageCtx = request.includePageContext ? await getPageContext().catch(() => null) : null;
-    const { systemPrompt, formattedHistory } = await buildChatRequest(chatId, projectId, prompt, pageCtx);
+    const { systemPrompt, formattedHistory } = await buildChatRequest(chatId, projectId, prompt, signal, pageCtx);
 
     // Persist the user message immediately so it survives errors/reloads
     await saveChatMessage({
@@ -1218,15 +1163,16 @@ chrome.runtime.onConnect.addListener((port) => {
       return;
     }
 
+    // Each request gets its own controller + accumulator
     controller = new AbortController();
     abortControllers.set(chatId, controller);
+    const localController = controller;
     let full = '';
 
     try {
       const pageCtx = req.includePageContext ? await getPageContext().catch(() => null) : null;
-      let { systemPrompt, formattedHistory } = await buildChatRequest(chatId, projectId, prompt, pageCtx);
+      let { systemPrompt, formattedHistory } = await buildChatRequest(chatId, projectId, prompt, localController.signal, pageCtx);
 
-      // If a slash command provides a systemPromptOverride, prepend it
       if (systemPromptOverride) {
         systemPrompt = systemPromptOverride + '\n\n' + systemPrompt;
       }
@@ -1239,7 +1185,7 @@ chrome.runtime.onConnect.addListener((port) => {
         provider: 'custom'
       });
 
-      await chatWithCustomStream(systemPrompt, formattedHistory, prompt, controller.signal, (delta) => {
+      await chatWithCustomStream(systemPrompt, formattedHistory, prompt, localController.signal, (delta) => {
         full += delta;
         safePost({ type: 'DELTA', text: delta });
       });
@@ -1255,8 +1201,7 @@ chrome.runtime.onConnect.addListener((port) => {
       }
       safePost({ type: 'DONE', fullText: full });
     } catch (err) {
-      const aborted = controller.signal.aborted;
-      // Keep whatever streamed in before the stop/error
+      const aborted = localController.signal.aborted;
       if (full.trim()) {
         await saveChatMessage({
           chatId,
@@ -1272,7 +1217,7 @@ chrome.runtime.onConnect.addListener((port) => {
         safePost({ type: 'ERROR', error: String(err instanceof Error ? err.message : err) });
       }
     } finally {
-      if (abortControllers.get(chatId) === controller) abortControllers.delete(chatId);
+      if (abortControllers.get(chatId) === localController) abortControllers.delete(chatId);
     }
   });
 });
@@ -1322,6 +1267,30 @@ async function resolveResearchTopic(
 
   const cleaned = res.trim().replace(/^["']|["']$/g, '').split('\n')[0].trim();
   return (cleaned.length > 5 && cleaned.length < 300) ? cleaned : topic;
+}
+
+/**
+ * Preview handler: resolves the topic + generates sub-questions so the
+ * sidepanel can show a confirmation modal before research begins.
+ */
+async function handlePreviewDeepResearch(request: Record<string, unknown>): Promise<Record<string, unknown>> {
+  const { projectId, topic, chatId } = request;
+  if (!projectId || !topic) throw new Error('projectId and topic are required');
+
+  const chatFn = (s: string, u: string) => chatWithCustom(s, [], u);
+
+  // Resolve conversational references into a standalone topic
+  let effectiveTopic = topic as string;
+  try {
+    effectiveTopic = await resolveResearchTopic(topic as string, chatId as string | undefined, projectId as string, chatFn);
+  } catch {
+    // fallback to raw topic
+  }
+
+  // Generate sub-questions for user review
+  const subQuestions = await generateSubQuestions(effectiveTopic, chatFn).catch(() => [] as string[]);
+
+  return { effectiveTopic, subQuestions };
 }
 
 async function handleDeepResearch(request: Record<string, unknown>): Promise<Record<string, unknown>> {
@@ -1432,14 +1401,13 @@ async function executeResearch({ projectId, chatId, topic, effectiveTopic, mode 
     // Persist the synthesis as an assistant message — this is what keeps
     // the chat session intact after research finishes.
     if (chatId) {
-      const sourcesList = [...new Set(result.sources)].map(s => `- ${s}`).join('\n');
       const interpretedNote = effectiveTopic !== topic ? `*Interpreted as: "${effectiveTopic}"*\n\n` : '';
       // Truncate the heading topic to keep the report title readable
       const headingTopic = topic.length > 120 ? topic.slice(0, 117) + '…' : topic;
       await saveChatMessage({
         chatId,
         role: 'assistant',
-        text: `## Deep Research: ${headingTopic}\n\n${interpretedNote}${result.synthesis}\n\n### Sources Used\n${sourcesList}`,
+        text: `## Deep Research: ${headingTopic}\n\n${interpretedNote}${result.synthesis}`,
         timestamp: new Date().toISOString(),
         provider: 'custom'
       });
@@ -1471,7 +1439,7 @@ async function executeResearch({ projectId, chatId, topic, effectiveTopic, mode 
     // Evict the in-memory Orama index for this session; persisted documents
     // (source pages + synthesis report) rehydrate from IDB on the next search.
     resetSessionIndex(projectId);
-    chrome.runtime.sendMessage({ action: 'DEEP_RESEARCH_DONE', projectId }).catch(() => {});
+    chrome.runtime.sendMessage({ action: 'DEEP_RESEARCH_DONE', projectId, chatId }).catch(() => {});
     notifySidepanelSync();
   }
 }

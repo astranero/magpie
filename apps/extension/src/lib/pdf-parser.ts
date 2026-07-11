@@ -6,6 +6,8 @@
 // deep-researcher.ts (research source ingestion) can share the logic
 // without circular imports.
 
+import { sendToOffscreen } from './offscreen-client';
+
 /** Convert an ArrayBuffer to a base64 string without stack overflow on large files. */
 import { looksLikeOcrGarbage } from './quality-gate';
 
@@ -52,7 +54,6 @@ export async function pdfBase64ToBody(
   base64: string,
   ocrFn?: (dataUrl: string, instruction: string) => Promise<string>
 ): Promise<string> {
-  await ensureOffscreen();
   // Guard against the sendMessage payload cap (~64 MB). base64 is ~1.33× the
   // byte size; anything near the cap must go through the URL path instead.
   if (base64.length > 48 * 1024 * 1024) {
@@ -60,7 +61,7 @@ export async function pdfBase64ToBody(
   }
   let res: any;
   try {
-    res = await chrome.runtime.sendMessage({ action: 'OFFSCREEN_PARSE_PDF', base64 });
+    res = await sendToOffscreen({ action: 'OFFSCREEN_PARSE_PDF', base64 });
   } catch (e: any) {
     throw new Error(`PDF transfer failed (likely too large, ~${Math.round(base64.length / 1.33 / 1024 / 1024)} MB): ${e.message}`);
   }
@@ -77,8 +78,7 @@ export async function pdfUrlToBody(
   url: string,
   ocrFn?: (dataUrl: string, instruction: string) => Promise<string>
 ): Promise<string> {
-  await ensureOffscreen();
-  const res: any = await chrome.runtime.sendMessage({ action: 'OFFSCREEN_PARSE_PDF_URL', url });
+  const res: any = await sendToOffscreen({ action: 'OFFSCREEN_PARSE_PDF_URL', url });
   if (!res?.ok) throw new Error(res?.error || 'PDF parse failed');
   return assemblePdfBody(res, ocrFn);
 }

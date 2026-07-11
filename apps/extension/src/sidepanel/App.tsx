@@ -87,12 +87,12 @@ export default function App() {
   // "back" lands on the message the user was reading, not the bottom.
   const docReturnViewRef = useRef<'lore' | 'chat'>('lore');
   const chatScrollTopRef = useRef<number | null>(null);
+  const chatScrollToBottomRef = useRef<(() => void) | null>(null);
   const logBufferRef = useRef<Record<string, string[]>>({});
   const logFlushTimerRef = useRef<number | null>(null);
   // Live research synthesis stream (report tokens during [SYNTHESIZING])
-  const [liveSynthesis, setLiveSynthesis] = useState<Record<string, string>>({});
-  const synthBufferRef = useRef<Record<string, string>>({});
-  const synthFlushTimerRef = useRef<number | null>(null);
+
+
   // User-defined slash commands (Settings → Custom Commands)
   const [customCommands, setCustomCommands] = useState<SlashCommand[]>([]);
   // Storage durability: the real guarantee for extensions is the
@@ -195,6 +195,15 @@ export default function App() {
     }
   }, []);
 
+  // Pre-research confirmation modal state
+  const [researchConfirm, setResearchConfirm] = useState<{
+    topic: string;
+    effectiveTopic: string;
+    subQuestions: string[];
+    mode: 'quick' | 'deep';
+    loading: boolean;
+  } | null>(null);
+
   useEffect(() => {
     refreshTabInfo();
     if (typeof chrome !== 'undefined' && chrome.tabs) {
@@ -253,29 +262,11 @@ export default function App() {
           }, 300);
         }
       }
-      if (m.action === 'DEEP_RESEARCH_DELTA') {
-        synthBufferRef.current[m.projectId] = (synthBufferRef.current[m.projectId] || '') + m.delta;
-        if (!synthFlushTimerRef.current) {
-          synthFlushTimerRef.current = window.setTimeout(() => {
-            synthFlushTimerRef.current = null;
-            const pending = synthBufferRef.current;
-            synthBufferRef.current = {};
-            setLiveSynthesis(prev => {
-              const next = { ...prev };
-              for (const [pid, text] of Object.entries(pending)) next[pid] = (next[pid] || '') + text;
-              return next;
-            });
-          }, 250);
-        }
-      }
+
       if (m.action === 'DEEP_RESEARCH_DONE') {
+        loadChatHistory(m.chatId);
         setResearching(prev => ({ ...prev, [m.projectId]: false }));
-        synthBufferRef.current = {};
-        setLiveSynthesis(prev => {
-          const next = { ...prev };
-          delete next[m.projectId];
-          return next;
-        });
+
       }
     };
 
@@ -327,13 +318,71 @@ export default function App() {
           loadDocuments(activeProjectId);
           loadChats(activeProjectId);
         }
-        if (activeChatId) {
-          loadChatHistory(activeChatId);
-        }
       }
     };
     return () => channel.close();
   }, [activeProjectId, activeChatId]);
+
+  // ──────── Write documents to local folder when they change ────────
+  useEffect(() => {
+    if (!activeProjectId || documents.length === 0) return;
+
+    (async () => {
+      try {
+        const handle = await get('ara-local-directory-handle');
+        if (!handle) return;
+
+        // @ts-ignore
+        const perm = await handle.queryPermission({ mode: 'readwrite' });
+        if (perm !== 'granted') {
+          if (!permissionWarnedRef.current) {
+            permissionWarnedRef.current = true;
+            showToast('error', 'Folder write access expired — re-pick the save folder in Config');
+          }
+          return;
+        }
+
+        const project = projects.find(p => p.id === activeProjectId);
+        const rawTitle = project?.title || 'workspace';
+        const dirName = rawTitle.trim()
+          .normalize('NFC')
+          .replace(/[\u200E\u200F\u200B\u200C\u200D\uFEFF]/g, '')
+          .replace(/[^\w\s\-().,'!&+#@\[\]{}]/g, '')
+          .replace(/\s+/g, ' ')
+          .replace(/^\.+/, '')
+          .replace(/\.+$/, '')
+          .trim()
+          .slice(0, 100) || 'workspace';
+
+        // @ts-ignore
+        const workspaceDir = await handle.getDirectoryHandle(dirName, { create: true });
+
+        for (const doc of documents) {
+          if (!doc.content) continue;
+          const cleanTitle = doc.title.trim()
+            .normalize('NFC')
+            .replace(/[\u200E\u200F\u200B\u200C\u200D\uFEFF]/g, '')
+            .replace(/[^\w\s\-().,'!&+#@\[\]{}]/g, '')
+            .replace(/\s+/g, ' ')
+            .replace(/^\.+/, '')
+            .replace(/\.+$/, '')
+            .trim();
+          const fileName = `${cleanTitle.slice(0, 100) || 'untitled'}.md`;
+          try {
+            // @ts-ignore
+            const fileHandle = await workspaceDir.getFileHandle(fileName, { create: true });
+            const writable = await fileHandle.createWritable();
+            await writable.write(doc.content);
+            await writable.close();
+          } catch (fileErr) {
+            console.warn(`[local-folder] Failed to write ${fileName}:`, fileErr);
+          }
+        }
+      } catch (err) {
+        console.error('[local-folder] Write pass failed:', err);
+      }
+    })();
+  }, [documents, activeProjectId, projects]);
 
   // ──────── Async Import Progress (PDF + Images) ────────
   useEffect(() => {
@@ -391,6 +440,18 @@ export default function App() {
       loadChatHistory(activeChatId);
     }
   }, [activeChatId]);
+
+  // When switching to chat view, verify research is still actually running.
+  // If the worker finished while the panel was on another tab or closed,
+  // DEEP_RESEARCH_DONE may have been missed — this clears the stale flag.
+  useEffect(() => {
+    if (view !== 'chat' || !activeProjectId) return;
+    msg('GET_RESEARCH_STATUS').then((res: any) => {
+      if (res?.success && !res.running && researching[activeProjectId]) {
+        setResearching(prev => ({ ...prev, [activeProjectId]: false }));
+      }
+    }).catch(() => {});
+  }, [view, activeProjectId]);
 
   useEffect(() => {
     if (msgEnd.current) {
@@ -562,8 +623,12 @@ export default function App() {
       await set('ara-local-directory-handle', handle);
       setLocalFolderName(handle.name);
       showToast('success', 'Local folder selected');
-    } catch (err) {
-      console.error(err);
+    } catch (err: any) {
+      // AbortError = user dismissed the picker — not an error
+      if (err?.name !== 'AbortError') {
+        console.error('Failed to pick local folder:', err);
+        showToast('error', 'Could not access folder — check browser permissions');
+      }
     }
   };
 
@@ -586,6 +651,24 @@ export default function App() {
           }
           return;
         }
+        
+        // Get the current project's title for the workspace subdirectory
+        const project = projects.find(p => p.id === activeProjectId);
+        const projectTitle = project?.title || 'Unnamed Workspace';
+        const cleanProjectTitle = projectTitle.trim()
+          .normalize('NFC')
+          .replace(/[\u200E\u200F\u200B\u200C\u200D\uFEFF]/g, '')
+          .replace(/[^\w\s\-().,'!&+#@\[\]{}]/g, '')
+          .replace(/\s+/g, ' ')
+          .replace(/^\.+/, '')
+          .replace(/\.+$/, '')
+          .trim()
+          .slice(0, 100) || 'Unnamed Workspace';
+        
+        // Get or create the workspace subdirectory
+        // @ts-ignore
+        const workspaceDir = await handle.getDirectoryHandle(cleanProjectTitle, { create: true });
+        
         // File System Access API is very strict about filenames.
         // Use an allowlist approach: keep only safe chars.
         const cleanTitle = doc.title.trim()
@@ -598,7 +681,7 @@ export default function App() {
           .trim();
         const fileName = `${cleanTitle.slice(0, 100) || 'untitled'}.md`;
         // @ts-ignore
-        const fileHandle = await handle.getFileHandle(fileName, { create: true });
+        const fileHandle = await workspaceDir.getFileHandle(fileName, { create: true });
         const writable = await fileHandle.createWritable();
         await writable.write(doc.content);
         await writable.close();
@@ -1109,17 +1192,40 @@ export default function App() {
   const startDeepResearchCommand = async (topic: string, mode: 'quick' | 'deep' = 'quick') => {
     if (!activeProjectId || !activeChatId) return;
 
+    // Show loading state immediately
+    setResearchConfirm({ topic, effectiveTopic: topic, subQuestions: [], mode, loading: true });
+
+    // Fetch preview in background — update modal when ready
+    msg('PREVIEW_DEEP_RESEARCH', {
+      projectId: activeProjectId,
+      chatId: activeChatId,
+      topic,
+      mode
+    }).then((preview) => {
+      setResearchConfirm(prev => prev ? {
+        ...prev,
+        effectiveTopic: (preview.effectiveTopic as string) || topic,
+        subQuestions: (preview.subQuestions as string[]) || [],
+        loading: false
+      } : null);
+    }).catch(() => {
+      // Preview failed — just show the raw topic with no sub-questions
+      setResearchConfirm(prev => prev ? { ...prev, loading: false } : null);
+    });
+  };
+
+  const executeDeepResearch = async (topic: string, effectiveTopic: string, _subQuestions: string[], mode: 'quick' | 'deep') => {
+    if (!activeProjectId || !activeChatId) return;
+
+    setResearchConfirm(null);
     setResearching(prev => ({ ...prev, [activeProjectId]: true }));
-    // Clear previous research logs when starting a new run
     setResearchLogs(prev => ({ ...prev, [activeProjectId]: [] }));
 
-    // Add a system message to the chat indicating research has started
-    const researchMsgId = Date.now().toString();
     const currentChatId = activeChatId;
     setMessages(prev => ({
       ...prev,
       [currentChatId]: [...(prev[currentChatId] || []), {
-        id: researchMsgId,
+        id: Date.now().toString(),
         role: 'user',
         text: `${mode === 'deep' ? '/deepresearch' : '/research'} ${topic}`
       }]
@@ -1128,21 +1234,15 @@ export default function App() {
     const researchRes = await msg('START_DEEP_RESEARCH', {
       projectId: activeProjectId,
       chatId: currentChatId,
-      topic,
+      topic: effectiveTopic,
       mode
     });
 
-    setResearching(prev => ({ ...prev, [activeProjectId]: false }));
-
-    // Append completion message to logs (don't clear — they stay until next research)
+    // Note: setResearching(false) handled by DEEP_RESEARCH_DONE handler
     setResearchLogs(prev => ({
       ...prev,
       [activeProjectId]: [...(prev[activeProjectId] || []), '[SUCCESS] Deep research complete — results added to chat.']
     }));
-
-    // The service worker persisted both the /research command and the
-    // synthesis into chat history — reload it so the session stays intact.
-    await loadChatHistory(currentChatId);
 
     if (!researchRes.success) {
       showToast('error', `Research failed: ${researchRes.error}`);
@@ -1199,8 +1299,9 @@ export default function App() {
           ) : (
             <div className="flex items-center flex-1 min-w-0 gap-1 bg-background border-2 border-border hover:border-primary transition-colors focus-within:border-primary">
               <Select
-                value={activeProjectId || undefined}
+                value={activeProjectId || ''}
                 onValueChange={(val) => {
+                  if (!val) return;
                   if (val === 'new') createNewProject();
                   else setActiveProjectId(val as string);
                 }}
@@ -1250,18 +1351,6 @@ export default function App() {
           </div>
         )}
 
-        {/* Persistent Deep Research indicator — visible across ALL views */}
-        {researching[activeProjectId] && view !== 'chat' && (
-          <button
-            onClick={() => { chatScrollTopRef.current = null; setView('chat'); }}
-            className="flex items-center gap-2 px-4 py-2 ink-panel text-[10px] font-mono font-bold uppercase tracking-widest cursor-pointer hover:opacity-90 transition-opacity shrink-0"
-          >
-            <Sparkles size={12} className="animate-pulse text-highlight" />
-            <span>Deep Research Running — Click to view</span>
-            <span className="ml-auto text-highlight">{(researchLogs[activeProjectId] || []).length} steps</span>
-          </button>
-        )}
-
         {/* Tab Context for Sources View */}
         {view === 'lore' && tabInfo && (
           <div className="flex items-center gap-3 p-3 border-b border-border bg-muted/40 shrink-0">
@@ -1286,9 +1375,6 @@ export default function App() {
               globalDocuments={globalDocuments}
               authed={authed}
               syncing={syncing}
-              activeProjectId={activeProjectId}
-              researching={researching}
-              researchLogs={researchLogs}
               toggleDoc={toggleDoc}
               downloadDoc={downloadDoc}
               deleteDoc={deleteDoc}
@@ -1344,6 +1430,7 @@ export default function App() {
               activeProjectId={activeProjectId}
               generating={generating}
               researching={researching}
+              isActive={view === 'chat'}
               
               researchLogs={researchLogs}
               documents={documents}
@@ -1352,8 +1439,9 @@ export default function App() {
               pageContextTitle={tabInfo?.title ?? null}
               onTogglePageContext={togglePageContext}
               scrollPosRef={chatScrollTopRef}
+              scrollToBottomRef={chatScrollToBottomRef}
               customCommands={customCommands}
-              liveSynthesis={liveSynthesis[activeProjectId] || ''}
+
               onOpenDocument={async (docId, anchorId) => {
                 // If doc is not in current lists, fetch it to globalDocuments so DocumentView can display it
                 const exists = documents.find(d => d.id === docId) || globalDocuments.find(d => d.id === docId);
@@ -1390,6 +1478,15 @@ export default function App() {
                 } else showToast('error', (res.error as string) || 'Failed to fetch custom models');
               }}
               docCount={docCount}
+              globalDocCount={globalDocuments.length}
+              onCleanupOrphans={async () => {
+                const res = await msg('CLEANUP_ORPHANS');
+                if (res.success) {
+                  const n = res.deleted as number;
+                  showToast('success', n > 0 ? `Removed ${n} unlinked document${n === 1 ? '' : 's'} from library` : 'No unlinked documents found');
+                  if (activeProjectId) loadDocuments(activeProjectId);
+                } else showToast('error', (res.error as string) || 'Cleanup failed');
+              }}
               authed={authed}
               profile={profile}
               login={login}
@@ -1411,6 +1508,74 @@ export default function App() {
         </div>
       </main>
 
+      {/* ── Pre-Research Confirmation Modal ── */}
+      {researchConfirm && (
+        <div className="absolute inset-0 z-50 flex items-end justify-center bg-background/80 backdrop-blur-sm p-4">
+          <div className="w-full bg-card border-2 border-border rounded-lg shadow-card p-4 flex flex-col gap-3 max-h-[80vh] overflow-y-auto">
+            <div className="flex items-center justify-between">
+              <span className="text-[10px] font-bold font-mono uppercase tracking-widest text-primary">
+                {researchConfirm.mode === 'deep' ? '🔬 Deep Research' : '🔍 Research'} — Confirm Plan
+              </span>
+              <button onClick={() => setResearchConfirm(null)} className="text-muted-foreground hover:text-foreground text-xs font-mono">✕</button>
+            </div>
+
+            {researchConfirm.loading ? (
+              <div className="flex items-center gap-2 text-xs text-muted-foreground py-4 justify-center">
+                <Sparkles size={12} className="animate-pulse text-primary" />
+                <span>Analyzing topic & generating research plan…</span>
+              </div>
+            ) : (
+              <>
+                <div>
+                  <div className="text-[10px] font-mono font-bold uppercase tracking-widest text-muted-foreground mb-1">Research Topic</div>
+                  <div className="text-sm font-mono bg-background border border-border rounded px-3 py-2 text-foreground">
+                    {researchConfirm.effectiveTopic}
+                  </div>
+                  {researchConfirm.effectiveTopic !== researchConfirm.topic && (
+                    <div className="text-[10px] text-muted-foreground mt-1 font-mono">Resolved from: "{researchConfirm.topic}"</div>
+                  )}
+                </div>
+
+                {researchConfirm.subQuestions.length > 0 && (
+                  <div>
+                    <div className="text-[10px] font-mono font-bold uppercase tracking-widest text-muted-foreground mb-1">Research Sub-Questions</div>
+                    <div className="space-y-1">
+                      {researchConfirm.subQuestions.map((q, i) => (
+                        <div key={i} className="text-xs font-mono bg-background border border-border rounded px-3 py-1.5 text-foreground flex gap-2">
+                          <span className="text-primary font-bold shrink-0">{i + 1}.</span>
+                          <span>{q}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                <div className="flex gap-2 pt-1">
+                  <Button
+                    className="flex-1 h-9 text-xs font-bold font-mono uppercase tracking-widest"
+                    onClick={() => executeDeepResearch(
+                      researchConfirm.topic,
+                      researchConfirm.effectiveTopic,
+                      researchConfirm.subQuestions,
+                      researchConfirm.mode
+                    )}
+                  >
+                    Start Research
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    className="h-9 text-xs font-mono border-2 border-border"
+                    onClick={() => setResearchConfirm(null)}
+                  >
+                    Cancel
+                  </Button>
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+      )}
+
       {/* ── Bottom Navigation Bar ── */}
       <nav className="flex items-center justify-between px-3 py-2.5 bg-card border-t border-border shrink-0">
         <button 
@@ -1422,7 +1587,7 @@ export default function App() {
         <div className="w-px h-4 bg-border mx-2"></div>
         <button 
           className={`flex-1 text-center py-2 text-xs font-bold font-mono tracking-widest uppercase transition-colors rounded-md border-2 ${view === 'chat' ? 'border-primary/25 bg-primary/10 text-primary' : 'border-transparent text-muted-foreground hover:bg-accent hover:text-foreground'}`}
-          onClick={() => { chatScrollTopRef.current = null; setView('chat'); }}
+          onClick={() => { chatScrollTopRef.current = null; setView('chat'); chatScrollToBottomRef.current?.(); }}
         >
           Chat
         </button>

@@ -5,6 +5,7 @@
 // No external dependencies — pure IndexedDB API.
 
 import { BRAND } from './brand';
+import { sendToOffscreen } from './offscreen-client';
 
 const DB_NAME = BRAND.dbNameMain;
 const DB_VERSION = 3;
@@ -317,9 +318,25 @@ export async function unlinkDocumentFromProject(projectId: string, documentId: s
 
 export async function deleteProject(id: string): Promise<void> {
   const db = await openDB();
+
+  // First, fetch the project to get its documentIds (V3 architecture).
+  // Do this before opening the write transaction — IDB transactions
+  // auto-commit if you await across microtask boundaries inside them.
+  const readTx = tx(db, 'projects');
+  const project = await reqToPromise<Project | undefined>(readTx.objectStore('projects').get(id));
+  const linkedDocIds: string[] = project?.documentIds ?? [];
+
+  // Collect all doc IDs to delete — linked ones from documentIds array,
+  // plus any legacy docs that still carry the old projectId field.
+  const legacyReadTx = tx(db, 'documents');
+  const legacyDocIds = await reqToPromise<IDBValidKey[]>(
+    legacyReadTx.objectStore('documents').index('projectId').getAllKeys(id)
+  );
+  const docIdsToDelete = Array.from(new Set([...linkedDocIds, ...(legacyDocIds as string[])]));
+
   const transaction = tx(db, ['projects', 'chats', 'documents', 'chunks', 'chatHistory'], 'readwrite');
-  
-  // 1. Delete project
+
+  // 1. Delete project record
   transaction.objectStore('projects').delete(id);
 
   // 2. Delete chats and their history
@@ -332,28 +349,61 @@ export async function deleteProject(id: string): Promise<void> {
   for (const cKey of chatKeys) {
     chatStore.delete(cKey);
     const histKeys = await reqToPromise<IDBValidKey[]>(chatHistoryChatIdIndex.getAllKeys(cKey));
-    for (const hKey of histKeys) {
-      chatHistoryStore.delete(hKey);
-    }
+    for (const hKey of histKeys) chatHistoryStore.delete(hKey);
   }
 
-  // 3. Delete documents and their chunks
+  // 3. Delete documents and their chunks (V3: use documentIds array)
   const docStore = transaction.objectStore('documents');
   const chunkStore = transaction.objectStore('chunks');
-  const docProjectIdIndex = docStore.index('projectId');
   const chunkDocIdIndex = chunkStore.index('docId');
 
-  const docKeys = await reqToPromise<IDBValidKey[]>(docProjectIdIndex.getAllKeys(id));
-  for (const dKey of docKeys) {
-    docStore.delete(dKey);
-    const cKeys = await reqToPromise<IDBValidKey[]>(chunkDocIdIndex.getAllKeys(dKey));
-    for (const cKey of cKeys) {
-      chunkStore.delete(cKey);
-    }
+  for (const dId of docIdsToDelete) {
+    docStore.delete(dId);
+    const cKeys = await reqToPromise<IDBValidKey[]>(chunkDocIdIndex.getAllKeys(dId));
+    for (const cKey of cKeys) chunkStore.delete(cKey);
   }
 
   await txComplete(transaction);
   notifySync();
+}
+
+/**
+ * Delete all documents not linked to any workspace.
+ * Returns the count of deleted documents.
+ */
+export async function deleteOrphanDocuments(): Promise<number> {
+  const db = await openDB();
+
+  // Collect all doc IDs that are linked to at least one project
+  const projectsTx = tx(db, 'projects');
+  const allProjects = await reqToPromise<Project[]>(projectsTx.objectStore('projects').getAll());
+  const linkedIds = new Set<string>();
+  for (const p of allProjects) {
+    for (const id of p.documentIds ?? []) linkedIds.add(id);
+  }
+
+  // Get all document IDs
+  const docReadTx = tx(db, 'documents');
+  const allDocIds = await reqToPromise<IDBValidKey[]>(docReadTx.objectStore('documents').getAllKeys());
+
+  const orphanIds = (allDocIds as string[]).filter(id => !linkedIds.has(id));
+  if (orphanIds.length === 0) return 0;
+
+  // Delete orphans + their chunks
+  const writeTx = tx(db, ['documents', 'chunks'], 'readwrite');
+  const docStore = writeTx.objectStore('documents');
+  const chunkStore = writeTx.objectStore('chunks');
+  const chunkIdx = chunkStore.index('docId');
+
+  for (const id of orphanIds) {
+    docStore.delete(id);
+    const cKeys = await reqToPromise<IDBValidKey[]>(chunkIdx.getAllKeys(id));
+    for (const cKey of cKeys) chunkStore.delete(cKey);
+  }
+
+  await txComplete(writeTx);
+  notifySync();
+  return orphanIds.length;
 }
 
 // ── Chat Operations ──
@@ -417,26 +467,44 @@ export interface SaveDocumentResult {
   id: string;
   /** Chunks with their final `id` and `docId` assigned — use these for vector indexing. */
   chunks: Chunk[];
+  isDuplicate?: boolean;
+  existingId?: string;
+}
+
+/**
+ * Check if a document with the same URL already exists.
+ * Uses the URL as the canonical deduplication key.
+ */
+export async function findExistingDocumentByUrl(url: string): Promise<StoredDocument | undefined> {
+  const db = await openDB();
+  const transaction = tx(db, 'documents');
+  const store = transaction.objectStore('documents');
+  const docs = await reqToPromise<StoredDocument[]>(store.getAll());
+  return docs.find(d => d.url === url);
 }
 
 export async function saveDocument(
   doc: Omit<StoredDocument, 'id' | 'enabled'> & { enabled?: boolean },
   chunks: Omit<Chunk, 'id' | 'docId'>[]
 ): Promise<SaveDocumentResult> {
+  // Deduplication: check if document with same URL already exists
+  if (doc.url) {
+    const existing = await findExistingDocumentByUrl(doc.url);
+    if (existing) {
+      console.log(`[DB] Document with URL already exists, skipping: ${doc.url}`);
+      return { id: existing.id, chunks: [], isDuplicate: true, existingId: existing.id };
+    }
+  }
+
   const db = await openDB();
   const id = generateId();
 
   const finalChunks: Chunk[] = chunks.map(chunk => ({ ...chunk, id: generateId(), docId: id }));
 
   // Generate embeddings BEFORE opening the IDB transaction.
-  // chrome.runtime.sendMessage is async and crosses microtask boundaries,
-  // which would cause the IDB transaction to auto-commit if done inside it.
+  // Using robust offscreen client with auto-retry on failure.
   try {
-    let res: any = await chrome.runtime.sendMessage({ action: 'OFFSCREEN_GET_EMBEDDINGS', texts: finalChunks.map(c => c.text) });
-    if (!res?.ok) {
-      await chrome.runtime.sendMessage({ action: 'ENSURE_OFFSCREEN' });
-      res = await chrome.runtime.sendMessage({ action: 'OFFSCREEN_GET_EMBEDDINGS', texts: finalChunks.map(c => c.text) });
-    }
+    const res: any = await sendToOffscreen({ action: 'OFFSCREEN_GET_EMBEDDINGS', texts: finalChunks.map(c => c.text) });
     if (res?.ok && Array.isArray(res.embeddings)) {
       res.embeddings.forEach((embedding: number[], idx: number) => {
         if (finalChunks[idx]) finalChunks[idx].embedding = embedding;

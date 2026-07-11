@@ -4,7 +4,7 @@ import remarkGfm from 'remark-gfm';
 import remarkMath from 'remark-math';
 import rehypeKatex from 'rehype-katex';
 import { LocalDocument, ChatMessage, ResolvedCitation } from '../types';
-import { Send, StopCircle, Sparkles } from 'lucide-react';
+import { Send, StopCircle, Sparkles, ChevronDown, ChevronUp, Loader2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { paletteEntries, SlashCommand } from '../../lib/commands';
 
@@ -30,11 +30,77 @@ interface ChatViewProps {
   onTogglePageContext?: () => void;
   /** Saved scroll position — restored when returning from a cited document. */
   scrollPosRef?: React.MutableRefObject<number | null>;
+  /** Callback ref — caller stores a scrollToBottom() fn here for imperative use. */
+  scrollToBottomRef?: React.MutableRefObject<(() => void) | null>;
   /** User-defined commands merged into the palette. */
   customCommands?: SlashCommand[];
-  /** Report tokens streamed live during research synthesis. */
-  liveSynthesis?: string;
+
+  /** Whether this tab is currently visible — used to scroll to bottom on tab switch. */
+  isActive?: boolean;
 }
+
+// ─────────────────────────────────────────────
+// Collapsible long message wrapper
+// ─────────────────────────────────────────────
+
+const COLLAPSE_WORD_THRESHOLD = 150;
+
+interface CollapsibleMessageProps {
+  text: string;
+  streaming?: boolean;
+  children: React.ReactNode;
+}
+
+const CollapsibleMessage: React.FC<CollapsibleMessageProps> = ({ text, streaming, children }) => {
+  const wordCount = useMemo(() => text.split(/\s+/).filter(Boolean).length, [text]);
+  const isLong = wordCount > COLLAPSE_WORD_THRESHOLD;
+  const [expanded, setExpanded] = useState(false);
+
+  if (!isLong || streaming) return <>{children}</>;
+
+  return (
+    <div className="relative">
+      {/* Content — clamped when collapsed */}
+      <div className={expanded ? undefined : 'max-h-64 overflow-hidden'}>
+        {children}
+      </div>
+
+      {/* Collapsed: clickable gradient that expands on click */}
+      {!expanded && (
+        <button
+          type="button"
+          onClick={() => setExpanded(true)}
+          aria-label="Expand message"
+          className="absolute bottom-0 left-0 right-0 h-16 flex items-end justify-center pb-1
+                     bg-gradient-to-t from-card to-transparent
+                     hover:from-card/90 transition-colors cursor-pointer w-full"
+        >
+          <span className="flex items-center gap-1 rounded-full bg-card border border-border
+                           px-2.5 py-0.5 text-[10px] font-bold font-mono uppercase tracking-widest
+                           text-muted-foreground shadow-sm">
+            <ChevronDown size={10} />
+            {wordCount} words
+          </span>
+        </button>
+      )}
+
+      {/* Expanded: collapse button at bottom */}
+      {expanded && (
+        <button
+          type="button"
+          onClick={() => setExpanded(false)}
+          aria-label="Collapse message"
+          className="mt-2 flex items-center gap-1 rounded-full border border-border
+                     px-2.5 py-0.5 text-[10px] font-bold font-mono uppercase tracking-widest
+                     text-muted-foreground hover:text-foreground hover:border-primary/50 transition-colors"
+        >
+          <ChevronUp size={10} />
+          Collapse
+        </button>
+      )}
+    </div>
+  );
+};
 
 // ─────────────────────────────────────────────
 // Message body — markdown + numbered citation chips
@@ -78,9 +144,13 @@ function normalizeLatexDelimiters(text: string): string {
   for (let i = 0; i < parts.length; i++) {
     // Odd indices are the captured code spans/fences from the split — skip them
     if (i % 2 === 1) continue;
-    parts[i] = parts[i]
-      .replace(/\\\[([\s\S]*?)\\\]/g, (_full, inner) => `$$${inner}$$`)
-      .replace(/\\\(([\s\S]*?)\\\)/g, (_full, inner) => `$${inner}$`);
+    parts[i] = parts[i].replace(/(\\)?\\\[([\s\S]*?)\\\]/g, (full, escape, inner) => {
+      if (escape) return full; // It was an escaped bracket, so leave it alone
+      return `$$${inner}$$`;
+    }).replace(/(\\)?\\\(([\s\S]*?)\\\)/g, (full, escape, inner) => {
+      if (escape) return full; // It was an escaped parenthesis, so leave it alone
+      return `$${inner}$`;
+    });
   }
   return parts.join('');
 }
@@ -249,11 +319,11 @@ export const ChatView: React.FC<ChatViewProps> = ({
   pageContextTitle = null,
   onTogglePageContext,
   scrollPosRef,
+  scrollToBottomRef,
   customCommands = [],
-  liveSynthesis = ''
+  isActive = false
 }) => {
   const msgEnd = useRef<HTMLDivElement>(null);
-  const logsEnd = useRef<HTMLDivElement>(null);
   const scrollBox = useRef<HTMLDivElement>(null);
   // Two-step clear confirmation
   const [confirmClear, setConfirmClear] = useState(false);
@@ -270,6 +340,24 @@ export const ChatView: React.FC<ChatViewProps> = ({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Scroll to bottom only when tab transitions from hidden → visible
+  const wasActive = useRef(isActive);
+  useEffect(() => {
+    const becameActive = isActive && !wasActive.current;
+    wasActive.current = isActive;
+    if (becameActive) {
+      msgEnd.current?.scrollIntoView({ behavior: 'instant' });
+    }
+  }, [isActive]);
+
+  // Register imperative scrollToBottom so parent can call it on nav clicks
+  useEffect(() => {
+    if (scrollToBottomRef) {
+      scrollToBottomRef.current = () => msgEnd.current?.scrollIntoView({ behavior: 'instant' });
+    }
+    return () => { if (scrollToBottomRef) scrollToBottomRef.current = null; };
+  }, [scrollToBottomRef]);
+
   useEffect(() => {
     if (restoredScroll.current) { restoredScroll.current = false; return; }
     // F4: smooth-scroll animations contend with layout during streaming.
@@ -278,9 +366,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
     msgEnd.current?.scrollIntoView({ behavior });
   }, [messages, generating, researching]);
 
-  useEffect(() => {
-    logsEnd.current?.scrollIntoView({ behavior: researching ? 'auto' : 'smooth' });
-  }, [researchLogs, researching]);
+
 
   const handleClearClick = () => {
     if (confirmClear) {
@@ -390,9 +476,13 @@ export const ChatView: React.FC<ChatViewProps> = ({
               }`}
             >
               {m.role === 'assistant' || m.role === 'system' ? (
-                <MessageBody text={m.text} compact={m.role === 'system'} streaming={m.streaming} resolveCitations={resolveCitations} onOpenDocument={onOpenDocument} />
+                <CollapsibleMessage text={m.text} streaming={m.streaming}>
+                  <MessageBody text={m.text} compact={m.role === 'system'} streaming={m.streaming} resolveCitations={resolveCitations} onOpenDocument={onOpenDocument} />
+                </CollapsibleMessage>
               ) : (
-                <div className="whitespace-pre-wrap font-mono">{m.text}</div>
+                <CollapsibleMessage text={m.text}>
+                  <div className="whitespace-pre-wrap font-mono">{m.text}</div>
+                </CollapsibleMessage>
               )}
             </div>
           </div>
@@ -412,34 +502,17 @@ export const ChatView: React.FC<ChatViewProps> = ({
           </div>
         )}
         {researching[activeProjectId] && (
-          <div className="flex justify-start" role="status" aria-live="polite" aria-label="Deep research in progress">
-            <div className="w-full rounded-lg ink-panel p-4 text-xs font-mono shadow-card">
-              <div className="flex items-center gap-2 mb-3 pb-2 border-b border-white/10 text-highlight">
-                <Sparkles size={14} className="animate-pulse" aria-hidden="true" />
-                <span className="font-bold tracking-widest uppercase">DEEP RESEARCH AGENT RUNNING</span>
+          <div className="flex justify-start">
+            <div className="max-w-[85%] rounded-lg rounded-bl-sm border bg-card border-border text-card-foreground px-4 py-3 text-sm flex items-center gap-3 shadow-card">
+              <Loader2 size={14} className="animate-spin text-primary shrink-0" />
+              <div className="flex flex-col gap-0.5 min-w-0">
+                <span className="text-[10px] text-muted-foreground font-bold font-mono uppercase tracking-widest">Researching...</span>
+                {(researchLogs[activeProjectId] || []).length > 0 && (
+                  <span className="text-[10px] text-muted-foreground font-mono truncate max-w-[240px]">
+                    {researchLogs[activeProjectId][researchLogs[activeProjectId].length - 1]}
+                  </span>
+                )}
               </div>
-              <div className="space-y-1 max-h-[300px] overflow-y-auto no-scrollbar">
-                {(researchLogs[activeProjectId] || []).map((log, idx) => (
-                  <div key={idx} className={
-                    log.includes('[ERROR]') ? 'text-red-400' :
-                    log.includes('[WARNING]') ? 'text-yellow-400' :
-                    // SUCCESS uses green to stay within the established research-active color vocabulary
-                    log.includes('[SUCCESS]') ? 'text-emerald-300' :
-                    'opacity-80'
-                  }>
-                    {log}
-                  </div>
-                ))}
-                <div ref={logsEnd} />
-              </div>
-              {liveSynthesis && (
-                <div className="mt-3 pt-3 border-t border-white/10">
-                  <div className="text-[10px] font-bold uppercase tracking-widest text-highlight mb-2">Drafting report…</div>
-                  <div className="rounded-md bg-background text-foreground p-3 max-h-[280px] overflow-y-auto no-scrollbar">
-                    <MessageBody text={liveSynthesis} compact resolveCitations={resolveCitations} onOpenDocument={onOpenDocument} />
-                  </div>
-                </div>
-              )}
             </div>
           </div>
         )}

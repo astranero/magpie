@@ -9,9 +9,6 @@ interface LoreViewProps {
   globalDocuments: LocalDocument[];
   authed: boolean;
   syncing: boolean;
-  activeProjectId: string;
-  researching: Record<string, boolean>;
-  researchLogs: Record<string, string[]>;
   toggleDoc: (id: string, checked: boolean) => void;
   downloadDoc: (doc: LocalDocument) => void;
   deleteDoc: (id: string) => void;
@@ -33,9 +30,6 @@ export const LoreView: React.FC<LoreViewProps> = ({
   globalDocuments,
   authed,
   syncing,
-  activeProjectId,
-  researching,
-  researchLogs,
   toggleDoc,
   downloadDoc,
   deleteDoc,
@@ -382,16 +376,7 @@ export const LoreView: React.FC<LoreViewProps> = ({
         </div>
       )}
 
-      {researching[activeProjectId] && (
-        <div className="absolute bottom-4 left-1/2 -translate-x-1/2 bg-card rounded-lg border border-border shadow-card px-3 py-1.5 flex items-center gap-2 text-xs font-medium text-foreground z-20">
-          <span className="w-1.5 h-1.5 bg-primary animate-pulse" aria-hidden="true" />
-          <span className="text-[10px] font-bold font-mono tracking-widest text-primary truncate max-w-[200px]">
-            {(researchLogs[activeProjectId] && researchLogs[activeProjectId].length > 0)
-              ? researchLogs[activeProjectId][researchLogs[activeProjectId].length - 1]
-              : 'Researching'}
-          </span>
-        </div>
-      )}
+
     </div>
   );
 };

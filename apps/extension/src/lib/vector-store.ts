@@ -64,10 +64,11 @@ async function insertChunks(db: any, chunks: Chunk[]) {
 }
 
 /**
- * Rehydrate the in-memory index with all persisted chunks of the project's
+ * Rehydrate the in-memory index with persisted chunks of the project's
  * documents that are not indexed yet (e.g. after a service worker restart).
+ * Caps at maxChunks to avoid embedding thousands of chunks for large projects.
  */
-export async function ensureProjectIndexed(projectId: string): Promise<void> {
+export async function ensureProjectIndexed(projectId: string, maxChunks = 500): Promise<void> {
   const db = await getSessionDB(projectId);
   const indexed = getIndexedSet(projectId);
 
@@ -76,8 +77,18 @@ export async function ensureProjectIndexed(projectId: string): Promise<void> {
   if (missing.length === 0) return;
 
   const chunks = await getChunksForDocs(missing);
-  await insertChunks(db, chunks);
-  missing.forEach(id => indexed.add(id));
+  
+  // Deduplicate: keep only first chunk per document, then limit total
+  const firstChunkPerDoc = new Map<string, Chunk>();
+  for (const chunk of chunks) {
+    if (chunk.docId && !firstChunkPerDoc.has(chunk.docId)) {
+      firstChunkPerDoc.set(chunk.docId, chunk);
+    }
+  }
+  
+  const dedupedChunks = Array.from(firstChunkPerDoc.values()).slice(0, maxChunks);
+  await insertChunks(db, dedupedChunks);
+  dedupedChunks.forEach(c => { if (c.docId) indexed.add(c.docId); });
 }
 
 /**

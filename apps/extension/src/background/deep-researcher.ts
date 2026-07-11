@@ -1,11 +1,11 @@
-import { saveDocument, linkDocumentToProject } from '../lib/db';
+import { saveDocument, linkDocumentToProject, listDocuments } from '../lib/db';
 import { chunkDocument, makeDocShortId } from '../lib/chunker';
 import { buildFrontmatter } from '../lib/frontmatter';
 import { addChunksToVectorStore, searchSessionChunks } from '../lib/vector-store';
 import { getJob, updateJob, getPage, savePage, listPages } from '../lib/research-store';
 import { pdfUrlToBody } from '../lib/pdf-parser';
 import { checkContentQuality, extractDoi } from '../lib/quality-gate';
-import { getResearchLimits, getResearchDepth, getSynthesisCharBudget, getSourceQuality, RESEARCH_LIMITS, ResearchLimits, SourceQuality } from '../lib/research-limits';
+import { getResearchLimits, getResearchDepth, getSynthesisCharBudget, getSourceQuality, getAcademicDepth, RESEARCH_LIMITS, ResearchLimits, SourceQuality, AcademicDepth } from '../lib/research-limits';
 import { generateBibtex } from '../lib/bibtex';
 import { harvestReferences, partitionRefs, HarvestedRef } from '../lib/reference-harvest';
 import { getMcpServers, McpConnection, isSearchLikeTool, topicArgFor } from '../lib/mcp-client';
@@ -13,16 +13,24 @@ import { searchWithProviders } from '../lib/search-providers';
 import { rankPapers } from '../lib/paper-rank';
 import { semaphore } from '../lib/semaphore';
 
-// F9: cap concurrent indexing so the offscreen document (WebGPU embeddings)
-// doesn't starve sidepanel search queries. Scraping stays parallel across
-// agents (I/O bound); only the saveDocument/embedding phase is serialized.
-const indexingSem = semaphore(2);
+// F9: serial indexing — one document at a time through the ONNX embedding
+// pipeline. Even concurrency=2 causes WASM integer-overflow crashes when
+// papers are long (NeurIPS-style full text = 25+ chunks each). Serial
+// processing keeps peak WASM memory ~constant regardless of session size.
+const indexingSem = semaphore(1);
+
+// Hard cap on markdown length fed to the embedder per research source.
+// ~60 k chars ≈ 15–20 k tokens — enough for a full abstract + methods
+// section. Full papers that exceed this are still stored in full; only the
+// embedding pass is truncated so ONNX never sees a single giant input.
+const MAX_EMBED_CHARS = 60_000;
 
 // Active tier for the current run — set at run start from Settings. A single
 // research job runs at a time (enforced by the job store), so module state
 // is safe here.
 let activeLimits: ResearchLimits = RESEARCH_LIMITS.standard;
 let activeQuality: SourceQuality = 'all';
+let activeAcademicDepth: AcademicDepth = 'abstract';
 
 /**
  * Shared citation contract with normal chat (lib/citations.ts): every chunk
@@ -396,14 +404,20 @@ async function indexResearchDoc(
   }) + markdown;
 
   const docShortId = makeDocShortId(crypto.randomUUID?.() ?? `${Date.now()}`);
-  const rawChunks = chunkDocument({ docShortId, content: fullMarkdown });
 
-  // F9: gate the embedding-heavy saveDocument through the semaphore so
-  // parallel agents don't stack up on the offscreen doc.
-  const { id: docId, chunks: savedChunks } = await indexingSem(() => saveDocument({
+  // Truncate the content fed to the embedder to avoid ONNX WASM overflow on
+  // very long papers. The full content is stored in IndexedDB unchanged —
+  // only the chunk set passed to the embedding pipeline is capped.
+  const embedMarkdown = fullMarkdown.length > MAX_EMBED_CHARS
+    ? fullMarkdown.slice(0, MAX_EMBED_CHARS) + '\n\n*(document truncated for embedding)*'
+    : fullMarkdown;
+  const rawChunks = chunkDocument({ docShortId, content: embedMarkdown });
+
+  // Serial indexing gate — one document at a time through the ONNX pipeline.
+  const { id: docId, chunks: savedChunks, isDuplicate } = await indexingSem(() => saveDocument({
     title: title || 'Untitled',
     url: url || '',
-    content: fullMarkdown,
+    content: fullMarkdown,   // always store full content
     capturedAt: new Date().toISOString(),
     favicon: '',
     wordCount,
@@ -411,6 +425,8 @@ async function indexResearchDoc(
     enabled: true,
     bibtex
   }, rawChunks));
+
+  if (isDuplicate) return docId; // already indexed — skip link + vector steps
 
   await linkDocumentToProject(projectId, docId);
   await addChunksToVectorStore(projectId, savedChunks);
@@ -458,7 +474,8 @@ async function scrapeUrlList(
   signal: AbortSignal | undefined,
   label: AgentLabel
 ): Promise<AgentOutcome> {
-  const urlList = [...new Set(urls)].filter(u => !isJunkUrl(u));
+  const cap = activeLimits.totalSourcesCap;
+  const urlList = [...new Set(urls)].filter(u => !isJunkUrl(u)).slice(0, cap);
   const sources: string[] = [];
   const docIds: string[] = [];
   let i = 1;
@@ -687,18 +704,28 @@ function extractArxivId(url: string): string | null {
  * Returns null on any failure — callers fall back to abstract-only.
  * OCR is intentionally skipped (no ocrFn) to keep research timing predictable.
  */
-async function fetchArxivFullText(arxivId: string, signal?: AbortSignal): Promise<string | null> {
+async function fetchArxivFullText(
+  arxivId: string,
+  signal?: AbortSignal,
+  llmChatFn?: LlmChatFn
+): Promise<string | null> {
   const pdfUrl = `https://arxiv.org/pdf/${arxivId}`;
   try {
     if (signal?.aborted) throw new Error('AbortError');
-    try {
-      // Offscreen fetches + parses (size-scaled timeout, no base64 transfer)
-      const body = await pdfUrlToBody(pdfUrl);
-      const textOnly = body.replace(/## Page \d+\n\n\*\(no extractable text\)\*/g, '').trim();
-      return textOnly.length >= 100 ? body : null;
-    } finally {
-      /* nothing to clean up */
+    const body = await pdfUrlToBody(pdfUrl);
+    const textOnly = body.replace(/## Page \d+\n\n\*\(no extractable text\)\*/g, '').trim();
+    if (textOnly.length < 100) return null;
+
+    // Optionally clean garbled PDF extraction with the LLM
+    if (llmChatFn && isGarbledPdf(body)) {
+      try {
+        const cleaned = await cleanPdfText(body, llmChatFn);
+        return buildCleanedPdfDoc(cleaned, body);
+      } catch {
+        // Cleanup failed — return raw extraction unchanged
+      }
     }
+    return body;
   } catch {
     return null;
   }
@@ -709,23 +736,62 @@ async function runAcademicAgent(
   projectId: string,
   topic: string,
   onProgress: (s: string) => void,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  llmChatFn?: LlmChatFn
 ): Promise<AgentOutcome> {
   const papers: AcademicPaper[] = [];
 
   // Resume: papers cached before a crash count even if the APIs are
-  // rate-limiting us now.
+  // rate-limiting us now. Build a URL→docId map from docs already in this
+  // project so cached papers that are already indexed need zero work.
   const cachedSources: string[] = [];
   const cachedDocIds: string[] = [];
   const cachedTitles = new Set<string>();
   try {
-    const cachedPages = (await listPages()).filter(p => p.label === 'ACADEMIC');
-    for (const page of cachedPages) {
-      cachedDocIds.push(await indexResearchDoc(projectId, page.title, page.url, page.markdown, 'ACADEMIC'));
-      if (page.url.startsWith('http') && !isJunkUrl(page.url)) cachedSources.push(sourceEntry(page.title, page.url));
+    // Fast path: docs already linked to the project — no IDB writes needed
+    const existingDocs = await listDocuments(projectId);
+    const urlToDocId = new Map(existingDocs.map(d => [d.url, d.id]));
+
+    const cachedPages = (await listPages())
+      .filter(p => p.label === 'ACADEMIC')
+      .reverse(); // most recently saved first
+
+    const cacheRestoreCap = Math.min(
+      cachedPages.length,
+      Math.floor(activeLimits.totalSourcesCap / 2)
+    );
+    let restored = 0;
+    let alreadyLinked = 0;
+
+    for (const page of cachedPages.slice(0, cacheRestoreCap)) {
+      if (signal?.aborted) throw new Error('AbortError');
+
+      const existingDocId = urlToDocId.get(page.url);
+      if (existingDocId) {
+        // Already in this project — just track it, no IDB work at all
+        cachedDocIds.push(existingDocId);
+        alreadyLinked++;
+      } else {
+        // Not yet in project — index it (dedup in saveDocument avoids re-embedding)
+        await yieldToEventLoop();
+        const docId = await indexResearchDoc(projectId, page.title, page.url, page.markdown, 'ACADEMIC');
+        cachedDocIds.push(docId);
+        restored++;
+      }
+
+      if (page.url.startsWith('http') && !isJunkUrl(page.url)) {
+        cachedSources.push(sourceEntry(page.title, page.url));
+      }
       cachedTitles.add(page.title.toLowerCase().trim());
     }
-    if (cachedPages.length > 0) onProgress(`[ACADEMIC] Restored ${cachedPages.length} cached paper(s)`);
+
+    const skipped = cachedPages.length - Math.min(cachedPages.length, cacheRestoreCap);
+    if (alreadyLinked + restored > 0) {
+      onProgress(
+        `[ACADEMIC] Cache: ${alreadyLinked} already indexed, ${restored} new` +
+        (skipped > 0 ? `, ${skipped} older skipped` : '')
+      );
+    }
   } catch { /* cache is best-effort */ }
 
   onProgress('[ACADEMIC] Searching Semantic Scholar…');
@@ -770,7 +836,12 @@ async function runAcademicAgent(
   // Algorithmic quality ranking: citations, citation velocity, influential
   // citations, recency, full-text availability. ~30% of slots reserved for
   // the newest papers so fresh work isn't crowded out by citation counts.
-  const academicCap = activeLimits.s2Limit + activeLimits.hfLimit;
+  // Cap academic papers at the totalSourcesCap budget shared with web sources,
+  // keeping a fair share (half) for academic to leave room for web/news.
+  const academicCap = Math.min(
+    activeLimits.s2Limit + activeLimits.hfLimit,
+    Math.floor(activeLimits.totalSourcesCap / 2)
+  );
   if (activeQuality === 'high') {
     const nowYear = new Date().getFullYear();
     const before = deduped.length;
@@ -796,37 +867,36 @@ async function runAcademicAgent(
   // Full-text-first within the selection (fetch order only)
   deduped.sort((a, b) => (extractArxivId(a.url) ? 0 : 1) - (extractArxivId(b.url) ? 0 : 1));
 
-  // Fetch full-text PDFs in parallel batches of 4.
-  const BATCH = 4;
-  for (let i = 0; i < deduped.length; i += BATCH) {
+  // Process papers serially — each embeds fully before the next starts.
+  // Parallel batches (old BATCH=4) caused ONNX WASM integer-overflow crashes
+  // on long papers because 4 × 25 chunks hit peak memory simultaneously.
+  for (const p of deduped) {
     if (signal?.aborted) throw new Error('AbortError');
     await yieldToEventLoop();
-    const batch = deduped.slice(i, i + BATCH);
-    await Promise.all(batch.map(async (p) => {
-      const key = p.title.toLowerCase().trim();
-      const headerLine = `# ${p.title}\n\n**Authors:** ${p.authors || 'Unknown'}${p.year ? ` (${p.year})` : ''}${typeof p.citations === 'number' ? `\n**Citations:** ${p.citations}` : ''}${p.venue ? `\n**Venue:** ${p.venue}` : ''}`;
-      const abstractSection = `## Abstract\n\n${p.abstract}`;
-      let md = `${headerLine}\n\n${abstractSection}`;
+    const key = p.title.toLowerCase().trim();
+    const headerLine = `# ${p.title}\n\n**Authors:** ${p.authors || 'Unknown'}${p.year ? ` (${p.year})` : ''}${typeof p.citations === 'number' ? `\n**Citations:** ${p.citations}` : ''}${p.venue ? `\n**Venue:** ${p.venue}` : ''}`;
+    const abstractSection = `## Abstract\n\n${p.abstract}`;
+    let md = `${headerLine}\n\n${abstractSection}`;
 
-      const arxivId = extractArxivId(p.url);
-      if (arxivId) {
-        onProgress(`[ACADEMIC] Fetching full text: "${p.title.slice(0, 60)}"`);
-        const fullText = await fetchArxivFullText(arxivId, signal);
-        if (fullText) {
-          md = `${headerLine}\n\n${abstractSection}\n\n## Full Paper\n\n${fullText}`;
-          onProgress(`[ACADEMIC] ✓ Full text captured: "${p.title.slice(0, 60)}"`);
-        } else {
-          onProgress(`[ACADEMIC] ✗ PDF unavailable, using abstract: "${p.title.slice(0, 60)}"`);
-        }
+    const arxivId = extractArxivId(p.url);
+    if (arxivId && activeAcademicDepth === 'full') {
+      onProgress(`[ACADEMIC] Fetching full text: "${p.title.slice(0, 60)}"`);
+      const fullText = await fetchArxivFullText(arxivId, signal, llmChatFn);
+      if (fullText) {
+        const wasClean = fullText.includes('<details>');
+        md = `${headerLine}\n\n${abstractSection}\n\n## Full Paper\n\n${fullText}`;
+        onProgress(`[ACADEMIC] ✓ Full text captured${wasClean ? ' (cleaned)' : ''}: "${p.title.slice(0, 60)}"`);
+      } else {
+        onProgress(`[ACADEMIC] ✗ PDF unavailable, using abstract: "${p.title.slice(0, 60)}"`);
       }
+    }
 
-      // Use arXiv abs URL as canonical source when available
-      const sourceUrl = arxivId ? `https://arxiv.org/abs/${arxivId}` : (p.url || '');
-      const bibtex = generateBibtex({ title: p.title, authors: p.authors, year: p.year, doi: p.doi, venue: p.venue, url: sourceUrl || undefined });
-      docIds.push(await indexResearchDoc(projectId, p.title, sourceUrl, md, 'ACADEMIC', bibtex));
-      if (sourceUrl) sources.push(sourceEntry(p.title, sourceUrl));
-      await savePage({ url: sourceUrl || `paper:${key}`, title: p.title, markdown: md, label: 'ACADEMIC' }).catch(() => {});
-    }));
+    // Use arXiv abs URL as canonical source when available
+    const sourceUrl = arxivId ? `https://arxiv.org/abs/${arxivId}` : (p.url || '');
+    const bibtex = generateBibtex({ title: p.title, authors: p.authors, year: p.year, doi: p.doi, venue: p.venue, url: sourceUrl || undefined });
+    docIds.push(await indexResearchDoc(projectId, p.title, sourceUrl, md, 'ACADEMIC', bibtex));
+    if (sourceUrl) sources.push(sourceEntry(p.title, sourceUrl));
+    await savePage({ url: sourceUrl || `paper:${key}`, title: p.title, markdown: md, label: 'ACADEMIC' }).catch(() => {});
   }
 
   onProgress(`[ACADEMIC] Indexed ${docIds.length} paper(s) (${deduped.filter(p => extractArxivId(p.url)).length} with full text)`);
@@ -934,16 +1004,20 @@ export async function runDeepResearch(
   onProgress: (status: string) => void,
   signal?: AbortSignal,
   mode: 'quick' | 'deep' = 'quick',
-  synthesisFn?: SynthesisStreamFn
+  synthesisFn?: SynthesisStreamFn,
+  evaluatorFn?: (sys: string, user: string) => Promise<string>
 ): Promise<{ synthesis: string, sources: string[] }> {
   activeLimits = await getResearchLimits();
   activeQuality = await getSourceQuality();
+  activeAcademicDepth = await getAcademicDepth();
   const depth = await getResearchDepth();
   if (depth !== 'standard') onProgress(`[PLANNING] Research depth: ${depth}`);
   if (activeQuality === 'high') onProgress('[PLANNING] Source quality: high-authority only');
+  if (activeAcademicDepth === 'abstract') onProgress('[PLANNING] Academic papers: abstracts only');
+  else onProgress('[PLANNING] Academic papers: full text');
 
   if (mode === 'deep') {
-    return runDeeperResearch(projectId, topic, llmChatFn, onProgress, signal, synthesisFn);
+    return runDeeperResearch(projectId, topic, llmChatFn, onProgress, signal, synthesisFn, evaluatorFn);
   }
 
   // Reuse the plan from a checkpointed job (resume after crash/restart)
@@ -967,7 +1041,7 @@ export async function runDeepResearch(
   if (agent.docIds.length === 0) {
     onProgress('[WEB] Nothing usable from web search — falling back to academic sources…');
     try {
-      const academic = await runAcademicAgent(projectId, topic, onProgress, signal);
+      const academic = await runAcademicAgent(projectId, topic, onProgress, signal, llmChatFn);
       agent.docIds.push(...academic.docIds);
       agent.sources.push(...academic.sources);
     } catch (e: any) {
@@ -1002,7 +1076,18 @@ export async function runDeepResearch(
 
   const sysPrompt = `You are a research analyst. Using ONLY the excerpts below, write a comprehensive, well-structured markdown report on: "${topic}". Group related points under headings. If the excerpts lack detail on some aspect, say so briefly. Never ask for more context — work with what is provided.\n\n${RESEARCH_CITATION_RULES}`;
 
-  const synthesis = await (synthesisFn ?? llmChatFn)(sysPrompt, `SOURCE EXCERPTS:\n\n${contextText}`);
+  const rawSynthesis = await (synthesisFn ?? llmChatFn)(sysPrompt, `SOURCE EXCERPTS:\n\n${contextText}`);
+
+  // ── External Evaluator pass (Improvement 1) ──────────────────────────────
+  let synthesis = rawSynthesis;
+  const evalLlm = evaluatorFn ?? llmChatFn;
+  onProgress(`[EVALUATING] Running quality evaluation on report…`);
+  const evaluation = await evaluateReport(topic, rawSynthesis, evalLlm).catch(() => null);
+  if (evaluation) {
+    const verdictLabel = evaluation.verdict === 'PASS' ? '✅ PASS' : evaluation.verdict === 'NEEDS_REVISION' ? '⚠️ NEEDS REVISION' : '❌ FAIL';
+    onProgress(`[EVALUATING] Quality verdict: ${verdictLabel} (${evaluation.score}/10) — ${evaluation.recommendation}`);
+    synthesis = rawSynthesis + formatEvaluationBlock(evaluation);
+  }
 
   await saveSynthesisReport(projectId, topic, synthesis, agent.sources, 'quick');
 
@@ -1116,16 +1201,431 @@ Return ONLY the JSON object.`;
   }
 }
 
+// ── State-of-the-art agentic improvements ────────────────────────────────────
+
+/**
+ * IMPROVEMENT 1: External Evaluator (LLM-as-Judge)
+ *
+ * A separate, skeptical evaluator agent reviews the synthesized report.
+ * It is intentionally tuned to find flaws — not to praise.
+ * Returns structured feedback appended to the report as a collapsible section.
+ */
+export interface EvaluationResult {
+  verdict: 'PASS' | 'NEEDS_REVISION' | 'FAIL';
+  score: number; // 0–10
+  strengths: string[];
+  weaknesses: string[];
+  flaggedSections: string[];
+  recommendation: string;
+}
+
+async function evaluateReport(
+  topic: string,
+  report: string,
+  llmChatFn: (sys: string, user: string) => Promise<string>
+): Promise<EvaluationResult | null> {
+  const sys =
+    `You are an expert research auditor and peer reviewer. Your role is to find flaws.
+Do NOT be polite or skew positive. Be highly skeptical and objective.
+
+Evaluate the research report below on: "${topic}"
+
+Assess:
+1. Claim coverage — does it address the topic fully or leave major angles untouched?
+2. Evidence quality — are claims supported by citations or asserted without basis?
+3. Internal consistency — do sections contradict each other?
+4. Depth — does it go beyond surface-level summaries?
+5. Citation density — are [anchor_id] citations present and evenly distributed?
+
+Return STRICT JSON:
+{
+  "verdict": "PASS" | "NEEDS_REVISION" | "FAIL",
+  "score": <0-10 integer>,
+  "strengths": ["<1-sentence strength>", ...],
+  "weaknesses": ["<1-sentence weakness>", ...],
+  "flaggedSections": ["<section heading or quote that needs revision>", ...],
+  "recommendation": "<1-2 sentence actionable summary>"
+}
+Return ONLY the JSON. No explanation outside it.`;
+
+  try {
+    // Use the first 8000 chars of the report to stay within context
+    const reportSlice = report.slice(0, 8000);
+    const res = await llmChatFn(sys, `REPORT TO EVALUATE:\n\n${reportSlice}`);
+    const start = res.indexOf('{');
+    const end = res.lastIndexOf('}');
+    if (start === -1 || end === -1) return null;
+    const parsed = JSON.parse(res.slice(start, end + 1));
+    if (!parsed.verdict || typeof parsed.score !== 'number') return null;
+    return parsed as EvaluationResult;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Format evaluation result as a collapsible markdown section appended to report.
+ */
+function formatEvaluationBlock(ev: EvaluationResult): string {
+  const icon = ev.verdict === 'PASS' ? '✅' : ev.verdict === 'NEEDS_REVISION' ? '⚠️' : '❌';
+  const lines = [
+    `\n\n---\n`,
+    `## ${icon} Quality Evaluation — ${ev.verdict} (${ev.score}/10)`,
+    ``,
+    `> ${ev.recommendation}`,
+    ``,
+  ];
+  if (ev.strengths.length) {
+    lines.push(`**Strengths:**`);
+    ev.strengths.forEach(s => lines.push(`- ${s}`));
+    lines.push('');
+  }
+  if (ev.weaknesses.length) {
+    lines.push(`**Weaknesses:**`);
+    ev.weaknesses.forEach(w => lines.push(`- ⚠ ${w}`));
+    lines.push('');
+  }
+  if (ev.flaggedSections.length) {
+    lines.push(`**Sections flagged for revision:**`);
+    ev.flaggedSections.forEach(f => lines.push(`- \`${f}\``));
+    lines.push('');
+  }
+  return lines.join('\n');
+}
+
+/**
+ * IMPROVEMENT 2: Context Reset / Structured Stage Handoff
+ *
+ * Instead of feeding raw evidence chunks into the next stage's gap analysis,
+ * compress prior stage findings into a structured handoff state.
+ * This prevents coherence drift in long multi-stage runs.
+ */
+async function buildStageHandoff(
+  stage: number,
+  topic: string,
+  subQuestions: string[],
+  stageBrief: string,
+  llmChatFn: (sys: string, user: string) => Promise<string>
+): Promise<string> {
+  const sys =
+    `You are a research coordinator managing a multi-stage investigation of: "${topic}".
+Sub-questions: ${subQuestions.map((q, i) => `${i + 1}. ${q}`).join(' | ')}
+Stage ${stage} has just completed. Produce a concise HANDOFF STATE for the next stage.
+
+Format (use these exact headings):
+## Established Facts
+(bullet list — what is now confirmed with citations)
+
+## Open Gaps
+(bullet list — what was NOT answered; be specific)
+
+## Contradictions Found
+(bullet list — conflicting claims between sources, or "None")
+
+## Recommended Focus for Next Stage
+(1-2 sentences — what the next stage should prioritize)
+
+Keep it under 400 words. Preserve [anchor_id] citations for established facts.`;
+
+  try {
+    const handoff = await llmChatFn(sys, `STAGE ${stage} BRIEF:\n\n${stageBrief.slice(0, 6000)}`);
+    return handoff;
+  } catch {
+    // Fallback: use first 1000 chars of brief as handoff
+    return stageBrief.slice(0, 1000);
+  }
+}
+
+/**
+ * IMPROVEMENT 3: Spec-Driven Planning
+ *
+ * Before gathering begins, generate a research specification:
+ * scope, exclusions, success criteria, sub-question priorities.
+ * This spec is prepended to every stage brief prompt so the LLM
+ * stays aligned with the original intent throughout long runs.
+ */
+async function generateResearchSpec(
+  topic: string,
+  subQuestions: string[],
+  llmChatFn: (sys: string, user: string) => Promise<string>
+): Promise<string> {
+  const sys =
+    `You are a research strategist. Before any gathering begins, produce a RESEARCH SPECIFICATION for:
+"${topic}"
+
+Sub-questions identified:
+${subQuestions.map((q, i) => `${i + 1}. ${q}`).join('\n')}
+
+Produce STRICT JSON:
+{
+  "scope": "<1-2 sentences: what IS in scope>",
+  "exclusions": ["<topic or angle explicitly out of scope>", ...],
+  "successCriteria": ["<what a good answer to each sub-question looks like>", ...],
+  "priorityOrder": [<indices 0-based of sub-questions from most to least critical>],
+  "keyTerms": ["<important terms/synonyms to search for>", ...]
+}
+Return ONLY the JSON.`;
+
+  try {
+    const res = await llmChatFn(sys,
+      `Topic: ${topic}\nSub-questions:\n${subQuestions.map((q, i) => `${i + 1}. ${q}`).join('\n')}`
+    );
+    const start = res.indexOf('{');
+    const end = res.lastIndexOf('}');
+    if (start === -1 || end === -1) return '';
+    // Validate parseable
+    JSON.parse(res.slice(start, end + 1));
+    return res.slice(start, end + 1);
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * Format spec as a readable preamble injected into stage brief prompts.
+ */
+function formatSpecPreamble(specJson: string): string {
+  try {
+    const spec = JSON.parse(specJson);
+    const lines = [`RESEARCH SPECIFICATION:`];
+    if (spec.scope) lines.push(`Scope: ${spec.scope}`);
+    if (spec.exclusions?.length) lines.push(`Exclusions: ${spec.exclusions.join(', ')}`);
+    if (spec.successCriteria?.length) {
+      lines.push(`Success criteria:`);
+      spec.successCriteria.forEach((c: string) => lines.push(`  - ${c}`));
+    }
+    if (spec.keyTerms?.length) lines.push(`Key terms: ${spec.keyTerms.join(', ')}`);
+    return lines.join('\n') + '\n\n';
+  } catch {
+    return '';
+  }
+}
+
+// ── Staged synthesis helpers ──────────────────────────────────────────────────
+
+/**
+ * Detect garbled PDF extraction: letter-spaced words, high single-char ratio,
+ * lots of bare page headers. Returns true when at least 2 signals fire.
+ */
+function isGarbledPdf(text: string): boolean {
+  let signals = 0;
+  // Signal 1: letter-spaced words — "T a b l e" pattern
+  const letterSpaced = (text.match(/\b[A-Z] [A-Z] [A-Z]\b/g) || []).length;
+  if (letterSpaced >= 3) signals++;
+  // Signal 2: high ratio of single-char tokens (broken column extraction)
+  const tokens = text.split(/\s+/).filter(t => t.length > 0);
+  if (tokens.length > 50) {
+    const singleChar = tokens.filter(t => t.length === 1 && /[a-zA-Z]/.test(t)).length;
+    if (singleChar / tokens.length > 0.12) signals++;
+  }
+  // Signal 3: many short page sections (OCR-style page-by-page output with thin text)
+  const pageMatches = text.match(/## Page \d+/g) || [];
+  if (pageMatches.length >= 4) {
+    const avgCharsPerPage = text.length / pageMatches.length;
+    if (avgCharsPerPage < 400) signals++;
+  }
+  // Signal 4: repeated header/footer bleed-in (journal name or author list
+  // appearing more than 3× — typical of running headers in two-column papers)
+  const lines = text.split('\n').map(l => l.trim()).filter(l => l.length > 10 && l.length < 80);
+  const lineCounts = new Map<string, number>();
+  for (const l of lines) lineCounts.set(l, (lineCounts.get(l) || 0) + 1);
+  if ([...lineCounts.values()].some(n => n >= 4)) signals++;
+
+  return signals >= 2;
+}
+
+/**
+ * LLM-powered cleanup of garbled PDF text. Returns cleaned markdown only.
+ * The caller is responsible for appending the raw text as a collapsible block.
+ */
+async function cleanPdfText(
+  raw: string,
+  llmChatFn: (sys: string, user: string) => Promise<string>
+): Promise<string> {
+  const sys =
+    `You are a document editor cleaning up academic paper text extracted from a PDF by pdf.js.
+The extraction is often garbled: broken words like "T a b l e" instead of "Table", letter-spaced
+headings, scrambled two-column layout, running page headers/footers bleeding mid-paragraph,
+and algorithm pseudocode turned into symbol soup.
+
+Your job:
+1. Fix broken/letter-spaced words (reconstruct them).
+2. Remove page headers, footers, and author affiliations that bleed between paragraphs.
+3. Reconstruct tables as proper markdown tables where recognisable.
+4. Normalise math notation to readable inline text (e.g. "α" → "α", "∑" → "sum").
+5. Preserve ALL original content — do not summarise or omit anything.
+6. Output ONLY the cleaned paper text in markdown, nothing else.`;
+
+  // Feed at most 14k chars to avoid blowing the model context — long papers
+  // should be cleaned in their most information-dense portion (the body).
+  const excerpt = raw.slice(0, 14_000);
+  try {
+    const cleaned = await llmChatFn(sys, excerpt);
+    // Sanity check: if the model returned something very short it probably failed
+    return cleaned.length > 200 ? cleaned : raw;
+  } catch {
+    return raw;
+  }
+}
+
+/**
+ * Wrap a cleaned PDF body and its raw extraction into a single document.
+ * Only the clean section above the separator is chunked (the raw block is
+ * treated as noise by isNoiseParagraph due to the page-header pattern).
+ */
+function buildCleanedPdfDoc(cleanText: string, rawText: string): string {
+  return (
+    cleanText.trim() +
+    `\n\n---\n\n` +
+    `<details>\n<summary>Raw PDF extraction (reference only — not indexed)</summary>\n\n` +
+    rawText.trim() +
+    `\n\n</details>`
+  );
+}
+
+type LlmChatFn = (sys: string, user: string) => Promise<string>;
+
+/**
+ * Synthesize a ~1500-word brief from the chunks collected in one stage.
+ * Uses all chunks from stageDocIds that fit within the model context budget,
+ * round-robin balanced across source types.
+ */
+async function synthesizeStageBrief(
+  stage: number,
+  totalStages: number,
+  topic: string,
+  subQuestions: string[],
+  stageDocIds: string[],
+  projectId: string,
+  labelByDoc: Map<string, AgentLabel>,
+  llmChatFn: LlmChatFn,
+  specPreamble = '',
+  handoffContext = ''
+): Promise<string> {
+  if (stageDocIds.length === 0) return '';
+
+  // Retrieve chunks only from this stage's new docs
+  const rawChunks = await searchSessionChunks(projectId, topic, 30, stageDocIds);
+  // Also fetch chunks for each sub-question to get better coverage
+  const extra: any[] = [];
+  for (const q of subQuestions) {
+    const hits = await searchSessionChunks(projectId, q, 15, stageDocIds);
+    hits.forEach(c => extra.push(c));
+  }
+  // Merge + deduplicate by chunk id
+  const chunkMap = new Map<string, any>();
+  [...rawChunks, ...extra].forEach(c => chunkMap.set(c.id, c));
+
+  // Balance across source types and pack up to context budget
+  const byLabel = new Map<string, any[]>();
+  for (const c of chunkMap.values()) {
+    const l = labelByDoc.get(c.docId) || 'WEB';
+    if (!byLabel.has(l)) byLabel.set(l, []);
+    byLabel.get(l)!.push(c);
+  }
+
+  const charBudget = await getSynthesisCharBudget();
+  const selected: any[] = [];
+  let usedChars = 0;
+  const labelOrder = [...byLabel.keys()];
+  packing: while (true) {
+    let added = false;
+    for (const l of labelOrder) {
+      const g = byLabel.get(l)!;
+      if (g.length > 0) {
+        const c = g.shift();
+        if (usedChars + c.text.length > charBudget && selected.length > 0) break packing;
+        selected.push(c);
+        usedChars += c.text.length;
+        added = true;
+      }
+    }
+    if (!added) break;
+  }
+
+  if (selected.length === 0) return '';
+
+  const anchoredChunks = selected.map(c => ({
+    ...c,
+    heading: `[${labelByDoc.get(c.docId) || 'WEB'}] ${c.heading || ''}`.trim()
+  }));
+  const contextText = buildAnchoredContext(anchoredChunks).trim();
+
+  const sys =
+    `You are a research analyst writing Stage ${stage} of ${totalStages} in a staged investigation of: "${topic}".
+${specPreamble ? `\n${specPreamble}` : ''}
+Using ONLY the source excerpts below, write a comprehensive research brief (aim for ~1500 words).
+${handoffContext ? `\nCONTEXT FROM PRIOR STAGES:\n${handoffContext}\n` : ''}
+Sub-questions to address:
+${subQuestions.map((q, i) => `${i + 1}. ${q}`).join('\n')}
+
+Requirements:
+- Write in flowing academic prose (no bullet-point summaries).
+- Cite EVERY factual claim inline with its anchor id: "...text [anchor_id]."
+- Where multiple sources agree, cite all of them together: [id1][id2].
+- Where sources conflict, state the conflict explicitly and cite both sides.
+- End with a section "## Open Questions from Stage ${stage}" listing 3-5 bullet gaps this stage did NOT answer.
+
+${RESEARCH_CITATION_RULES}`;
+
+  return llmChatFn(sys, `SOURCE EXCERPTS — STAGE ${stage}:\n\n${contextText}`);
+}
+
+/**
+ * Final synthesis: merge all stage briefs into a single comprehensive
+ * academic-style paper. The briefs already contain [anchor_id] citations
+ * which must be preserved verbatim in the output.
+ */
+async function synthesizeFinalPaper(
+  topic: string,
+  subQuestions: string[],
+  stageBriefs: string[],
+  llmChatFn: LlmChatFn,
+  synthesisFn?: SynthesisStreamFn
+): Promise<string> {
+  const briefsBlock = stageBriefs
+    .map((b, i) => `## Stage ${i + 1} Research Brief\n\n${b}`)
+    .join('\n\n---\n\n');
+
+  const sys =
+    `You are a research editor. You have received ${stageBriefs.length} research briefs from a staged investigation of: "${topic}".
+Each brief contains inline [anchor_id] citations — YOU MUST PRESERVE EVERY ONE exactly as written.
+
+Your task: synthesize all briefs into a single comprehensive academic paper with these sections:
+
+1. **Abstract** (~200 words summarising the entire investigation)
+2. **Introduction** (context, motivation, scope)
+3. One section per sub-question:
+${subQuestions.map((q, i) => `   ${i + 1}. ${q}`).join('\n')}
+4. **Discussion** (compare/contrast findings across stages; highlight consensus and contradictions)
+5. **Conclusion**
+6. **Open Questions & Future Work** (synthesise the gaps listed at the end of each stage brief)
+
+Strict rules:
+- Preserve ALL [anchor_id] citations from the briefs — do not drop, alter, or invent any.
+- Integrate duplicate coverage gracefully: if two stages discuss the same finding, merge them and carry citations from both.
+- Flag conflicts explicitly: "Stage 2 found X [id] while Stage 4 found Y [id]."
+- Do not add factual claims absent from the briefs.
+- Write in formal academic English.
+
+${RESEARCH_CITATION_RULES}`;
+
+  const userMsg = `RESEARCH BRIEFS:\n\n${briefsBlock}`;
+  return (synthesisFn ?? llmChatFn)(sys, userMsg);
+}
+
 async function runDeeperResearch(
   projectId: string,
   topic: string,
   llmChatFn: (sys: string, user: string) => Promise<string>,
   onProgress: (status: string) => void,
   signal?: AbortSignal,
-  synthesisFn?: SynthesisStreamFn
+  synthesisFn?: SynthesisStreamFn,
+  evaluatorFn?: (sys: string, user: string) => Promise<string>
 ): Promise<{ synthesis: string, sources: string[] }> {
 
-  // Phase 1: strategic planning (reuse a checkpointed plan on resume)
+  // ── Phase 1: strategic planning ──────────────────────────────────────────
+  // Reuse a checkpointed plan on resume so we don't re-plan after a crash.
   const priorJob = await getJob().catch(() => null);
   let subQuestions: string[];
   let webQueries: string[];
@@ -1139,169 +1639,250 @@ async function runDeeperResearch(
     onProgress(`[PLANNING] ${subQuestions.length} sub-questions: ${subQuestions.join(' | ')}`);
     webQueries = await generateSearchQueries(topic, llmChatFn);
   }
+
+  // ── Spec-Driven Planning (Improvement 3) ─────────────────────────────────
+  // Generate a research specification before any gathering begins.
+  // The spec anchors all subsequent stage briefs to the original intent.
+  let researchSpec = '';
+  if (!priorJob?.subQuestions?.length) {
+    onProgress(`[PLANNING] Generating research specification…`);
+    researchSpec = await generateResearchSpec(topic, subQuestions, llmChatFn).catch(() => '');
+    if (researchSpec) {
+      onProgress(`[PLANNING] ✓ Research spec locked in — scope and success criteria defined`);
+    }
+  }
+
   await updateJob({ phase: 'gathering', subQuestions, webQueries }).catch(() => {});
 
-  // Phase 2: staged gathering (Gemini-style). Stage 1 fans out every agent
-  // on the planned queries; each later stage analyzes the evidence collected
-  // so far and issues NEW web queries targeting the gaps. Stage count comes
-  // from the depth tier. Academic/news/MCP run once — re-querying them per
-  // stage mostly re-fetches the same papers and burns S2 rate limit.
+  // ── Phase 2: staged gather → brief → checkpoint loop ────────────────────
   const rounds = Math.max(1, activeLimits.rounds);
+
+  // Resume state: already-completed stages survive a worker restart
+  const stageBriefs: string[] = priorJob?.stageBriefs ?? [];
+  const resumeFromStage = (priorJob?.currentStage ?? 0) + 1; // 1-based; 1 = start fresh
+
   const agents: AgentOutcome[] = [];
+  // labelByDoc persists across stages so later briefs can tag source types
+  const labelByDoc = new Map<string, AgentLabel>();
+
   let stageQueries = webQueries.slice(0, activeLimits.webQueries);
-  let analystNotes = '';
+
+  const specPreamble = formatSpecPreamble(researchSpec);
+
+  // handoffContext accumulates structured stage summaries (Improvement 2: Context Reset)
+  let handoffContext = '';
 
   for (let stage = 1; stage <= rounds; stage++) {
     if (signal?.aborted) throw new Error('AbortError');
+
+    // ── Resume: skip stages already completed before a crash ──────────────
+    if (stage < resumeFromStage) {
+      onProgress(`[STAGE ${stage}/${rounds}] Skipping (already completed before restart)`);
+      continue;
+    }
+
     onProgress(`[STAGE ${stage}/${rounds}] Gathering: ${stageQueries.length} quer${stageQueries.length === 1 ? 'y' : 'ies'}…`);
 
+    // ── Gather ────────────────────────────────────────────────────────────
     const stageJobs: Promise<AgentOutcome>[] = [
       runWebAgent(projectId, stageQueries, onProgress, signal, 'WEB')
     ];
+    // Academic / news / MCP run once (stage 1 only) — re-querying burns rate limits
     if (stage === 1) {
       stageJobs.push(
         runMcpAgent(projectId, topic, onProgress, signal),
-        runAcademicAgent(projectId, topic, onProgress, signal),
+        runAcademicAgent(projectId, topic, onProgress, signal, llmChatFn),
         runNewsAgent(projectId, topic, onProgress, signal)
       );
     }
+
     const outcomes = await Promise.allSettled(stageJobs);
     if (signal?.aborted) throw new Error('AbortError');
+
+    const stageDocIds: string[] = [];   // NEW docs from THIS stage only
     for (const o of outcomes) {
       if (o.status === 'fulfilled') {
         if (o.value.label === 'MCP' && o.value.docIds.length === 0) continue;
         agents.push(o.value);
-      } else onProgress(`[AGENTS] An agent failed: ${o.reason}`);
+        stageDocIds.push(...o.value.docIds);
+        o.value.docIds.forEach(d => labelByDoc.set(d, o.value.label));
+      } else {
+        onProgress(`[AGENTS] An agent failed: ${o.reason}`);
+      }
+    }
+
+    // Link-following: chase references found inside the stage's sources
+    if (stageDocIds.length > 0) {
+      const evidenceChunks = await searchSessionChunks(projectId, topic, 20, stageDocIds);
+      const seenUrls = new Set((await listPages().catch(() => [])).map(p => p.url));
+      const refs = harvestReferences(evidenceChunks.map(c => c.text), { seenUrls, isJunk: isJunkUrl });
+      if (refs.length > 0) {
+        const refBudget = Math.max(2, Math.floor(activeLimits.urlsPerQuery / 3));
+        const refOutcome = await followReferences(projectId, topic, refs, refBudget, onProgress, signal);
+        if (refOutcome.docIds.length > 0) {
+          agents.push(refOutcome);
+          stageDocIds.push(...refOutcome.docIds);
+          refOutcome.docIds.forEach(d => labelByDoc.set(d, refOutcome.label));
+        }
+      }
+    }
+
+    if (signal?.aborted) throw new Error('AbortError');
+
+    // ── Per-stage synthesis → checkpoint ─────────────────────────────────
+    const uniqueStageDocIds = Array.from(new Set(stageDocIds));
+    if (uniqueStageDocIds.length > 0) {
+      onProgress(`[STAGE ${stage}/${rounds}] Synthesizing brief from ${uniqueStageDocIds.length} source(s)…`);
+      await updateJob({ phase: 'synthesizing' }).catch(() => {});
+
+      const brief = await synthesizeStageBrief(
+        stage, rounds, topic, subQuestions,
+        uniqueStageDocIds, projectId, labelByDoc, llmChatFn,
+        specPreamble,    // Improvement 3: spec-driven
+        handoffContext   // Improvement 2: context reset handoff
+      ).catch(err => {
+        onProgress(`[STAGE ${stage}/${rounds}] Brief synthesis failed: ${err?.message || err}`);
+        return '';
+      });
+
+      if (brief) {
+        const wordCount = brief.split(/\s+/).filter(Boolean).length;
+        onProgress(`[STAGE ${stage}/${rounds}] ✓ Brief: ${wordCount} words from ${uniqueStageDocIds.length} sources`);
+
+        // ── Context Reset (Improvement 2): compress stage findings into handoff ──
+        if (stage < rounds) {
+          onProgress(`[STAGE ${stage}/${rounds}] Building context handoff for next stage…`);
+          handoffContext = await buildStageHandoff(stage, topic, subQuestions, brief, llmChatFn).catch(() => '');
+        }
+
+        // Save the stage brief as a visible project document
+        await indexResearchDoc(
+          projectId,
+          `Stage ${stage} of ${rounds} — ${topic.length > 60 ? topic.slice(0, 57) + '…' : topic}`,
+          '',
+          brief,
+          'WEB'  // neutral label so it doesn't inflate ACADEMIC count
+        ).catch(() => {}); // non-fatal — brief is still in memory
+
+        stageBriefs[stage - 1] = brief;
+        // Checkpoint: survive a worker restart
+        await updateJob({
+          phase: 'gathering',
+          stageBriefs,
+          currentStage: stage
+        }).catch(() => {});
+      } else {
+        onProgress(`[STAGE ${stage}/${rounds}] ⚠ No brief generated — moving on`);
+      }
+    } else {
+      onProgress(`[STAGE ${stage}/${rounds}] No new sources — skipping brief`);
     }
 
     if (stage === rounds) break;
 
-    // Between stages: what do we know, what's missing, what to search next
+    // ── Gap analysis: what to search next ────────────────────────────────
     const docsSoFar = agents.flatMap(a => a.docIds);
-    if (docsSoFar.length === 0) continue; // nothing to analyze — retry plan queries
-    onProgress(`[STAGE ${stage}/${rounds}] Analyzing ${docsSoFar.length} sources for gaps…`);
-    const evidenceChunks = await searchSessionChunks(projectId, topic, 20, docsSoFar);
-    const evidence = evidenceChunks.map(c => c.text).join('\n\n');
-
-    // Link-following: chase references found inside the sources (depth), in
-    // parallel with the gap-query breadth. Capped at ⅓ of the stage budget.
-    const seenUrls = new Set((await listPages().catch(() => [])).map(p => p.url));
-    const refs = harvestReferences(evidenceChunks.map(c => c.text), { seenUrls, isJunk: isJunkUrl });
-    if (refs.length > 0) {
-      const refBudget = Math.max(2, Math.floor(activeLimits.urlsPerQuery / 3));
-      const refOutcome = await followReferences(projectId, topic, refs, refBudget, onProgress, signal);
-      if (refOutcome.docIds.length > 0) agents.push(refOutcome);
+    if (docsSoFar.length > 0) {
+      const evidenceForGap = await searchSessionChunks(projectId, topic, 20, docsSoFar);
+      const evidence = evidenceForGap.map(c => c.text).join('\n\n');
+      const analysis = await analyzeGaps(topic, subQuestions, evidence, llmChatFn);
+      if (!analysis) {
+        onProgress(`[STAGE ${stage}/${rounds}] Gap analysis inconclusive — finishing gathering early`);
+        break;
+      }
+      stageQueries = analysis.queries;
+      onProgress(`[STAGE ${stage}/${rounds}] Next stage queries: ${analysis.queries.join(' | ')}`);
+      await updateJob({ webQueries: analysis.queries }).catch(() => {});
     }
-
-    const analysis = await analyzeGaps(topic, subQuestions, evidence, llmChatFn);
-    if (!analysis) {
-      onProgress(`[STAGE ${stage}/${rounds}] Gap analysis inconclusive — finishing gathering early`);
-      break;
-    }
-    analystNotes += `Stage ${stage}: ${analysis.findings}\n`;
-    stageQueries = analysis.queries;
-    onProgress(`[STAGE ${stage}/${rounds}] Next: ${analysis.queries.join(' | ')}`);
-    await updateJob({ webQueries: analysis.queries }).catch(() => {});
   }
 
+  // ── Phase 3: final paper synthesis ───────────────────────────────────────
   const allDocIds = agents.flatMap(a => a.docIds);
   const allSources = [...new Set(agents.flatMap(a => a.sources))];
-  if (allDocIds.length === 0) {
+  const completedBriefs = stageBriefs.filter(Boolean);
+
+  if (completedBriefs.length === 0 && allDocIds.length === 0) {
     throw new Error('No agent could gather any sources.');
   }
-  const labelByDoc = new Map<string, AgentLabel>();
-  agents.forEach(a => a.docIds.forEach(d => labelByDoc.set(d, a.label)));
 
-  // Disclose the source mix — a lopsided mix means one discovery channel failed
-  const mixSummary = agents.map(a => `${a.label} ${a.sources.length}`).join(' · ');
-  onProgress(`[AGENTS] Source mix — ${mixSummary}`);
-  const emptyAgents = agents.filter(a => a.docIds.length === 0).map(a => a.label);
-  if (emptyAgents.length > 0) {
-    onProgress(`[AGENTS] Warning: ${emptyAgents.join(', ')} returned nothing — report will lean on the remaining source types`);
-  }
+  const mixSummary = agents.reduce((acc: Record<string, number>, a) => {
+    acc[a.label] = (acc[a.label] || 0) + a.sources.length;
+    return acc;
+  }, {});
+  const mixStr = Object.entries(mixSummary).map(([l, n]) => `${l} ${n}`).join(' · ');
+  onProgress(`[AGENTS] Source mix — ${mixStr}`);
 
-  // Phase 3: evidence retrieval across topic + sub-questions
-  onProgress(`[CROSS-REF] Retrieving evidence for ${subQuestions.length + 1} angles across ${allDocIds.length} sources…`);
-  const chunkSet = new Map<string, any>();
-  for (const q of [topic, ...subQuestions]) {
-    if (signal?.aborted) throw new Error('AbortError');
-    const chunks = await searchSessionChunks(projectId, q, activeLimits.chunksPerAngle, allDocIds);
-    chunks.forEach(c => chunkSet.set(c.id, c));
-    if (chunkSet.size >= activeLimits.chunkPoolCap) break;
-  }
-
-  // Balance the evidence across source types: round-robin by agent label so
-  // one over-supplied channel (e.g. academic) can't crowd out the others.
-  const byLabel = new Map<string, any[]>();
-  for (const c of chunkSet.values()) {
-    const l = labelByDoc.get(c.docId) || 'WEB';
-    if (!byLabel.has(l)) byLabel.set(l, []);
-    byLabel.get(l)!.push(c);
-  }
-  // Pack round-robin until the model's context budget is spent — a fixed
-  // chunk count either starves big-context models or silently truncates
-  // small ones.
-  const charBudget = await getSynthesisCharBudget();
-  const relevantChunks: any[] = [];
-  const labelOrder = [...byLabel.keys()];
-  let usedChars = 0;
-  packing: while (true) {
-    let added = false;
-    for (const l of labelOrder) {
-      const g = byLabel.get(l)!;
-      if (g.length > 0) {
-        const c = g.shift();
-        if (usedChars + c.text.length > charBudget && relevantChunks.length > 0) break packing;
-        relevantChunks.push(c);
-        usedChars += c.text.length;
-        added = true;
-      }
-    }
-    if (!added) break;
-  }
-
-  // Anchor each chunk's origin tag onto its heading so the LLM can weave
-  // [WEB]/[ACADEMIC]/[NEWS] provenance into the citation without losing the
-  // real anchor ID needed for click-through.
-  const anchoredChunks = relevantChunks.map(c => ({
-    ...c,
-    heading: `[${labelByDoc.get(c.docId) || 'WEB'}] ${c.heading || ''}`.trim()
-  }));
-  const contextText = buildAnchoredContext(anchoredChunks).trim();
-
-  if (contextText.length < 100) {
-    throw new Error(
-      `Agents found ${allSources.length} source(s) but could not extract readable text. ` +
-      `Try a different topic or check your connection.`
-    );
-  }
-
-  // Phase 4: cross-referenced synthesis
-  onProgress(`[SYNTHESIZING] Cross-referencing ${relevantChunks.length} excerpts and drafting the report…`);
   await updateJob({ phase: 'synthesizing' }).catch(() => {});
 
-  const sysPrompt = `You are a senior research analyst. Using ONLY the excerpts below (each preceded by a [WEB]/[ACADEMIC]/[NEWS] origin tag in its heading), write a deep, well-structured markdown report on: "${topic}".
+  let synthesis: string;
 
-Requirements:
-1. Address each of these sub-questions in its own section:
-${subQuestions.map(q => `   - ${q}`).join('\n')}
-2. Cross-reference the origins: where web, academic and news sources agree, cite all of the agreeing anchors together (e.g. [d1.s0.p1][d2.s3.p0]) — this is what demonstrates consensus. Where sources conflict, call out the contradiction explicitly and cite each side.
-3. End with an "Open Questions & Gaps" section for aspects the sources do not cover.
-Never ask for more context — work with what is provided.
+  if (completedBriefs.length > 0) {
+    // Staged path: merge all stage briefs into one comprehensive paper
+    onProgress(`[SYNTHESIZING] Merging ${completedBriefs.length} stage brief(s) into final paper…`);
+    synthesis = await synthesizeFinalPaper(
+      topic, subQuestions, completedBriefs, llmChatFn, synthesisFn
+    );
+  } else {
+    // Fallback: no briefs produced (all syntheses failed) — do classic single-pass
+    onProgress(`[SYNTHESIZING] No stage briefs available — falling back to direct synthesis…`);
+    const chunkSet = new Map<string, any>();
+    const uniqueDocIds = Array.from(new Set(allDocIds));
+    for (const q of [topic, ...subQuestions]) {
+      if (signal?.aborted) throw new Error('AbortError');
+      const chunks = await searchSessionChunks(projectId, q, activeLimits.chunksPerAngle, uniqueDocIds);
+      chunks.forEach(c => chunkSet.set(c.id, c));
+    }
+    const charBudget = await getSynthesisCharBudget();
+    const byLabel = new Map<string, any[]>();
+    for (const c of chunkSet.values()) {
+      const l = labelByDoc.get(c.docId) || 'WEB';
+      if (!byLabel.has(l)) byLabel.set(l, []);
+      byLabel.get(l)!.push(c);
+    }
+    const relevantChunks: any[] = [];
+    let usedChars = 0;
+    const labelOrder = [...byLabel.keys()];
+    packing: while (true) {
+      let added = false;
+      for (const l of labelOrder) {
+        const g = byLabel.get(l)!;
+        if (g.length > 0) {
+          const c = g.shift();
+          if (usedChars + c.text.length > charBudget && relevantChunks.length > 0) break packing;
+          relevantChunks.push(c);
+          usedChars += c.text.length;
+          added = true;
+        }
+      }
+      if (!added) break;
+    }
+    const anchoredChunks = relevantChunks.map(c => ({
+      ...c,
+      heading: `[${labelByDoc.get(c.docId) || 'WEB'}] ${c.heading || ''}`.trim()
+    }));
+    const contextText = buildAnchoredContext(anchoredChunks).trim();
+    if (contextText.length < 100) {
+      throw new Error(`Agents found ${allSources.length} source(s) but could not extract readable text.`);
+    }
+    const fallbackSys = `You are a senior research analyst. Using ONLY the excerpts below, write a comprehensive markdown report on: "${topic}".\n\nSub-questions:\n${subQuestions.map(q => `- ${q}`).join('\n')}\n\n${RESEARCH_CITATION_RULES}`;
+    synthesis = await (synthesisFn ?? llmChatFn)(fallbackSys, `SOURCE EXCERPTS:\n\n${contextText}`);
+  }
 
-${RESEARCH_CITATION_RULES}`;
+  // Prepend source-mix banner
+  synthesis = `> **Source mix:** ${mixStr}\n\n${synthesis}`;
 
-  const notesBlock = analystNotes ? `ANALYST NOTES FROM GATHERING STAGES (context, not citable):\n${analystNotes}\n\n` : '';
-  let synthesis = await (synthesisFn ?? llmChatFn)(sysPrompt, `${notesBlock}SOURCE EXCERPTS:\n\n${contextText}`);
-
-  // Prepend the source mix so the reader can judge coverage at a glance
-  synthesis = `> **Source mix:** ${mixSummary}` +
-    (emptyAgents.length > 0 ? ` — *${emptyAgents.join(', ')} found no usable sources for this topic*` : '') +
-    `\n\n${synthesis}`;
+  // ── External Evaluator pass (Improvement 1) ──────────────────────────────
+  const evalLlm = evaluatorFn ?? llmChatFn;
+  onProgress(`[EVALUATING] Running quality evaluation on final paper…`);
+  const evaluation = await evaluateReport(topic, synthesis, evalLlm).catch(() => null);
+  if (evaluation) {
+    const verdictLabel = evaluation.verdict === 'PASS' ? '✅ PASS' : evaluation.verdict === 'NEEDS_REVISION' ? '⚠️ NEEDS REVISION' : '❌ FAIL';
+    onProgress(`[EVALUATING] Quality verdict: ${verdictLabel} (${evaluation.score}/10) — ${evaluation.recommendation}`);
+    synthesis = synthesis + formatEvaluationBlock(evaluation);
+  }
 
   await saveSynthesisReport(projectId, topic, synthesis, allSources, 'deep');
-
-  onProgress(`[DONE] Multi-agent research complete — ${allSources.length} sources across ${agents.length} agents.`);
+  onProgress(`[DONE] ${completedBriefs.length} stage briefs → final paper — ${allSources.length} sources total.`);
 
   return { synthesis, sources: allSources };
 }

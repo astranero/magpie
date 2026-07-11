@@ -29,12 +29,14 @@ export interface ResearchLimits {
   quickChunks: number;
   /** Gather→analyze→re-query stages in deep mode (Gemini-style iterations) */
   rounds: number;
+  /** Hard cap on total sources indexed in one research run (prevents 400+ paper ONNX crashes) */
+  totalSourcesCap: number;
 }
 
 export const RESEARCH_LIMITS: Record<ResearchDepth, ResearchLimits> = {
-  standard: { urlsPerQuery: 6, webQueries: 5, s2Limit: 8, hfLimit: 8, crossrefRows: 0, newsMax: 6, chunksPerAngle: 15, chunkPoolCap: 120, quickChunks: 40, rounds: 2 },
-  deep: { urlsPerQuery: 10, webQueries: 7, s2Limit: 20, hfLimit: 15, crossrefRows: 10, newsMax: 10, chunksPerAngle: 20, chunkPoolCap: 160, quickChunks: 60, rounds: 4 },
-  exhaustive: { urlsPerQuery: 12, webQueries: 8, s2Limit: 30, hfLimit: 20, crossrefRows: 20, newsMax: 12, chunksPerAngle: 25, chunkPoolCap: 200, quickChunks: 80, rounds: 6 }
+  standard:  { urlsPerQuery: 6,  webQueries: 5, s2Limit: 8,  hfLimit: 8,  crossrefRows: 0,  newsMax: 6,  chunksPerAngle: 15, chunkPoolCap: 120, quickChunks: 40, rounds: 2, totalSourcesCap: 40  },
+  deep:      { urlsPerQuery: 10, webQueries: 7, s2Limit: 20, hfLimit: 15, crossrefRows: 10, newsMax: 10, chunksPerAngle: 20, chunkPoolCap: 160, quickChunks: 60, rounds: 4, totalSourcesCap: 80  },
+  exhaustive:{ urlsPerQuery: 12, webQueries: 8, s2Limit: 30, hfLimit: 20, crossrefRows: 20, newsMax: 12, chunksPerAngle: 25, chunkPoolCap: 200, quickChunks: 80, rounds: 6, totalSourcesCap: 120 },
 };
 
 export const DEFAULT_CONTEXT_TOKENS = 32768;
@@ -85,5 +87,21 @@ export async function getSourceQuality(): Promise<SourceQuality> {
     return s.sourceQuality === 'high' ? 'high' : 'all';
   } catch {
     return 'all';
+  }
+}
+
+/**
+ * 'abstract': index title + abstract only — fast, stable, ~2 chunks/paper.
+ * 'full': fetch and index full PDF text where available — richer but slower
+ *         and can cause ONNX WASM crashes on very long papers.
+ */
+export type AcademicDepth = 'abstract' | 'full';
+
+export async function getAcademicDepth(): Promise<AcademicDepth> {
+  try {
+    const s = await chrome.storage.local.get(['academicDepth']);
+    return s.academicDepth === 'abstract' ? 'abstract' : 'full';
+  } catch {
+    return 'full';
   }
 }

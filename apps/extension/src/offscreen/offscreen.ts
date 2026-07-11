@@ -240,7 +240,9 @@ async function parsePdfData(data: Uint8Array): Promise<{ pages: string[]; imageP
 let embedder: any = null;
 async function getEmbedder() {
   if (!embedder) {
-    embedder = await pipeline('feature-extraction', 'onnx-community/all-MiniLM-L6-v2', {
+    // Xenova mirror: onnx-community/all-MiniLM-L6-v2 went 401 (gated) on HF
+    // in mid-2026. Same base model + ONNX export, embeddings stay compatible.
+    embedder = await pipeline('feature-extraction', 'Xenova/all-MiniLM-L6-v2', {
       device: 'webgpu',
     });
   }
@@ -250,27 +252,71 @@ async function getEmbedder() {
 async function generateEmbeddings(texts: string[]): Promise<number[][]> {
   const extractor = await getEmbedder();
   if (texts.length === 0) return [];
-  // Batched inference: single WebGPU pass over the whole array.
-  // transformers.js returns a Tensor with shape [batch, dim]; slice per row.
-  try {
-    const output = await extractor(texts, { pooling: 'mean', normalize: true });
-    const data = output.data as Float32Array;
-    const dim = output.dims?.[1] ?? (data.length / texts.length);
-    const embeddings: number[][] = [];
-    for (let i = 0; i < texts.length; i++) {
-      embeddings.push(Array.from(data.slice(i * dim, (i + 1) * dim)));
+  
+  // conservative limit for ONNX WASM backends to avoid integer overflow
+  const MAX_BATCH_SIZE = 256;
+  
+  const processBatch = async (batchTexts: string[]): Promise<number[][]> => {
+    try {
+      const output = await extractor(batchTexts, { pooling: 'mean', normalize: true });
+      const data = output.data as Float32Array;
+      const dim = output.dims?.[1] ?? (data.length / batchTexts.length);
+      
+      // validate dimensions to prevent integer overflow
+      if (!dim || !Number.isFinite(dim) || dim <= 0 || dim > 1024) {
+        throw new Error(`Invalid embedding dimension: ${dim}`);
+      }
+      
+      // calculate expected data length with overflow protection
+      const expectedDataLength = Math.ceil(batchTexts.length * dim);
+      if (data.length !== expectedDataLength && data.length % batchTexts.length !== 0) {
+        throw new Error(`Data length mismatch: got ${data.length}, expected ${expectedDataLength}`);
+      }
+      
+      const embeddings: number[][] = [];
+      for (let i = 0; i < batchTexts.length; i++) {
+        const start = i * dim;
+        const end = start + dim;
+        
+        // bounds check to prevent overflow errors
+        if (start >= data.length || end > data.length) {
+          throw new Error(`Index out of bounds: start=${start}, end=${end}, length=${data.length}`);
+        }
+        
+        embeddings.push(Array.from(data.slice(start, end)));
+      }
+      return embeddings;
+    } catch (batchErr) {
+      // fall back to sequential if batched call isn't supported for this model or fails
+      if (batchErr instanceof Error && batchErr.message.includes('Integer overflow')) {
+        console.warn('Batched embedding failed due to integer overflow, falling back to sequential:', batchErr);
+      } else {
+        console.warn('Batched embedding failed, falling back to sequential:', batchErr);
+      }
+      
+      const embeddings: number[][] = [];
+      for (const text of batchTexts) {
+        try {
+          const output = await extractor(text, { pooling: 'mean', normalize: true });
+          embeddings.push(Array.from(output.data as Float32Array));
+        } catch (e) {
+          console.error('Failed to generate embedding for text:', text, e);
+          embeddings.push(new Array(384).fill(0)); // default dimension from model
+        }
+      }
+      return embeddings;
     }
-    return embeddings;
-  } catch (batchErr) {
-    // Fall back to sequential if batched call isn't supported for this model
-    console.warn('Batched embedding failed, falling back to sequential:', batchErr);
-    const embeddings: number[][] = [];
-    for (const text of texts) {
-      const output = await extractor(text, { pooling: 'mean', normalize: true });
-      embeddings.push(Array.from(output.data as Float32Array));
-    }
-    return embeddings;
+  };
+  
+  // split into safe batches to avoid integer overflow
+  const embeddings: number[][] = [];
+  for (let i = 0; i < texts.length; i += MAX_BATCH_SIZE) {
+    const batch = texts.slice(i, i + MAX_BATCH_SIZE);
+    const batchEmbeddings = await processBatch(batch);
+    embeddings.push(...batchEmbeddings);
   }
+  
+  return embeddings;
 }
 
 let tokenizer: any = null;
@@ -369,6 +415,11 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
     rerank(request.query as string, request.passages as string[])
       .then(scores => sendResponse({ ok: true, scores }))
       .catch(err => sendResponse({ ok: false, error: err instanceof Error ? err.message : String(err) }));
+    return true;
+  }
+
+  if (request?.action === 'OFFSCREEN_HEALTH_CHECK') {
+    sendResponse({ ok: true, status: 'healthy' });
     return true;
   }
 
