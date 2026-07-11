@@ -11,6 +11,8 @@ import { DocumentView } from './components/DocumentView';
 import { Button } from '@/components/ui/button';
 import { Select, SelectContent, SelectItem, SelectSeparator, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { findPromptCommand, buildHelpText, loadCustomSkills, SlashCommand } from '../lib/commands';
+import { timeAgo } from '../lib/format';
+import { fileToDataUrl, collectDirectoryFiles, inlineRelativeImages } from '../lib/import-helpers';
 
 // ── Helpers ──
 
@@ -26,18 +28,6 @@ function msg(action: string, data?: Record<string, unknown>): Promise<Record<str
   });
 }
 
-function timeAgo(iso: string): string {
-  const diff = Date.now() - new Date(iso).getTime();
-  const mins = Math.floor(diff / 60000);
-  if (mins < 1) return 'Just now';
-  if (mins < 60) return `${mins}m ago`;
-  const hours = Math.floor(mins / 60);
-  if (hours < 24) return `${hours}h ago`;
-  const days = Math.floor(hours / 24);
-  if (days < 30) return `${days}d ago`;
-  return new Date(iso).toLocaleDateString();
-}
-
 /** Resolve citation markers in AI text against the chunk store (via the service worker) */
 async function resolveCitations(text: string): Promise<ResolvedCitation[]> {
   const res = await msg('RESOLVE_CITATIONS', { text });
@@ -45,77 +35,6 @@ async function resolveCitations(text: string): Promise<ResolvedCitation[]> {
     return res.citations as ResolvedCitation[];
   }
   return [];
-}
-
-// ── Local .md import helpers (File System Access API) ──
-
-const IMAGE_EXTENSIONS = /\.(png|jpe?g|gif|webp|svg|avif)$/i;
-const MAX_INLINE_IMAGE_BYTES = 3 * 1024 * 1024; // 3 MB per image
-
-function fileToDataUrl(file: File): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(reader.result as string);
-    reader.onerror = () => reject(reader.error);
-    reader.readAsDataURL(file);
-  });
-}
-
-/** Recursively collect all files in a directory handle, keyed by relative path. */
-async function collectDirectoryFiles(
-  dirHandle: any,
-  prefix = '',
-  out: Map<string, any> = new Map()
-): Promise<Map<string, any>> {
-  for await (const [name, handle] of dirHandle.entries()) {
-    const path = prefix ? `${prefix}/${name}` : name;
-    if (handle.kind === 'file') {
-      out.set(path, handle);
-    } else if (handle.kind === 'directory') {
-      await collectDirectoryFiles(handle, path, out);
-    }
-  }
-  return out;
-}
-
-/**
- * Inline relative image references (`![alt](rel/path.png)`) in markdown as
- * data: URLs, resolving them against sibling files from the picked folder.
- */
-async function inlineRelativeImages(
-  content: string,
-  mdPath: string,
-  filesByPath: Map<string, any>
-): Promise<string> {
-  const mdDir = mdPath.includes('/') ? mdPath.slice(0, mdPath.lastIndexOf('/')) : '';
-
-  const refs = [...content.matchAll(/!\[[^\]]*\]\(([^)\s]+)(?:\s+"[^"]*")?\)/g)]
-    .map(m => m[1])
-    .filter(src => !/^(https?:|data:)/i.test(src) && IMAGE_EXTENSIONS.test(src));
-
-  let result = content;
-  for (const src of new Set(refs)) {
-    // Resolve ./, ../ and plain relative paths against the md file's folder
-    const parts = (mdDir ? mdDir + '/' + src : src).split('/');
-    const resolved: string[] = [];
-    for (const part of parts) {
-      if (part === '.' || part === '') continue;
-      else if (part === '..') resolved.pop();
-      else resolved.push(part);
-    }
-    const key = decodeURIComponent(resolved.join('/'));
-    const handle = filesByPath.get(key);
-    if (!handle) continue;
-    try {
-      const file: File = await handle.getFile();
-      if (file.size > MAX_INLINE_IMAGE_BYTES) continue;
-      const dataUrl = await fileToDataUrl(file);
-      result = result.split(`(${src})`).join(`(${dataUrl})`);
-    } catch {
-      // Skip unreadable images
-    }
-  }
-  return result;
 }
 
 // ══════════════════════════════════════════════
