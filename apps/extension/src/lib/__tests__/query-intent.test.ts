@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { needsIntentResolution, formatHistoryForIntent, parseGitHubRepo, selectTreePaths, formatTreeBlock } from '../query-intent';
+import { needsIntentResolution, formatHistoryForIntent, parseRepoUrl, selectTreePaths, formatTreeBlock } from '../query-intent';
 
 describe('needsIntentResolution', () => {
   it('never triggers on the first message of a chat', () => {
@@ -35,18 +35,34 @@ describe('formatHistoryForIntent', () => {
   });
 });
 
-describe('parseGitHubRepo', () => {
-  it('parses repo root, subpages, and pinned branches', () => {
-    expect(parseGitHubRepo('https://github.com/foo/bar')).toEqual({ owner: 'foo', repo: 'bar', branch: undefined });
-    expect(parseGitHubRepo('https://github.com/foo/bar/issues/12')).toEqual({ owner: 'foo', repo: 'bar', branch: undefined });
-    expect(parseGitHubRepo('https://github.com/foo/bar/tree/dev/src')).toEqual({ owner: 'foo', repo: 'bar', branch: 'dev' });
-    expect(parseGitHubRepo('https://github.com/foo/bar.git')).toEqual({ owner: 'foo', repo: 'bar', branch: undefined });
+describe('parseRepoUrl', () => {
+  it('parses GitHub repo root, subpages, and pinned branches', () => {
+    expect(parseRepoUrl('https://github.com/foo/bar')).toMatchObject({ provider: 'github', owner: 'foo', repo: 'bar', branch: undefined });
+    expect(parseRepoUrl('https://github.com/foo/bar/issues/12')).toMatchObject({ provider: 'github', owner: 'foo', repo: 'bar' });
+    expect(parseRepoUrl('https://github.com/foo/bar/tree/dev/src')).toMatchObject({ provider: 'github', branch: 'dev' });
+    expect(parseRepoUrl('https://github.com/foo/bar.git')).toMatchObject({ provider: 'github', repo: 'bar' });
   });
 
-  it('rejects non-repo GitHub URLs and other hosts', () => {
-    expect(parseGitHubRepo('https://github.com/topics/ai')).toBeNull();
-    expect(parseGitHubRepo('https://gitlab.com/foo/bar')).toBeNull();
-    expect(parseGitHubRepo('https://example.com/github.com/foo/bar')).toBeNull();
+  it('parses GitLab incl. subgroups and pinned branches', () => {
+    expect(parseRepoUrl('https://gitlab.com/group/proj')).toMatchObject({ provider: 'gitlab', owner: 'group', repo: 'proj', label: 'group/proj' });
+    expect(parseRepoUrl('https://gitlab.com/group/sub/proj/-/tree/main/src')).toMatchObject({ provider: 'gitlab', owner: 'group/sub', repo: 'proj', branch: 'main' });
+  });
+
+  it('parses Azure DevOps repos with optional version pin', () => {
+    expect(parseRepoUrl('https://dev.azure.com/org/Proj/_git/repo')).toMatchObject({ provider: 'azure', owner: 'org', project: 'Proj', repo: 'repo' });
+    expect(parseRepoUrl('https://dev.azure.com/org/My%20Proj/_git/repo?version=GBrelease%2F1.0')).toMatchObject({ provider: 'azure', project: 'My Proj', branch: 'release/1.0' });
+  });
+
+  it('parses Bitbucket repos', () => {
+    expect(parseRepoUrl('https://bitbucket.org/ws/repo')).toMatchObject({ provider: 'bitbucket', owner: 'ws', repo: 'repo' });
+    expect(parseRepoUrl('https://bitbucket.org/ws/repo/src/main/README.md')).toMatchObject({ provider: 'bitbucket', branch: 'main' });
+  });
+
+  it('rejects non-repo URLs and other hosts', () => {
+    expect(parseRepoUrl('https://github.com/topics/ai')).toBeNull();
+    expect(parseRepoUrl('https://example.com/github.com/foo/bar')).toBeNull();
+    expect(parseRepoUrl('https://dev.azure.com/org/proj')).toBeNull();  // no _git segment
+    expect(parseRepoUrl('https://gitlab.com/onlygroup')).toBeNull();
   });
 });
 
@@ -73,9 +89,9 @@ describe('selectTreePaths', () => {
 });
 
 describe('formatTreeBlock', () => {
-  it('renders the fence, paths, and truncation note', () => {
-    const block = formatTreeBlock({ owner: 'o', repo: 'r' }, ['a.md', 'src/'], true);
-    expect(block).toContain('REPOSITORY FILE TREE (o/r');
+  it('renders the fence, provider name, paths, and truncation note', () => {
+    const block = formatTreeBlock({ provider: 'gitlab', label: 'g/r', owner: 'g', repo: 'r' }, ['a.md', 'src/'], true);
+    expect(block).toContain('REPOSITORY FILE TREE (g/r, from the GitLab API');
     expect(block).toContain('a.md\nsrc/');
     expect(block).toContain('tree truncated');
     expect(block).toContain('does not exist in the repo');

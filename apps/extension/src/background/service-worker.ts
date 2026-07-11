@@ -16,7 +16,8 @@ import { buildFrontmatter, hasFrontmatter } from '../lib/frontmatter';
 import { get as idbGet } from 'idb-keyval';
 import { runDeepResearch, generateSubQuestions, scrapeUrl, isJunkUrl } from './deep-researcher';
 import { harvestReferences } from '../lib/reference-harvest';
-import { needsIntentResolution, formatHistoryForIntent, parseGitHubRepo, selectTreePaths, formatTreeBlock } from '../lib/query-intent';
+import { needsIntentResolution, formatHistoryForIntent, parseRepoUrl, selectTreePaths, formatTreeBlock, RepoRef } from '../lib/query-intent';
+import { looksLikeBuildLog, extractLogHighlights } from '../lib/log-highlights';
 import { addChunksToVectorStore, searchSessionChunks, resetSessionIndex, resetAllSessionIndexes } from '../lib/vector-store';
 import { replaceChunksForDoc } from '../lib/db';
 import { pdfBase64ToBody, pdfUrlToBody, ensureOffscreen as ensureOffscreenDoc } from '../lib/pdf-parser';
@@ -1153,13 +1154,27 @@ async function buildChatRequest(chatId: string, projectId: string, prompt: strin
       `You may answer from the current page. Attribute such claims in plain text, e.g. "according to the page you're viewing". ` +
       `NEVER use [anchor] citations for current-page content — anchors are only for library sources.`;
 
-    // GitHub repo pages: the scrape only sees the README — inline the repo's
-    // file tree so "where is X?" questions have real structure to answer from.
+    // Repo pages (GitHub/GitLab/Azure DevOps/Bitbucket): the scrape only
+    // sees the README — inline the repo's file tree so "where is X?"
+    // questions have real structure to answer from.
     try {
-      const treeBlock = await buildGitHubTreeBlock(pageContext.url, effectiveQuery);
+      const treeBlock = await buildRepoTreeBlock(pageContext.url, effectiveQuery);
       if (treeBlock) systemPrompt += treeBlock;
     } catch (e) {
-      console.warn('[GH-TREE] skipped:', e);
+      console.warn('[REPO-TREE] skipped:', e);
+    }
+
+    // Build/pipeline logs: guarantee the error/failure lines reach the model
+    // even when the page is huge — retrieval selection can miss them.
+    if (looksLikeBuildLog(pageContext.markdown)) {
+      const hl = extractLogHighlights(pageContext.markdown);
+      if (hl.highlights) {
+        systemPrompt +=
+          `\n\n--- LOG HIGHLIGHTS (error/warning lines auto-extracted from the page; NOT saved) ---\n` +
+          `${hl.errorCount} error line(s), ${hl.warningCount} warning line(s) detected.\n\n${hl.highlights}\n` +
+          `--- END LOG HIGHLIGHTS ---\n` +
+          `When asked what failed or why, diagnose from these lines first, quoting the exact error text.`;
+      }
     }
 
     // Second hop: the page's own links, scored against the question and
@@ -1201,48 +1216,114 @@ function linkedPagesFooter(pages: Array<{ title: string; url: string }>): string
 }
 
 // ─────────────────────────────────────────────
-// GitHub file-tree context — repo structure for "where is X?" questions
+// Repository file-tree context — GitHub, GitLab, Azure DevOps, Bitbucket
 // ─────────────────────────────────────────────
-// A GitHub repo page scrape captures the README, not the tree. When the
-// discussed page is a repo, pull its file listing from the public GitHub
-// API (keyless: 60 req/h — fine behind a 10-min per-repo cache) and inline
-// it ephemerally next to the page context.
+// A repo page scrape captures the README, not the tree. When the discussed
+// page is a repository on a known code host, pull its file listing from the
+// host's public API (keyless — private repos silently skip) and inline it
+// ephemerally next to the page context.
 
-const githubTreeCache = new Map<string, { paths: string[]; ts: number }>();
-const GH_TREE_TTL_MS = 10 * 60 * 1000;
-const GH_TREE_MAX_ENTRIES = 8_000; // give up on monorepos — a truncated random slice misleads
+const repoTreeCache = new Map<string, { paths: string[]; ts: number }>();
+const REPO_TREE_TTL_MS = 10 * 60 * 1000;
+const REPO_TREE_MAX_ENTRIES = 8_000; // give up on monorepos — a truncated random slice misleads
 
-async function buildGitHubTreeBlock(pageUrl: string, question: string): Promise<string | null> {
-  const ref = parseGitHubRepo(pageUrl);
+async function fetchGitHubTreePaths(ref: RepoRef): Promise<string[] | null> {
+  let branch = ref.branch;
+  const headers = { 'Accept': 'application/vnd.github+json' };
+  if (!branch) {
+    const repoRes = await fetch(`https://api.github.com/repos/${ref.owner}/${ref.repo}`, { headers });
+    if (!repoRes.ok) return null;
+    branch = (await repoRes.json()).default_branch as string;
+  }
+  const treeRes = await fetch(
+    `https://api.github.com/repos/${ref.owner}/${ref.repo}/git/trees/${encodeURIComponent(branch!)}?recursive=1`,
+    { headers }
+  );
+  if (!treeRes.ok) return null;
+  const tree = await treeRes.json();
+  return (tree.tree || []).map((t: any) => t.type === 'tree' ? `${t.path}/` : t.path).filter(Boolean);
+}
+
+async function fetchGitLabTreePaths(ref: RepoRef): Promise<string[] | null> {
+  const projectId = encodeURIComponent(`${ref.owner}/${ref.repo}`);
+  const paths: string[] = [];
+  for (let page = 1; page <= 30; page++) {
+    const res = await fetch(
+      `https://gitlab.com/api/v4/projects/${projectId}/repository/tree?recursive=true&per_page=100&page=${page}` +
+      (ref.branch ? `&ref=${encodeURIComponent(ref.branch)}` : ''),
+      { headers: { 'Accept': 'application/json' } }
+    );
+    if (!res.ok) return page === 1 ? null : paths;
+    const items: any[] = await res.json();
+    paths.push(...items.map(t => t.type === 'tree' ? `${t.path}/` : t.path));
+    if (items.length < 100 || paths.length > REPO_TREE_MAX_ENTRIES) break;
+  }
+  return paths;
+}
+
+async function fetchAzureTreePaths(ref: RepoRef): Promise<string[] | null> {
+  // Works for PUBLIC Azure DevOps projects; private ones answer with a
+  // sign-in redirect / non-JSON, which the parse guard turns into a skip.
+  const res = await fetch(
+    `https://dev.azure.com/${ref.owner}/${encodeURIComponent(ref.project!)}/_apis/git/repositories/${encodeURIComponent(ref.repo)}/items?recursionLevel=Full&api-version=7.1-preview.1` +
+    (ref.branch ? `&versionDescriptor.version=${encodeURIComponent(ref.branch)}&versionDescriptor.versionType=branch` : ''),
+    { headers: { 'Accept': 'application/json' } }
+  );
+  if (!res.ok || !(res.headers.get('content-type') || '').includes('json')) return null;
+  const data = await res.json();
+  return (data.value || [])
+    .map((t: any) => {
+      const p = String(t.path || '').replace(/^\//, '');
+      return p ? (t.isFolder ? `${p}/` : p) : '';
+    })
+    .filter(Boolean);
+}
+
+async function fetchBitbucketTreePaths(ref: RepoRef): Promise<string[] | null> {
+  let branch = ref.branch;
+  if (!branch) {
+    const repoRes = await fetch(`https://api.bitbucket.org/2.0/repositories/${ref.owner}/${ref.repo}`);
+    if (!repoRes.ok) return null;
+    branch = (await repoRes.json()).mainbranch?.name as string;
+    if (!branch) return null;
+  }
+  const paths: string[] = [];
+  let next: string | null =
+    `https://api.bitbucket.org/2.0/repositories/${ref.owner}/${ref.repo}/src/${encodeURIComponent(branch)}/` +
+    `?max_depth=8&pagelen=100&fields=values.path,values.type,next`;
+  for (let page = 0; next && page < 20; page++) {
+    const res: Response = await fetch(next);
+    if (!res.ok) return paths.length > 0 ? paths : null;
+    const data: any = await res.json();
+    paths.push(...(data.values || []).map((v: any) => v.type === 'commit_directory' ? `${v.path}/` : v.path));
+    next = data.next || null;
+    if (paths.length > REPO_TREE_MAX_ENTRIES) break;
+  }
+  return paths;
+}
+
+const TREE_FETCHERS: Record<RepoRef['provider'], (ref: RepoRef) => Promise<string[] | null>> = {
+  github: fetchGitHubTreePaths,
+  gitlab: fetchGitLabTreePaths,
+  azure: fetchAzureTreePaths,
+  bitbucket: fetchBitbucketTreePaths
+};
+
+async function buildRepoTreeBlock(pageUrl: string, question: string): Promise<string | null> {
+  const ref = parseRepoUrl(pageUrl);
   if (!ref) return null;
 
-  const cacheKey = `${ref.owner}/${ref.repo}@${ref.branch ?? ''}`;
-  let entry = githubTreeCache.get(cacheKey);
-  if (!entry || Date.now() - entry.ts > GH_TREE_TTL_MS) {
-    let branch = ref.branch;
-    if (!branch) {
-      const repoRes = await fetch(`https://api.github.com/repos/${ref.owner}/${ref.repo}`, {
-        headers: { 'Accept': 'application/vnd.github+json' }
-      });
-      if (!repoRes.ok) return null; // private / renamed / rate-limited — skip silently
-      branch = (await repoRes.json()).default_branch as string;
-    }
-    const treeRes = await fetch(
-      `https://api.github.com/repos/${ref.owner}/${ref.repo}/git/trees/${encodeURIComponent(branch!)}?recursive=1`,
-      { headers: { 'Accept': 'application/vnd.github+json' } }
-    );
-    if (!treeRes.ok) return null;
-    const tree = await treeRes.json();
-    const paths: string[] = (tree.tree || [])
-      .map((t: any) => t.type === 'tree' ? `${t.path}/` : t.path)
-      .filter(Boolean);
-    if (paths.length === 0 || paths.length > GH_TREE_MAX_ENTRIES) return null;
+  const cacheKey = `${ref.provider}:${ref.label}@${ref.branch ?? ''}`;
+  let entry = repoTreeCache.get(cacheKey);
+  if (!entry || Date.now() - entry.ts > REPO_TREE_TTL_MS) {
+    const paths = await TREE_FETCHERS[ref.provider](ref);
+    if (!paths || paths.length === 0 || paths.length > REPO_TREE_MAX_ENTRIES) return null;
     entry = { paths, ts: Date.now() };
-    githubTreeCache.set(cacheKey, entry);
+    repoTreeCache.set(cacheKey, entry);
   }
 
   const { selected, truncated } = selectTreePaths(entry.paths, question);
-  console.log(`[GH-TREE] ${cacheKey}: ${entry.paths.length} paths, inlined ${selected.length}${truncated ? ' (truncated)' : ''}`);
+  console.log(`[REPO-TREE] ${cacheKey}: ${entry.paths.length} paths, inlined ${selected.length}${truncated ? ' (truncated)' : ''}`);
   return formatTreeBlock(ref, selected, truncated);
 }
 

@@ -11,6 +11,7 @@ import * as pdfjsLib from 'pdfjs-dist';
 // Vite resolves this to a bundled worker file URL.
 import pdfWorkerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
 import { env, pipeline, AutoTokenizer, AutoModelForSequenceClassification } from '@huggingface/transformers';
+import { cleanPdfPageMarkdown } from '../lib/pdf-text-cleaner';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
 
@@ -229,6 +230,10 @@ async function parsePdfData(data: Uint8Array): Promise<{ pages: string[]; imageP
       .replace(/(\d)\s+\]/g, '$1]')
       .replace(/\[(\d+(?:\s*,\s*\d+)+)\]/g, (_m, g) => `[${g.replace(/\s+/g, '')}]`)
       .replace(/[ \t]{2,}/g, ' ');
+
+    // Deterministic cleanup: letter-spaced small-caps headings, braided
+    // figure/diagram label debris (see lib/pdf-text-cleaner.ts).
+    pageMarkdown = cleanPdfPageMarkdown(pageMarkdown);
 
     pages.push(pageMarkdown.trim());
   }

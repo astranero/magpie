@@ -39,27 +39,79 @@ export function formatHistoryForIntent(history: Array<{ role: string; content: s
 }
 
 // ─────────────────────────────────────────────
-// GitHub repository context (pure parts)
+// Repository context (pure parts) — GitHub, GitLab, Azure DevOps, Bitbucket
 // ─────────────────────────────────────────────
 
-export interface GitHubRepoRef {
+export type RepoProvider = 'github' | 'gitlab' | 'azure' | 'bitbucket';
+
+export interface RepoRef {
+  provider: RepoProvider;
+  /** Human label, e.g. "owner/repo" or "org/project/repo". */
+  label: string;
+  /** Provider-specific path pieces used by the fetcher. */
   owner: string;
   repo: string;
-  /** Branch when the URL pins one (…/tree/<branch>/…); undefined = default. */
+  /** Azure DevOps only: the project between org and repo. */
+  project?: string;
+  /** Branch when the URL pins one; undefined = default branch. */
   branch?: string;
 }
 
-/** Extract owner/repo(/branch) from any github.com page URL, else null. */
-export function parseGitHubRepo(url: string): GitHubRepoRef | null {
-  const m = (url || '').match(
-    /^https?:\/\/(?:www\.)?github\.com\/([\w.-]+)\/([\w.-]+?)(?:\.git)?(?:\/(?:tree|blob)\/([^/]+))?(?:[/?#]|$)/
-  );
-  if (!m) return null;
-  const [, owner, repo, branch] = m;
-  // Non-repo top-level paths (orgs, marketplace, settings…) have no second segment match anyway;
-  // filter obvious non-repo "repos".
-  if (['topics', 'collections', 'features', 'marketplace', 'orgs', 'settings', 'notifications', 'sponsors'].includes(owner)) return null;
-  return { owner, repo, branch };
+const NON_REPO_GH_OWNERS = new Set(['topics', 'collections', 'features', 'marketplace', 'orgs', 'settings', 'notifications', 'sponsors']);
+
+/** Extract a repository reference from a code-host page URL, else null. */
+export function parseRepoUrl(url: string): RepoRef | null {
+  const u = url || '';
+
+  // GitHub: github.com/{owner}/{repo}[/tree|blob/{branch}]
+  let m = u.match(/^https?:\/\/(?:www\.)?github\.com\/([\w.-]+)\/([\w.-]+?)(?:\.git)?(?:\/(?:tree|blob)\/([^/]+))?(?:[/?#]|$)/);
+  if (m) {
+    const [, owner, repo, branch] = m;
+    if (NON_REPO_GH_OWNERS.has(owner)) return null;
+    return { provider: 'github', label: `${owner}/${repo}`, owner, repo, branch };
+  }
+
+  // GitLab: gitlab.com/{group[/subgroup…]}/{repo}[/-/tree|blob/{branch}]
+  // The "/-/" separator segment would match [\w.-], so split on it FIRST.
+  m = u.match(/^https?:\/\/(?:www\.)?gitlab\.com\/([^?#]+)/);
+  if (m) {
+    const [repoPart, actionPart] = m[1].split(/\/-\//, 2);
+    const parts = repoPart.replace(/\.git$/, '').split('/').filter(Boolean);
+    if (parts.length < 2 || !parts.every(p => /^[\w.-]+$/.test(p))) return null;
+    const branchMatch = actionPart?.match(/^(?:tree|blob)\/([^/?#]+)/);
+    const path = parts.join('/');
+    return {
+      provider: 'gitlab',
+      label: path,
+      owner: parts.slice(0, -1).join('/'),
+      repo: parts[parts.length - 1],
+      branch: branchMatch ? branchMatch[1] : undefined
+    };
+  }
+
+  // Azure DevOps: dev.azure.com/{org}/{project}/_git/{repo}[?version=GB{branch}]
+  m = u.match(/^https?:\/\/dev\.azure\.com\/([\w.-]+)\/([\w.%-]+)\/_git\/([\w.%-]+)/);
+  if (m) {
+    const [, org, project, repo] = m;
+    const branchMatch = u.match(/[?&]version=GB([^&#]+)/);
+    return {
+      provider: 'azure',
+      label: `${org}/${decodeURIComponent(project)}/${decodeURIComponent(repo)}`,
+      owner: org,
+      project: decodeURIComponent(project),
+      repo: decodeURIComponent(repo),
+      branch: branchMatch ? decodeURIComponent(branchMatch[1]) : undefined
+    };
+  }
+
+  // Bitbucket: bitbucket.org/{workspace}/{repo}[/src/{branch}]
+  m = u.match(/^https?:\/\/(?:www\.)?bitbucket\.org\/([\w.-]+)\/([\w.-]+?)(?:\.git)?(?:\/src\/([^/]+))?(?:[/?#]|$)/);
+  if (m) {
+    const [, owner, repo, branch] = m;
+    return { provider: 'bitbucket', label: `${owner}/${repo}`, owner, repo, branch };
+  }
+
+  return null;
 }
 
 /**
@@ -101,10 +153,14 @@ export function selectTreePaths(paths: string[], question: string, budget = 6_00
   return { selected, truncated: selected.length < total };
 }
 
+const PROVIDER_NAMES: Record<RepoProvider, string> = {
+  github: 'GitHub', gitlab: 'GitLab', azure: 'Azure DevOps', bitbucket: 'Bitbucket'
+};
+
 /** Render the tree block injected into the system prompt. */
-export function formatTreeBlock(ref: GitHubRepoRef, paths: string[], truncated: boolean): string {
+export function formatTreeBlock(ref: RepoRef, paths: string[], truncated: boolean): string {
   return (
-    `\n\n--- REPOSITORY FILE TREE (${ref.owner}/${ref.repo}, from the GitHub API; NOT saved) ---\n` +
+    `\n\n--- REPOSITORY FILE TREE (${ref.label}, from the ${PROVIDER_NAMES[ref.provider]} API; NOT saved) ---\n` +
     paths.join('\n') +
     (truncated ? `\n[… tree truncated — paths matching the question are all included]` : '') +
     `\n--- END FILE TREE ---\n` +
