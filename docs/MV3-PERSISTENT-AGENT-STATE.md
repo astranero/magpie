@@ -22,21 +22,21 @@ The solution combines five interlocking components:
 
 MV3 extensions can create an "offscreen document" — an invisible, persistent web page instance that lives outside the ephemeral service worker lifecycle. Use it to run compute-intensive and long-lived JS code, including transformer models, OCR, and event loops.
 
-### 2. IndexedDB for Crash-Consistent Checkpointing
+### 2. Durable Checkpointing, Split by Payload Size
 
-Maintain your agent's working state in IndexedDB so it survives service worker termination. Incrementally checkpoint scraped pages, partial research logs, and job state.
+Small, hot job state (plan, phase, logs, flags) lives in `chrome.storage.local` — synchronous-ish, survives worker death, cheap to update every step. Bulk payloads (scraped pages) go to a dedicated IndexedDB (`ResearchJobCacheDB`) keyed by URL, so a resumed run replays pages from disk instead of the network.
 
 ### 3. Heartbeats as Liveness Signals
 
-The offscreen document periodically writes a heartbeat timestamp to IndexedDB. The service worker reads this to infer if the long-running job is alive or stuck.
+While a job runs, the service worker updates a `lastHeartbeatAt` timestamp on the job record every 20 seconds (the same interval doubles as the MV3 keep-alive: any extension API call resets the ~30 s idle timer). A later worker instance reads this to distinguish "run died" from "run is still going in another instance".
 
 ### 4. Resume Gates to Prevent Duplicate Work
 
-Before starting or resuming a job, check for a recent heartbeat. If the timestamp is still fresh (e.g., less than 3 minutes old), avoid starting duplicate parallel jobs.
+Before resuming a job at startup, require ALL of: job marked `active`, heartbeat **stale** (>3 min — a fresh heartbeat means a completed run's cleanup write lost a race with worker death, so skip), job age under 12 h, and fewer than 3 prior resume attempts (then fail loudly into the chat instead of looping).
 
-### 5. Chrome Alarms as a Waker
+### 5. Worker Startup as the Waker
 
-The Chrome alarms API schedules periodic wake-ups for the service worker, allowing it to check and resume jobs after being suspended.
+A dead worker can't wake itself — but Chrome starts a fresh instance on the next event (a message, an alarm, browser launch). The resume check runs once per worker instance at startup; a periodic `chrome.alarms` job (the 5-minute sync alarm) guarantees such an event eventually arrives even if the user never touches the extension.
 
 ## The 5-Minute Resume Loop War Story
 
@@ -48,9 +48,10 @@ A critical bug occurs if the heartbeat check is absent or mismanaged: the servic
 
 We fixed this by adding:
 
-- An explicit `lastHeartbeatAt` timestamp updated every minute
+- An explicit `lastHeartbeatAt` timestamp updated every 20 seconds while the run executes
 - A staleness threshold `HEARTBEAT_STALE_MS = 3 * 60 * 1000` (3 minutes)
-- An explicit `active: false` state written upon job successful completion
+- An explicit `active: false` state written upon job completion (before the checkpoint is cleared, so losing the clear-write race can't cause a spurious resume)
+- A resume-attempt counter capped at 3, after which the job fails loudly into the chat
 - Service worker checks these signals before launching or resuming jobs
 
 ## Code Highlights

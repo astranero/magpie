@@ -4,6 +4,22 @@
 (staged multi-agent). Both live in `background/deep-researcher.ts`,
 orchestrated by `executeResearch` in the service worker.
 
+## Plan negotiation (before any run)
+
+The command posts an interactive **plan card into the chat** (no modal):
+`PREVIEW_DEEP_RESEARCH` resolves conversational references ("these papers")
+into a standalone topic and drafts sub-questions. While the card is a
+draft, normal chat input refines it (`REFINE_RESEARCH_PLAN` — one LLM call
+returns the revised topic + questions); typing "start"/"go"/"confirm" or
+the card's button launches the run. Draft cards live in UI state only and
+survive chat switches; history keeps the command + the final report.
+
+One research run at a time (the crash-resume checkpoint is a singleton —
+the worker rejects a second start). Chat is NOT blocked during a run:
+streaming chat and research share the worker via separate abort
+controllers (chatId vs projectId), and progress renders as a live card
+with its own Stop.
+
 ## Settings that shape a run
 
 - **Research depth** (`researchDepth`): Standard / Deep / Exhaustive —
@@ -36,7 +52,10 @@ orchestrated by `executeResearch` in the service worker.
    agent label), origin tags in headings, confidence markers, analyst notes
    from stages as non-citable context. Streamed live to the panel
    (`DEEP_RESEARCH_DELTA`); the persisted chat message is the source of
-   truth. Report saved as a document; source chunks evicted from the index.
+   truth. The report, every scraped source, and the consolidated Research
+   Sources list are all saved as project documents; only the in-memory
+   Orama index is dropped afterwards (persisted chunks rehydrate from
+   IndexedDB on the next search).
 
 Web discovery prefers user-linked search APIs (Tavily/Brave/Serper) and
 falls back to the DDG scrape chain (direct → Jina-proxied → `site:`-stripped
