@@ -306,3 +306,51 @@ describe('buildSourcesDocMarkdown', () => {
     expect(md).toContain('3 source(s)');
   });
 });
+
+// ─── stripModelBibliography ───────────────────────────────────────────────────
+
+describe('stripModelBibliography', () => {
+  it('strips a hand-written bibliography of bare doc-ids (real-world case)', async () => {
+    const { stripModelBibliography } = await import('../deep-researcher');
+    const report = `Report body with a claim [d13d5d8.s1.p2].
+
+## Bibliography
+
+[d13d5d8] Betting market odds data, July 2026.
+[d3d84f3] Statistical probability analysis, July 2026.
+[d5e15ed] Expert match preview and analysis.`;
+    const out = stripModelBibliography(report);
+    expect(out).toContain('claim [d13d5d8.s1.p2]');
+    expect(out).not.toContain('Bibliography');
+    expect(out).not.toContain('Betting market odds data');
+  });
+
+  it('keeps a "Sources" heading followed by prose (not a citation list)', async () => {
+    const { stripModelBibliography } = await import('../deep-researcher');
+    const report = `Body text.
+
+## Sources
+
+The main sources of disagreement between the two camps are methodological.
+Neither side disputes the underlying data.`;
+    expect(stripModelBibliography(report)).toBe(report);
+  });
+
+  it('handles bulleted reference lists and bold headings', async () => {
+    const { stripModelBibliography } = await import('../deep-researcher');
+    const report = `Body.
+
+**References**
+
+- [1] First source description
+- [2] Second source description`;
+    const out = stripModelBibliography(report);
+    expect(out.trim()).toBe('Body.');
+  });
+
+  it('is a no-op when there is no bibliography section', async () => {
+    const { stripModelBibliography } = await import('../deep-researcher');
+    const report = 'Just a normal report [a1b2c3d.s0.p1] with citations.';
+    expect(stripModelBibliography(report)).toBe(report);
+  });
+});

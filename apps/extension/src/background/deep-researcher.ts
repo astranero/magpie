@@ -73,7 +73,26 @@ const RESEARCH_CITATION_RULES =
   `5. If the excerpts don't cover something, say so explicitly instead of citing something unrelated.\n` +
   `6. SOURCES DESCRIBE DIFFERENT SYSTEMS. Each [Source: …] block is a separate paper/page about its OWN system, method, or subject. NEVER merge mechanisms from different sources into one system as if they were parts of the same thing — attribute every mechanism, metric, and name to the specific system its source describes ("The X paper proposes…", "Separately, Y reports…").\n` +
   `7. If the research topic PRESUMES a connection the excerpts do not support (e.g. "how does system A use technique B" when no source shows A using B), state that mismatch plainly in the first paragraph instead of inventing the connection.\n` +
-  `8. Ignore sources that are topically unrelated to the research question (a keyword match is not relevance) — do not force them into the narrative.\n`;
+  `8. Ignore sources that are topically unrelated to the research question (a keyword match is not relevance) — do not force them into the narrative.\n` +
+  `9. Do NOT write a Bibliography, References, or Sources section of your own — a source list is appended automatically. Citations appear ONLY as inline [anchor_id] brackets.\n`;
+
+/**
+ * Models sometimes append a hand-written "Bibliography"/"References" section
+ * of bare doc-ids despite rule 9 — those aren't anchors, render as dead
+ * brackets, and duplicate the auto-appended Sources list. Strip a trailing
+ * section whose entries are bracket-led lines.
+ */
+export function stripModelBibliography(synthesis: string): string {
+  const m = synthesis.match(/\n#{0,4}\s*\**\s*(Bibliography|References|Works Cited|Sources)\s*\**\s*\n/i);
+  if (!m || m.index === undefined) return synthesis;
+  const tail = synthesis.slice(m.index + m[0].length);
+  const tailLines = tail.split('\n').map(l => l.trim()).filter(Boolean);
+  if (tailLines.length === 0) return synthesis;
+  const bracketLed = tailLines.filter(l => /^(?:[-*]\s*)?\[[^\]]{1,40}\]/.test(l)).length;
+  // Only strip when the section is clearly a citation list, not prose
+  if (bracketLed / tailLines.length < 0.6) return synthesis;
+  return synthesis.slice(0, m.index).trimEnd();
+}
 
 // ─────────────────────────────────────────────
 // Deep Researcher — tab-free
@@ -1515,6 +1534,7 @@ async function evaluateAndRefine(
   evaluatorFn: LlmChatFn,
   onProgress: (s: string) => void
 ): Promise<string> {
+  synthesis = stripModelBibliography(synthesis);
   onProgress(`[EVALUATING] Running quality evaluation on report…`);
   const first = await evaluateReport(topic, synthesis, evaluatorFn).catch(() => null);
   if (!first) return synthesis;
@@ -1529,7 +1549,9 @@ async function evaluateAndRefine(
 
   // Flagged: one revision pass, then re-audit so the shown verdict is honest.
   onProgress(`[EVALUATING] Revising report to address auditor findings…`);
-  const revised = await reviseSynthesis(topic, synthesis, first, sourceContext, llmChatFn).catch(() => synthesis);
+  const revised = stripModelBibliography(
+    await reviseSynthesis(topic, synthesis, first, sourceContext, llmChatFn).catch(() => synthesis)
+  );
   if (revised === synthesis) {
     return synthesis + formatEvaluationBlock(first, false);
   }
