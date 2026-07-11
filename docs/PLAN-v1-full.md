@@ -110,13 +110,18 @@ pressure.
 
 ### Phase C — Structure (velocity refactor)
 
-#### C1: Split `App.tsx` (~1,400 lines)
+#### C1: Split `App.tsx` (~1,400 lines) 🟡 SLICE DONE
+> Pure helpers → lib/format.ts + lib/import-helpers.ts (1517→1436). Hook
+> extraction of the state machines still pending — needs richer E2E first.
 Extract: `hooks/useChatStream.ts`, `hooks/useResearchState.ts`,
 `hooks/useSettings.ts`, view wiring stays in App. No behavior change.
 - [ ] App.tsx < 500 lines; build + tests green; manual smoke unchanged
 **Scope:** L (mechanical)
 
-#### C2: Split `service-worker.ts` (~1,900 lines)
+#### C2: Split `service-worker.ts` (~1,900 lines) 🟡 SLICE DONE
+> LLM client (getProviderSettings + chat + stream + models) → background/
+> llm-client.ts, guarded by e2e/chat.spec.ts. Capture/import/research handler
+> extraction pending — those handlers still lack E2E coverage.
 `background/router.ts` (message map) + `background/capture.ts` +
 `background/chat.ts` + `background/research-jobs.ts`. Keep exports stable.
 - [ ] Worker file < 400 lines; zero dynamic imports in dist (MV3 rule)
@@ -131,14 +136,14 @@ Extract: `hooks/useChatStream.ts`, `hooks/useResearchState.ts`,
 
 ### Phase D — Safety net
 
-#### D1: Playwright E2E smoke
+#### D1: Playwright E2E smoke ✅ (5 tests: smoke + chat streaming loop)
 Launch Chromium with the built extension; script: open sidepanel → capture a
 fixture page → ask a question → assert a citation chip renders → click it →
 assert DocumentView opens with highlight. Run against `dist/`.
 - [ ] `npm run test:e2e` green locally; catches coordinate-space class bugs
 **Scope:** L
 
-#### D2: GitHub Actions CI
+#### D2: GitHub Actions CI ✅ (.github/workflows/ci.yml)
 `test` + `build` + `test:e2e` (headless) on push/PR. Cache node_modules.
 - [ ] Red X on broken PRs
 **Scope:** S
