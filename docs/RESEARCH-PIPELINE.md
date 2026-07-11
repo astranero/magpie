@@ -43,6 +43,38 @@ falls back to the DDG scrape chain (direct → Jina-proxied → `site:`-stripped
 retry). Quick mode falls back to academic search when web discovery returns
 nothing.
 
+## Quality pipeline (audit)
+
+Quality is enforced at four points, in order. There is no single "quality
+score" — each layer has its own job:
+
+1. **Discovery filters** (`deep-researcher.ts`): `BLOCKED_DOMAINS` drops
+   social/content-farm URLs at search time; `isJunkUrl` drops schema/asset
+   URLs; `HIGH_QUALITY_DOMAINS` sorts authority domains first. `sourceQuality:
+   'high'` turns the sort into a hard filter (plus ≥10-citation / ≤1-year
+   floor for papers, with a starvation guard).
+2. **Content gate at ingest** (`lib/quality-gate.ts`): every scraped page
+   passes `checkContentQuality` — anti-bot, JS-required, paywall, login-wall,
+   error-page, cookie-wall, thin-content. Rejects are never indexed; pages
+   with a DOI recover via Semantic Scholar metadata. Garbled PDF extraction
+   is detected (`isGarbledPdf`) and LLM-cleaned.
+3. **Selection ranking**: academic papers are ranked algorithmically
+   (`lib/paper-rank.ts` — citations, velocity, influential citations,
+   recency, full-text, 30% frontier slots); harvested web references must
+   survive the offscreen reranker.
+4. **Synthesis packing**: retrieval is BM25+vector hybrid; evidence is
+   packed round-robin across agent labels within the context budget, and a
+   context-minimum guard aborts rather than synthesizing from nothing.
+
+Every source that survives the gate becomes a `SourceRecord` with a quality
+**tier**: `high` (authority domain, arXiv/DOI, or ≥10 citations) or
+`standard`. Post-gate there is deliberately no "low" tier — rejects never
+become records. Tiers are shown in the consolidated **Research Sources**
+document (`type: research-sources`) saved alongside every report: browsable
+in Lore, saved `enabled: false` and never vector-indexed so the link table
+can't pollute retrieval or citations. Report citations (`[anchor_id]`)
+always resolve to the captured primary documents, not to this list.
+
 ## Crash safety
 
 Job checkpoint in `chrome.storage.local` (plan, phase, logs, evolved stage

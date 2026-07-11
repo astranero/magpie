@@ -437,6 +437,53 @@ async function indexResearchDoc(
 
 type AgentLabel = 'WEB' | 'ACADEMIC' | 'NEWS' | 'MCP';
 
+// ── Structured source records ──
+// Every captured source keeps its metadata (agent, quality tier, citations)
+// instead of being flattened to a markdown string at collection time. The
+// records feed both the report's Sources appendix and the standalone
+// "Research Sources" document saved to the project.
+
+export type SourceTier = 'high' | 'standard';
+
+export interface SourceRecord {
+  url: string;
+  title: string;
+  label: AgentLabel;
+  docId: string;
+  tier: SourceTier;
+  citations?: number;
+}
+
+/**
+ * Quality tier from signals that already exist in the pipeline — no new
+ * scoring machinery. Everything indexed has already passed the content gate
+ * (rejects never become records), so the honest distinction left is
+ * high-authority vs standard. A third "low" tier would be fake precision.
+ */
+export function sourceTier(url: string, citations?: number): SourceTier {
+  if ((citations ?? 0) >= 10) return 'high';
+  if (HIGH_QUALITY_DOMAINS.test(url) || /arxiv\.org/i.test(url) || extractDoi(url)) return 'high';
+  return 'standard';
+}
+
+/** Dedupe records: same document (docId) or same URL = same source. */
+export function dedupeSourceRecords(records: SourceRecord[]): SourceRecord[] {
+  const seen = new Set<string>();
+  const out: SourceRecord[] = [];
+  for (const r of records) {
+    const key = r.docId || r.url;
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    out.push(r);
+  }
+  return out;
+}
+
+/** Render a record as the markdown link used in the report's Sources list. */
+function renderSourceEntry(r: SourceRecord): string {
+  return sourceEntry(r.title, r.url);
+}
+
 /**
  * URLs that can never be research sources: schema/DTD references, asset
  * files, tracker endpoints. These leak in from link extraction on scraped
@@ -459,7 +506,7 @@ function sourceEntry(title: string | undefined, url: string): string {
 
 interface AgentOutcome {
   label: AgentLabel;
-  sources: string[];
+  sources: SourceRecord[];
   docIds: string[];
 }
 
@@ -476,7 +523,7 @@ async function scrapeUrlList(
 ): Promise<AgentOutcome> {
   const cap = activeLimits.totalSourcesCap;
   const urlList = [...new Set(urls)].filter(u => !isJunkUrl(u)).slice(0, cap);
-  const sources: string[] = [];
+  const sources: SourceRecord[] = [];
   const docIds: string[] = [];
   let i = 1;
   for (const url of urlList) {
@@ -503,8 +550,9 @@ async function scrapeUrlList(
       }
 
       if (markdown) {
-        docIds.push(await indexResearchDoc(projectId, title || url, url, markdown, label));
-        sources.push(sourceEntry(title, url));
+        const docId = await indexResearchDoc(projectId, title || url, url, markdown, label);
+        docIds.push(docId);
+        sources.push({ url, title: title || url, label, docId, tier: sourceTier(url) });
         onProgress(`[${label}] ✓ Captured "${title}"`);
       } else {
         onProgress(`[${label}] ✗ No readable content: ${url}`);
@@ -744,7 +792,7 @@ async function runAcademicAgent(
   // Resume: papers cached before a crash count even if the APIs are
   // rate-limiting us now. Build a URL→docId map from docs already in this
   // project so cached papers that are already indexed need zero work.
-  const cachedSources: string[] = [];
+  const cachedSources: SourceRecord[] = [];
   const cachedDocIds: string[] = [];
   const cachedTitles = new Set<string>();
   try {
@@ -767,20 +815,21 @@ async function runAcademicAgent(
       if (signal?.aborted) throw new Error('AbortError');
 
       const existingDocId = urlToDocId.get(page.url);
+      let cachedDocId: string;
       if (existingDocId) {
         // Already in this project — just track it, no IDB work at all
-        cachedDocIds.push(existingDocId);
+        cachedDocId = existingDocId;
         alreadyLinked++;
       } else {
         // Not yet in project — index it (dedup in saveDocument avoids re-embedding)
         await yieldToEventLoop();
-        const docId = await indexResearchDoc(projectId, page.title, page.url, page.markdown, 'ACADEMIC');
-        cachedDocIds.push(docId);
+        cachedDocId = await indexResearchDoc(projectId, page.title, page.url, page.markdown, 'ACADEMIC');
         restored++;
       }
+      cachedDocIds.push(cachedDocId);
 
       if (page.url.startsWith('http') && !isJunkUrl(page.url)) {
-        cachedSources.push(sourceEntry(page.title, page.url));
+        cachedSources.push({ url: page.url, title: page.title, label: 'ACADEMIC', docId: cachedDocId, tier: sourceTier(page.url) });
       }
       cachedTitles.add(page.title.toLowerCase().trim());
     }
@@ -819,7 +868,7 @@ async function runAcademicAgent(
     }
   }
 
-  const sources: string[] = [...cachedSources];
+  const sources: SourceRecord[] = [...cachedSources];
   const docIds: string[] = [...cachedDocIds];
   const seen = new Set<string>(cachedTitles);
 
@@ -894,8 +943,9 @@ async function runAcademicAgent(
     // Use arXiv abs URL as canonical source when available
     const sourceUrl = arxivId ? `https://arxiv.org/abs/${arxivId}` : (p.url || '');
     const bibtex = generateBibtex({ title: p.title, authors: p.authors, year: p.year, doi: p.doi, venue: p.venue, url: sourceUrl || undefined });
-    docIds.push(await indexResearchDoc(projectId, p.title, sourceUrl, md, 'ACADEMIC', bibtex));
-    if (sourceUrl) sources.push(sourceEntry(p.title, sourceUrl));
+    const paperDocId = await indexResearchDoc(projectId, p.title, sourceUrl, md, 'ACADEMIC', bibtex);
+    docIds.push(paperDocId);
+    if (sourceUrl) sources.push({ url: sourceUrl, title: p.title, label: 'ACADEMIC', docId: paperDocId, tier: sourceTier(sourceUrl, p.citations), citations: p.citations });
     await savePage({ url: sourceUrl || `paper:${key}`, title: p.title, markdown: md, label: 'ACADEMIC' }).catch(() => {});
   }
 
@@ -914,7 +964,7 @@ async function runMcpAgent(
   onProgress: (s: string) => void,
   signal?: AbortSignal
 ): Promise<AgentOutcome> {
-  const sources: string[] = [];
+  const sources: SourceRecord[] = [];
   const docIds: string[] = [];
   const servers = (await getMcpServers()).filter(s => s.enabled);
   if (servers.length === 0) return { label: 'MCP', sources, docIds };
@@ -941,8 +991,9 @@ async function runMcpAgent(
             continue;
           }
           const title = `MCP: ${server.name} — ${tool.name} ("${topic.slice(0, 60)}")`;
-          docIds.push(await indexResearchDoc(projectId, title, server.url, text, 'MCP'));
-          sources.push(`[${title}](${server.url})`);
+          const mcpDocId = await indexResearchDoc(projectId, title, server.url, text, 'MCP');
+          docIds.push(mcpDocId);
+          sources.push({ url: server.url, title, label: 'MCP', docId: mcpDocId, tier: 'standard' });
           onProgress(`[MCP] ✓ ${server.name}/${tool.name} returned usable content`);
         } catch (e: any) {
           onProgress(`[MCP] ✗ ${server.name}/${tool.name}: ${e.message}`);
@@ -957,16 +1008,92 @@ async function runMcpAgent(
 
 // ── Synthesis persistence (shared by both modes) ──
 
+const AGENT_LABEL_NAMES: Record<AgentLabel, string> = {
+  WEB: 'Web',
+  ACADEMIC: 'Academic',
+  NEWS: 'News',
+  MCP: 'MCP'
+};
+
+/**
+ * Markdown body for the standalone "Research Sources" document: one table
+ * per agent, each row linking to the primary source with its quality tier.
+ * Citations in the report itself keep pointing at the captured documents via
+ * [anchor_id] — this list is a browsable cross-reference, not a replacement.
+ */
+export function buildSourcesDocMarkdown(topic: string, records: SourceRecord[]): string {
+  const unique = dedupeSourceRecords(records).filter(r => r.url);
+  const high = unique.filter(r => r.tier === 'high').length;
+
+  let body =
+    `Consolidated source list for the research run on **${topic}**. ` +
+    `${unique.length} source(s), ${high} high-authority. ` +
+    `Every source below is stored as its own document in this workspace — report citations resolve to those documents, not to this list.\n`;
+
+  const order: AgentLabel[] = ['ACADEMIC', 'WEB', 'NEWS', 'MCP'];
+  for (const label of order) {
+    const group = unique.filter(r => r.label === label);
+    if (group.length === 0) continue;
+    body += `\n## ${AGENT_LABEL_NAMES[label]} (${group.length})\n\n`;
+    body += `| Source | Tier | Citations |\n|---|---|---|\n`;
+    for (const r of group) {
+      const link = renderSourceEntry(r);
+      const tier = r.tier === 'high' ? '★ high' : 'standard';
+      const cites = typeof r.citations === 'number' ? String(r.citations) : '—';
+      body += `| ${link} | ${tier} | ${cites} |\n`;
+    }
+  }
+  return body;
+}
+
+/**
+ * Persist the consolidated source list as a browsable project document.
+ * Saved with `enabled: false` and zero chunks: it must never enter retrieval
+ * or the vector store — a table of links surfacing as a citation would be
+ * garbage context. It exists purely for the user to browse in Lore.
+ */
+async function saveResearchSourcesDoc(
+  projectId: string,
+  topic: string,
+  records: SourceRecord[]
+): Promise<void> {
+  const unique = dedupeSourceRecords(records).filter(r => r.url);
+  if (unique.length === 0) return;
+
+  const truncatedTopic = topic.length > 100 ? topic.slice(0, 97) + '…' : topic;
+  const body = buildSourcesDocMarkdown(topic, records);
+  const content = buildFrontmatter({
+    title: `Research Sources — ${truncatedTopic}`,
+    type: 'research-sources',
+    wordCount: body.split(/\s+/).filter(Boolean).length,
+    tags: ['research-sources']
+  }) + body;
+
+  const { id } = await saveDocument({
+    title: `Research Sources — ${truncatedTopic}`,
+    url: '',
+    content,
+    capturedAt: new Date().toISOString(),
+    favicon: '',
+    wordCount: body.split(/\s+/).filter(Boolean).length,
+    syncedToDrive: false,
+    enabled: false
+  }, []);
+  await linkDocumentToProject(projectId, id);
+  // Intentionally NOT added to the vector store.
+}
+
 async function saveSynthesisReport(
   projectId: string,
   topic: string,
   synthesis: string,
-  sources: string[],
+  sources: SourceRecord[],
   mode: 'quick' | 'deep'
 ): Promise<void> {
   const truncatedTopic = topic.length > 120 ? topic.slice(0, 117) + '…' : topic;
   const title = `Deep Research: ${truncatedTopic}`;
-  const body = `${synthesis}\n\n## Sources\n${[...new Set(sources)].map(s => `- ${s}`).join('\n')}`;
+  const sourceLines = [...new Set(dedupeSourceRecords(sources).map(renderSourceEntry))];
+  const body = `${synthesis}\n\n## Sources\n${sourceLines.map(s => `- ${s}`).join('\n')}`;
   const fullSynthesisMarkdown = buildFrontmatter({
     title,
     type: 'deep-research',
@@ -991,6 +1118,11 @@ async function saveSynthesisReport(
 
   await linkDocumentToProject(projectId, docId);
   await addChunksToVectorStore(projectId, savedChunks);
+
+  // Companion artifact: the consolidated, browsable source list (Lore view).
+  await saveResearchSourcesDoc(projectId, topic, sources).catch(err =>
+    console.warn('Failed to save research sources doc:', err)
+  );
 }
 
 // ── Main loop ──
@@ -1093,7 +1225,7 @@ export async function runDeepResearch(
 
   onProgress(`[DONE] Research complete.`);
 
-  return { synthesis, sources: agent.sources };
+  return { synthesis, sources: dedupeSourceRecords(agent.sources).map(renderSourceEntry) };
 }
 
 // ── Deep mode: multi-agent, cross-referenced ──
@@ -1131,7 +1263,7 @@ async function followReferences(
   onProgress: (s: string) => void,
   signal?: AbortSignal
 ): Promise<AgentOutcome> {
-  const sources: string[] = [];
+  const sources: SourceRecord[] = [];
   const docIds: string[] = [];
   const { citations, web } = partitionRefs(refs);
   const scoredWeb = await scoreWebRefs(topic, web);
@@ -1147,8 +1279,9 @@ async function followReferences(
         const fullText = await fetchArxivFullText(arxivId, signal);
         if (fullText) {
           const url = `https://arxiv.org/abs/${arxivId}`;
-          docIds.push(await indexResearchDoc(projectId, `arXiv:${arxivId}`, url, fullText, 'ACADEMIC'));
-          sources.push(sourceEntry(`arXiv:${arxivId}`, url));
+          const refDocId = await indexResearchDoc(projectId, `arXiv:${arxivId}`, url, fullText, 'ACADEMIC');
+          docIds.push(refDocId);
+          sources.push({ url, title: `arXiv:${arxivId}`, label: 'ACADEMIC', docId: refDocId, tier: 'high' });
           onProgress(`[REFS] ✓ ${url}`);
           continue;
         }
@@ -1156,8 +1289,9 @@ async function followReferences(
       // DOI or web: scrape it (scrapeUrl handles the DOI→S2 fallback)
       const scraped = await scrapeUrl(ref.url, signal);
       if (scraped?.markdown) {
-        docIds.push(await indexResearchDoc(projectId, scraped.title || ref.url, ref.url, scraped.markdown, 'WEB'));
-        sources.push(sourceEntry(scraped.title, ref.url));
+        const refDocId = await indexResearchDoc(projectId, scraped.title || ref.url, ref.url, scraped.markdown, 'WEB');
+        docIds.push(refDocId);
+        sources.push({ url: ref.url, title: scraped.title || ref.url, label: 'WEB', docId: refDocId, tier: sourceTier(ref.url) });
         onProgress(`[REFS] ✓ ${ref.url}`);
       }
     } catch {
@@ -1798,7 +1932,7 @@ async function runDeeperResearch(
 
   // ── Phase 3: final paper synthesis ───────────────────────────────────────
   const allDocIds = agents.flatMap(a => a.docIds);
-  const allSources = [...new Set(agents.flatMap(a => a.sources))];
+  const allSources = dedupeSourceRecords(agents.flatMap(a => a.sources));
   const completedBriefs = stageBriefs.filter(Boolean);
 
   if (completedBriefs.length === 0 && allDocIds.length === 0) {
@@ -1884,5 +2018,5 @@ async function runDeeperResearch(
   await saveSynthesisReport(projectId, topic, synthesis, allSources, 'deep');
   onProgress(`[DONE] ${completedBriefs.length} stage briefs → final paper — ${allSources.length} sources total.`);
 
-  return { synthesis, sources: allSources };
+  return { synthesis, sources: allSources.map(renderSourceEntry) };
 }

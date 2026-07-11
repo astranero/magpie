@@ -26,6 +26,10 @@ import {
   extractSearchUrls,
   generateSearchQueries,
   generateSubQuestions,
+  sourceTier,
+  dedupeSourceRecords,
+  buildSourcesDocMarkdown,
+  SourceRecord,
 } from '../deep-researcher';
 
 // ─── buildAnchoredContext ─────────────────────────────────────────────────────
@@ -209,5 +213,96 @@ describe('generateSubQuestions', () => {
     const llm = vi.fn().mockResolvedValue(nine);
     const result = await generateSubQuestions('topic', llm);
     expect(result.length).toBe(7);
+  });
+});
+
+// ─── Source records ───────────────────────────────────────────────────────────
+
+const rec = (over: Partial<SourceRecord>): SourceRecord => ({
+  url: 'https://example.com/a',
+  title: 'A',
+  label: 'WEB',
+  docId: 'doc-a',
+  tier: 'standard',
+  ...over,
+});
+
+describe('sourceTier', () => {
+  it('marks high-quality domains as high', () => {
+    expect(sourceTier('https://www.nature.com/articles/x')).toBe('high');
+    expect(sourceTier('https://arstechnica.com/ai/2026/post')).toBe('high');
+  });
+
+  it('marks arXiv and DOI-bearing URLs as high', () => {
+    expect(sourceTier('https://arxiv.org/abs/2401.12345')).toBe('high');
+    expect(sourceTier('https://dl.acm.org/doi/10.1145/3583133.3596373')).toBe('high');
+  });
+
+  it('promotes any URL with ≥10 citations to high', () => {
+    expect(sourceTier('https://random-blog.io/post', 10)).toBe('high');
+    expect(sourceTier('https://random-blog.io/post', 9)).toBe('standard');
+  });
+
+  it('defaults to standard for unknown domains without citations', () => {
+    expect(sourceTier('https://some-random-site.io/article')).toBe('standard');
+  });
+});
+
+describe('dedupeSourceRecords', () => {
+  it('dedupes by docId', () => {
+    const out = dedupeSourceRecords([rec({}), rec({ url: 'https://example.com/mirror' })]);
+    expect(out.length).toBe(1);
+  });
+
+  it('falls back to URL when docId is empty and drops keyless records', () => {
+    const out = dedupeSourceRecords([
+      rec({ docId: '', url: 'https://x.com/1' }),
+      rec({ docId: '', url: 'https://x.com/1' }),
+      rec({ docId: '', url: '' }),
+    ]);
+    expect(out.length).toBe(1);
+  });
+
+  it('keeps distinct sources', () => {
+    const out = dedupeSourceRecords([rec({}), rec({ docId: 'doc-b', url: 'https://example.com/b' })]);
+    expect(out.length).toBe(2);
+  });
+});
+
+describe('buildSourcesDocMarkdown', () => {
+  const records: SourceRecord[] = [
+    rec({ docId: 'd1', url: 'https://arxiv.org/abs/2401.00001', title: 'Paper One', label: 'ACADEMIC', tier: 'high', citations: 42 }),
+    rec({ docId: 'd2', url: 'https://example.com/blog', title: 'Blog Post', label: 'WEB', tier: 'standard' }),
+    rec({ docId: 'd3', url: 'https://news.site/item', title: 'News Item', label: 'NEWS', tier: 'standard' }),
+  ];
+
+  it('groups sources into per-agent sections with counts', () => {
+    const md = buildSourcesDocMarkdown('test topic', records);
+    expect(md).toContain('## Academic (1)');
+    expect(md).toContain('## Web (1)');
+    expect(md).toContain('## News (1)');
+    expect(md).not.toContain('## MCP');
+  });
+
+  it('renders markdown links, tiers, and citation counts in table rows', () => {
+    const md = buildSourcesDocMarkdown('test topic', records);
+    expect(md).toContain('[Paper One](https://arxiv.org/abs/2401.00001)');
+    expect(md).toContain('★ high');
+    expect(md).toContain('| 42 |');
+    expect(md).toContain('| — |'); // no citation count → em dash
+  });
+
+  it('summarises totals and high-authority count in the intro', () => {
+    const md = buildSourcesDocMarkdown('test topic', records);
+    expect(md).toContain('3 source(s), 1 high-authority');
+  });
+
+  it('dedupes records and skips URL-less entries', () => {
+    const md = buildSourcesDocMarkdown('t', [
+      ...records,
+      records[0],                     // duplicate docId
+      rec({ docId: 'd4', url: '' }),  // no URL → excluded from the list
+    ]);
+    expect(md).toContain('3 source(s)');
   });
 });
