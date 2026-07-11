@@ -62,21 +62,20 @@ const PlanCard: React.FC<PlanCardProps> = ({ msgId, plan, onStart, onCancel }) =
   const isBusy = plan.status === 'loading' || plan.status === 'refining';
 
   return (
-    <div className={`w-full rounded-lg border-2 shadow-card overflow-hidden transition-colors ${
-      plan.status === 'cancelled' ? 'border-border/60 opacity-60' :
-      plan.status === 'started' ? 'border-primary/40' : 'border-primary/60'
+    <div className={`w-full rounded-lg border bg-card shadow-card overflow-hidden transition-opacity animate-in fade-in slide-in-from-bottom-2 motion-reduce:animate-none ${
+      plan.status === 'cancelled' ? 'border-border opacity-55' : 'border-border'
     }`}>
-      {/* Header strip */}
-      <div className="flex items-center gap-2 px-3 py-2 bg-primary/10 border-b border-primary/20">
+      {/* Catalog-card header: mono eyebrow over the red index-card rule */}
+      <div className="card-rule-thin flex items-center gap-2 px-3.5 pt-2.5 pb-2 bg-card">
         <Icon size={13} className="text-primary shrink-0" aria-hidden="true" />
-        <span className="text-[10px] font-bold font-mono uppercase tracking-widest text-primary flex-1">
-          {modeName} Plan
+        <span className="text-[10px] font-bold font-mono uppercase tracking-widest text-muted-foreground flex-1">
+          {modeName} · Plan
         </span>
-        <span className={`text-[10px] font-bold font-mono uppercase tracking-widest px-1.5 py-0.5 rounded ${
-          plan.status === 'started' ? 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-400' :
-          plan.status === 'cancelled' ? 'bg-muted text-muted-foreground' :
-          isBusy ? 'bg-primary/15 text-primary animate-pulse' :
-          'bg-amber-500/15 text-amber-600 dark:text-amber-400'
+        <span className={`text-[10px] font-bold font-mono uppercase tracking-widest px-1.5 py-0.5 rounded-sm border ${
+          plan.status === 'started' ? 'border-primary/40 text-primary' :
+          plan.status === 'cancelled' ? 'border-border text-muted-foreground' :
+          isBusy ? 'border-primary/40 text-primary animate-pulse motion-reduce:animate-none' :
+          'border-highlight text-amber-700 dark:text-highlight'
         }`}>
           {plan.status === 'started' ? 'Running' :
            plan.status === 'cancelled' ? 'Cancelled' :
@@ -85,40 +84,37 @@ const PlanCard: React.FC<PlanCardProps> = ({ msgId, plan, onStart, onCancel }) =
         </span>
       </div>
 
-      <div className="p-3 space-y-2.5 bg-card">
+      <div className="px-3.5 py-3 space-y-3">
         {plan.status === 'loading' ? (
-          <div className="flex items-center gap-2 text-xs text-muted-foreground py-2 font-mono">
-            <Sparkles size={12} className="animate-pulse text-primary" aria-hidden="true" />
+          <div className="flex items-center gap-2 text-xs text-muted-foreground py-2">
+            <Sparkles size={12} className="animate-pulse motion-reduce:animate-none text-primary" aria-hidden="true" />
             Resolving topic &amp; drafting sub-questions…
           </div>
         ) : (
           <>
             <div>
-              <div className="text-[10px] font-mono font-bold uppercase tracking-widest text-muted-foreground mb-1">Topic</div>
-              <div className="text-sm font-mono text-foreground leading-snug">{plan.effectiveTopic}</div>
+              {/* The topic is content, not metadata — it gets the display voice */}
+              <div className="font-display text-[17px] leading-snug text-foreground">{plan.effectiveTopic}</div>
               {plan.effectiveTopic !== plan.topic && (
-                <div className="text-[10px] text-muted-foreground mt-0.5 font-mono">from: "{plan.topic}"</div>
+                <div className="text-[10px] text-muted-foreground mt-1 font-mono">from: "{plan.topic}"</div>
               )}
             </div>
 
             {plan.subQuestions.length > 0 && (
-              <div>
-                <div className="text-[10px] font-mono font-bold uppercase tracking-widest text-muted-foreground mb-1">Sub-questions</div>
-                <ol className="space-y-1">
-                  {plan.subQuestions.map((q, i) => (
-                    <li key={i} className="text-xs font-mono text-foreground flex gap-2 leading-snug">
-                      <span className="text-primary font-bold shrink-0 w-3 text-right">{i + 1}</span>
-                      <span>{q}</span>
-                    </li>
-                  ))}
-                </ol>
-              </div>
+              <ol className="space-y-1.5">
+                {plan.subQuestions.map((q, i) => (
+                  <li key={i} className="text-xs text-foreground flex gap-2.5 leading-snug">
+                    <span className="font-mono text-muted-foreground shrink-0 w-4 text-right tabular-nums">{i + 1}.</span>
+                    <span>{q}</span>
+                  </li>
+                ))}
+              </ol>
             )}
 
             {isPending && (
               <>
-                <div className="text-[10px] font-mono text-muted-foreground border-t border-border/60 pt-2">
-                  💬 Type below to change the plan — "drop question 2", "focus on X instead" — or start it.
+                <div className="text-[11px] text-muted-foreground border-t border-border/60 pt-2.5 leading-snug">
+                  Type below to change the plan — "drop question 2", "focus on X instead" — or start it.
                 </div>
                 <div className="flex gap-2">
                   <Button
@@ -130,7 +126,7 @@ const PlanCard: React.FC<PlanCardProps> = ({ msgId, plan, onStart, onCancel }) =
                   </Button>
                   <Button
                     variant="ghost"
-                    className="h-8 text-[10px] font-mono border-2 border-border uppercase tracking-widest"
+                    className="h-8 text-[10px] font-mono border border-border uppercase tracking-widest text-muted-foreground"
                     disabled={isBusy}
                     onClick={() => onCancel?.(msgId)}
                   >
@@ -545,17 +541,18 @@ export const ChatView: React.FC<ChatViewProps> = ({
       >
         {/* Command hint card — shown in empty state to surface slash commands */}
         {isEmpty && (
-          <div className="flex flex-col items-center gap-1 pt-6 pb-2 text-center">
-            <div className="text-sm font-bold font-mono uppercase tracking-widest text-foreground">Ask your treasure trove</div>
-            <div className="text-xs font-mono text-muted-foreground max-w-[260px]">
+          <div className="flex flex-col items-center gap-1.5 pt-8 pb-3 text-center">
+            <div className="font-display text-xl text-foreground">Ask your treasure trove.</div>
+            <div className="w-8 border-t-2 border-[hsl(var(--rule)/0.6)]" aria-hidden="true" />
+            <div className="text-xs text-muted-foreground max-w-[250px] leading-relaxed">
               Everything you've collected is searchable. Answers cite their sources.
             </div>
           </div>
         )}
         {isEmpty && (
-          <div className="rounded-lg border border-border bg-card shadow-card p-4 text-xs font-mono">
-            <div className="font-bold uppercase tracking-widest text-muted-foreground mb-2">Start here</div>
-            <div className="space-y-1">
+          <div className="rounded-lg border border-border bg-card shadow-card overflow-hidden text-xs">
+            <div className="card-rule-thin px-4 pt-2.5 pb-2 font-mono font-bold uppercase tracking-widest text-[10px] text-muted-foreground">Start here</div>
+            <div className="p-2.5 space-y-0.5">
               {[
                 { cmd: '/research', desc: 'Search the web, get a cited report' },
                 { cmd: '/deepresearch', desc: 'Deeper: web + papers + news, cross-checked' },
@@ -566,16 +563,16 @@ export const ChatView: React.FC<ChatViewProps> = ({
                   key={cmd}
                   type="button"
                   onClick={() => setInput(cmd + ' ')}
-                  className="w-full flex items-center gap-2 text-left hover:bg-accent transition-colors p-1.5 rounded-md"
+                  className="w-full flex items-baseline gap-2 text-left hover:bg-accent transition-colors px-1.5 py-1.5 rounded-md"
                 >
-                  <span className="font-bold text-primary shrink-0">{cmd}</span>
+                  <span className="font-mono font-bold text-primary shrink-0">{cmd}</span>
                   <span className="text-muted-foreground truncate">{desc}</span>
                 </button>
               ))}
               <button
                 type="button"
                 onClick={() => { setInput('/help'); }}
-                className="text-muted-foreground/60 hover:text-muted-foreground transition-colors mt-1 text-[10px] uppercase tracking-widest"
+                className="text-muted-foreground/60 hover:text-muted-foreground transition-colors mt-1 px-1.5 font-mono text-[10px] uppercase tracking-widest"
               >
                 All commands: /help →
               </button>
@@ -628,35 +625,37 @@ export const ChatView: React.FC<ChatViewProps> = ({
         )}
         {researching[activeProjectId] && (
           <div className="flex justify-start">
-            <div className="w-full max-w-[95%] rounded-lg border-2 border-primary/40 bg-card text-card-foreground shadow-card overflow-hidden">
-              <div className="flex items-center gap-2 px-3 py-2 bg-primary/10 border-b border-primary/20">
-                <Loader2 size={13} className="animate-spin text-primary shrink-0" aria-hidden="true" />
-                <span className="text-[10px] text-primary font-bold font-mono uppercase tracking-widest flex-1">
-                  Researching — chat stays open
+            {/* The field log: night-ledger ink panel — the one dark surface in
+                the app, reserved for the agent working through the stacks. */}
+            <div className="w-full max-w-[95%] rounded-lg ink-panel shadow-card overflow-hidden animate-in fade-in motion-reduce:animate-none">
+              <div className="flex items-center gap-2 px-3.5 py-2 border-b border-white/10">
+                <Loader2 size={12} className="animate-spin motion-reduce:animate-none text-highlight shrink-0" aria-hidden="true" />
+                <span className="text-[10px] font-bold font-mono uppercase tracking-widest opacity-80 flex-1">
+                  Field log — chat stays open
                 </span>
-                <span className="text-[10px] font-mono text-muted-foreground">
+                <span className="text-[10px] font-mono opacity-50 tabular-nums">
                   {(researchLogs[activeProjectId] || []).length} steps
                 </span>
                 <button
                   type="button"
                   onClick={cancelTask}
-                  className="text-[10px] font-bold font-mono uppercase tracking-widest text-destructive border border-destructive/40 rounded px-1.5 py-0.5 hover:bg-destructive hover:text-destructive-foreground transition-colors"
+                  className="text-[10px] font-bold font-mono uppercase tracking-widest opacity-70 border border-current rounded-sm px-1.5 py-0.5 hover:opacity-100 hover:text-red-300 transition-opacity"
                   aria-label="Stop research"
                 >
                   Stop
                 </button>
               </div>
-              <div className="px-3 py-2 space-y-0.5" aria-live="polite">
+              <div className="px-3.5 py-2.5 space-y-1" aria-live="polite">
                 {(researchLogs[activeProjectId] || []).slice(-3).map((line, i, arr) => (
                   <div
                     key={`${line}-${i}`}
-                    className={`text-[10px] font-mono truncate ${i === arr.length - 1 ? 'text-foreground' : 'text-muted-foreground/70'}`}
+                    className={`text-[10px] font-mono truncate leading-relaxed ${i === arr.length - 1 ? 'text-highlight' : 'opacity-45'}`}
                   >
                     {line}
                   </div>
                 ))}
                 {(researchLogs[activeProjectId] || []).length === 0 && (
-                  <div className="text-[10px] font-mono text-muted-foreground">Warming up…</div>
+                  <div className="text-[10px] font-mono opacity-60">Warming up…</div>
                 )}
               </div>
             </div>

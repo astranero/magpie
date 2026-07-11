@@ -183,6 +183,15 @@
   .text-highlight {
     color: hsl(var(--highlight));
   }
+  .border-highlight {
+    border-color: hsl(var(--highlight));
+  }
+
+  /* Single fine catalog rule — the light sibling of .card-rule, for card
+     headers inside the panel (plan card, sources) rather than the app bar. */
+  .card-rule-thin {
+    border-bottom: 1.5px solid hsl(var(--rule) / 0.55);
+  }
 
   /* Typeset headings for chat reports: serif display, ink-colored, with the
      top-level heading carrying the catalog red rule underneath. */

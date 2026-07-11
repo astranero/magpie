@@ -204,7 +204,7 @@ export const LoreView: React.FC<LoreViewProps> = ({
             <MagpieEmptyIllustration size={84} className="text-muted-foreground" />
             {showLore ? (
               <div className="space-y-1.5">
-                <div className="text-sm font-medium text-foreground">Your Lore is empty</div>
+                <div className="font-display text-lg text-foreground">Your Lore is empty</div>
                 <p className="text-xs text-muted-foreground leading-relaxed max-w-[240px]">
                   Everything you capture — pages, PDFs, transcripts — lands here, ready to search and cite.
                   Start with <strong>Capture</strong>, or import files above.
@@ -212,7 +212,7 @@ export const LoreView: React.FC<LoreViewProps> = ({
               </div>
             ) : (
               <div className="space-y-1.5">
-                <div className="text-sm font-medium text-foreground">Nothing collected here yet</div>
+                <div className="font-display text-lg text-foreground">Nothing collected here yet</div>
                 <p className="text-xs text-muted-foreground leading-relaxed max-w-[240px]">
                   <strong>Capture</strong> the page you're reading, or pull existing cards in from
                   Global Lore — in chat, <code className="text-primary">/recall &lt;topic&gt;</code> does it for you.
@@ -251,18 +251,18 @@ export const LoreView: React.FC<LoreViewProps> = ({
                             />
                           )}
                           <button
-                            className="flex items-center gap-1.5 text-sm font-semibold hover:underline text-left min-w-0"
+                            className="flex items-center gap-1.5 hover:underline text-left min-w-0"
                             onClick={() => onDocumentClick(doc.id)}
                             title="Read Document"
                           >
                             <BookOpen className="w-3.5 h-3.5 text-primary shrink-0" />
-                            <span className="truncate">{doc.title}</span>
+                            <span className="truncate font-display text-[15px] leading-snug">{doc.title}</span>
                           </button>
                         </div>
                       </div>
-                      <div className="flex items-center gap-2 mt-1 text-[11px] text-muted-foreground">
-                        <span>{doc.wordCount.toLocaleString()} words</span>
-                        <span>·</span>
+                      <div className="flex items-center gap-2 mt-1 text-[10px] font-mono text-muted-foreground">
+                        <span className="tabular-nums">{doc.wordCount.toLocaleString()} words</span>
+                        <span aria-hidden="true">·</span>
                         <span>{timeAgo(doc.capturedAt)}</span>
                         {doc.syncedToDrive && (
                           <>

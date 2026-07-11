@@ -35,7 +35,7 @@ test('research command renders an in-chat plan card that can be cancelled', asyn
 
   // Command echoes as a user message + the plan card appears
   await expect(page.getByText('/research solid state batteries')).toBeVisible({ timeout: 8000 });
-  await expect(page.getByText('Research Plan', { exact: false })).toBeVisible({ timeout: 15000 });
+  await expect(page.getByText(/Research\s*·\s*Plan/i)).toBeVisible({ timeout: 15000 });
 
   // Preview (no LLM key in CI) falls back to draft with the raw topic
   const startBtn = page.getByRole('button', { name: /start research/i });
