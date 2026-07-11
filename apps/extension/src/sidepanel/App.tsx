@@ -3,6 +3,7 @@ import { get, set } from 'idb-keyval';
 import { Edit2, Sparkles, Trash2, FileText } from 'lucide-react';
 import { LocalDocument, Project, Chat, ChatMessage, ResolvedCitation, TabInfo, View } from './types';
 import { LoreView } from './components/LoreView';
+import { MagpieMark } from './components/BrandMark';
 
 // Brand import moved to top level, removing here due to TS import rule
 import { ChatView } from './components/ChatView';
@@ -1181,7 +1182,8 @@ export default function App() {
       {/* ── Functional Header (Topic) ── */}
       {view !== 'settings' && (
         <header className="card-rule flex items-center px-4 py-3 bg-card gap-3 shrink-0">
-          <span className="text-xs font-mono font-bold text-muted-foreground uppercase tracking-widest">Workspace</span>
+          <MagpieMark size={17} className="shrink-0 text-foreground" />
+          <span className="text-xs font-mono font-bold text-muted-foreground uppercase tracking-widest" title="Magpie — your research collector">Workspace</span>
           {editingProjectId ? (
             <input
               autoFocus

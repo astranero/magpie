@@ -58,6 +58,6 @@ test('command palette lists slash commands including /recall', async () => {
   const input = page.getByPlaceholder(/Ask a question/i);
   await input.fill('/re');
   // Palette (role=listbox) should surface /recall and /research
-  await expect(page.getByText('/recall')).toBeVisible({ timeout: 5000 });
+  await expect(page.getByRole('listbox', { name: /command suggestions/i }).getByText('/RECALL')).toBeVisible({ timeout: 5000 });
   await page.close();
 });

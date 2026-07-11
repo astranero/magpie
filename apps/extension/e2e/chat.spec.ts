@@ -52,10 +52,37 @@ test.beforeAll(async () => {
   let sw = context.serviceWorkers()[0];
   if (!sw) sw = await context.waitForEvent('serviceworker', { timeout: 15000 });
   extensionId = new URL(sw.url()).host;
-  await sw.evaluate(async (base) => {
-    await (globalThis as any).chrome.storage.local.set({ customUrl: base, customModel: 'mock-model', customKey: '' });
-  }, mock.url);
 });
+
+/**
+ * Point the extension at the mock LLM *after* the panel has settled: the app
+ * persists default provider settings during first-load init, which can race
+ * (and overwrite) config written in beforeAll. Set late, then verify.
+ */
+async function configureMockProvider(page: import('@playwright/test').Page) {
+  // The app's settings auto-save can overwrite injected config at
+  // unpredictable points during first-load init. Enforce until the value
+  // survives untouched for 800 ms.
+  const deadline = Date.now() + 8000;
+  let stableSince = 0;
+  while (Date.now() < deadline) {
+    const current = await page.evaluate(async () => {
+      const s = await (globalThis as any).chrome.storage.local.get(['customUrl']);
+      return s.customUrl as string | undefined;
+    });
+    if (current === mock.url) {
+      if (stableSince === 0) stableSince = Date.now();
+      if (Date.now() - stableSince >= 800) return;
+    } else {
+      stableSince = 0;
+      await page.evaluate(async (base) => {
+        await (globalThis as any).chrome.storage.local.set({ customUrl: base, customModel: 'mock-model', customKey: '' });
+      }, mock.url);
+    }
+    await page.waitForTimeout(200);
+  }
+  throw new Error('mock provider config never stabilized');
+}
 
 test.afterAll(async () => {
   await context?.close();
@@ -66,6 +93,7 @@ test('chat send streams a reply into the transcript', async () => {
   const page = await context.newPage();
   await page.goto(`chrome-extension://${extensionId}/sidepanel.html`);
   await page.getByRole('button', { name: /chat/i }).click();
+  await configureMockProvider(page);
 
   const input = page.getByPlaceholder(/Ask a question/i);
   await input.fill('What does photosynthesis do?');

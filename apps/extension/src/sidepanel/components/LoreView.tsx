@@ -2,6 +2,7 @@ import React, { useState, useRef, useEffect } from 'react';
 import { LocalDocument } from '../types';
 import { Download, ExternalLink, Trash2, Cloud, CloudDownload, Plus, Minus, Library, BookOpen, FileUp, FolderUp, FileText, Image, Search, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
+import { MagpieEmptyIllustration } from './BrandMark';
 
 interface LoreViewProps {
   documents: LocalDocument[];
@@ -206,16 +207,24 @@ export const LoreView: React.FC<LoreViewProps> = ({
       <div className="flex-1 overflow-y-auto no-scrollbar p-4">
         {docsToShow.length === 0 ? (
           <div className="flex flex-col items-center justify-center h-full text-center p-8 space-y-4">
-            {/* Empty state — lucide icon instead of emoji */}
-            <div className="w-16 h-16 rounded-lg bg-muted flex items-center justify-center text-muted-foreground">
-              <Library size={28} />
-            </div>
-            <div className="text-sm text-muted-foreground">
-              {showLore
-                ? 'No documents captured yet.'
-                : <span>No lore in this workspace.<br />Click <strong>Capture</strong> above or add from Lore.</span>
-              }
-            </div>
+            <MagpieEmptyIllustration size={84} className="text-muted-foreground" />
+            {showLore ? (
+              <div className="space-y-1.5">
+                <div className="text-sm font-medium text-foreground">Your Lore is empty</div>
+                <p className="text-xs text-muted-foreground leading-relaxed max-w-[240px]">
+                  Everything you capture — pages, PDFs, transcripts — lands here, ready to search and cite.
+                  Start with <strong>Capture</strong>, or import files above.
+                </p>
+              </div>
+            ) : (
+              <div className="space-y-1.5">
+                <div className="text-sm font-medium text-foreground">Nothing collected here yet</div>
+                <p className="text-xs text-muted-foreground leading-relaxed max-w-[240px]">
+                  <strong>Capture</strong> the page you're reading, or pull existing cards in from
+                  Global Lore — in chat, <code className="text-primary">/recall &lt;topic&gt;</code> does it for you.
+                </p>
+              </div>
+            )}
           </div>
         ) : (
           <div className="space-y-3">

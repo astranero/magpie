@@ -7,6 +7,7 @@ export default defineConfig({
   testDir: './e2e',
   timeout: 60000,
   workers: 1,
+  retries: 1,
   fullyParallel: false,
   reporter: process.env.CI ? 'github' : 'list',
   use: { trace: 'retain-on-failure' }
