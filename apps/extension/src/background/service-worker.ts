@@ -7,8 +7,6 @@
 import {
   saveDocument, listDocuments, updateDocumentSync,
   getUnsyncedDocuments, getChatHistory, clearChatHistory, saveChatMessage,
-  createProject, listProjects, getProject, updateProjectTitle, deleteProject,
-  createChat, listChats, updateChatTitle, deleteChat,
   linkDocumentToProject, updateDocumentContent,
   getChunkByAnchor
 } from '../lib/db';
@@ -23,6 +21,7 @@ import { pdfBase64ToBody, pdfUrlToBody, ensureOffscreen as ensureOffscreenDoc } 
 import { getProviderSettings, chatWithCustom, chatWithCustomStream, handleFetchCustomModels } from './llm-client';
 import { handleSearchLibrary, handleRecallDocs } from './library-handlers';
 import { handleLinkDocument, handleUnlinkDocument, handleListDocuments, handleGetDocument, handleDeleteDocument, handleGetDocumentCount, handleUpdateDocumentSelection } from './document-handlers';
+import { handleCreateProject, handleListProjects, handleGetProject, handleUpdateProject, handleDeleteProject, handleCreateChat, handleListChats, handleDeleteChat, handleUpdateChat } from './project-handlers';
 import {
   startJob as startResearchJob, getJob as getResearchJob,
   clearJob as clearResearchJob, appendJobLog, incrementResumeAttempts,
@@ -447,59 +446,6 @@ const messageHandlers: Record<string, MessageHandler> = {
 // ─────────────────────────────────────────────
 // Project and Chat Handlers
 // ─────────────────────────────────────────────
-async function handleCreateProject(request: Record<string, unknown>): Promise<Record<string, unknown>> {
-  const title = (request.title as string) || 'New Project';
-  const id = await createProject(title);
-  return { id };
-}
-
-async function handleListProjects(): Promise<Record<string, unknown>> {
-  const projects = await listProjects();
-  return { projects };
-}
-
-async function handleGetProject(request: Record<string, unknown>): Promise<Record<string, unknown>> {
-  const project = await getProject(request.id as string);
-  return { project: project || null };
-}
-
-async function handleUpdateProject(request: Record<string, unknown>): Promise<Record<string, unknown>> {
-  await updateProjectTitle(request.id as string, request.title as string);
-  return {};
-}
-
-async function handleDeleteProject(request: Record<string, unknown>): Promise<Record<string, unknown>> {
-  await deleteProject(request.id as string);
-  return {};
-}
-
-async function handleCreateChat(request: Record<string, unknown>): Promise<Record<string, unknown>> {
-  const projectId = request.projectId as string;
-  const title = (request.title as string) || 'New Chat';
-  if (!projectId) throw new Error('projectId is required to create a chat');
-  const id = await createChat(projectId, title);
-  return { id };
-}
-
-async function handleListChats(request: Record<string, unknown>): Promise<Record<string, unknown>> {
-  const projectId = request.projectId as string;
-  if (!projectId) throw new Error('projectId is required to list chats');
-  const chats = await listChats(projectId);
-  return { chats };
-}
-
-async function handleDeleteChat(request: Record<string, unknown>): Promise<Record<string, unknown>> {
-  await deleteChat(request.id as string);
-  return {};
-}
-
-async function handleUpdateChat(request: Record<string, unknown>): Promise<Record<string, unknown>> {
-  const { id, title } = request;
-  if (!id || !title) throw new Error('id and title are required to update chat');
-  await updateChatTitle(id as string, title as string);
-  return {};
-}
-
 // ─────────────────────────────────────────────
 // Document Handlers — Local-First
 // ─────────────────────────────────────────────
