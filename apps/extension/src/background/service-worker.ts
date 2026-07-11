@@ -5,12 +5,11 @@
 // source-grounded citation prompts, optional Drive sync.
 
 import {
-  saveDocument, listDocuments, getDocument, deleteDocument,
-  getDocumentCount, updateDocumentSync,
+  saveDocument, listDocuments, updateDocumentSync,
   getUnsyncedDocuments, getChatHistory, clearChatHistory, saveChatMessage,
   createProject, listProjects, getProject, updateProjectTitle, deleteProject,
-  createChat, listChats, updateChatTitle, deleteChat, updateDocumentSelection,
-  linkDocumentToProject, unlinkDocumentFromProject, updateDocumentContent,
+  createChat, listChats, updateChatTitle, deleteChat,
+  linkDocumentToProject, updateDocumentContent,
   getChunkByAnchor
 } from '../lib/db';
 import { chunkDocument, makeDocShortId } from '../lib/chunker';
@@ -18,11 +17,12 @@ import { buildCitationContext, CITATION_SYSTEM_PROMPT, parseResponseCitations } 
 import { buildFrontmatter, hasFrontmatter } from '../lib/frontmatter';
 import { get as idbGet } from 'idb-keyval';
 import { runDeepResearch } from './deep-researcher';
-import { addChunksToVectorStore, searchSessionChunks, resetSessionIndex, resetLibraryIndex, resetAllSessionIndexes } from '../lib/vector-store';
+import { addChunksToVectorStore, searchSessionChunks, resetSessionIndex, resetAllSessionIndexes } from '../lib/vector-store';
 import { replaceChunksForDoc } from '../lib/db';
 import { pdfBase64ToBody, pdfUrlToBody, ensureOffscreen as ensureOffscreenDoc } from '../lib/pdf-parser';
 import { getProviderSettings, chatWithCustom, chatWithCustomStream, handleFetchCustomModels } from './llm-client';
 import { handleSearchLibrary, handleRecallDocs } from './library-handlers';
+import { handleLinkDocument, handleUnlinkDocument, handleListDocuments, handleGetDocument, handleDeleteDocument, handleGetDocumentCount, handleUpdateDocumentSelection } from './document-handlers';
 import {
   startJob as startResearchJob, getJob as getResearchJob,
   clearJob as clearResearchJob, appendJobLog, incrementResumeAttempts,
@@ -985,34 +985,6 @@ async function handleImportLocalImages(request: Record<string, unknown>): Promis
   return { accepted: true, total: files.length };
 }
 
-async function handleLinkDocument(request: Record<string, unknown>): Promise<Record<string, unknown>> {
-  await linkDocumentToProject(request.projectId as string, request.docId as string);
-  return { success: true };
-}
-
-async function handleUnlinkDocument(request: Record<string, unknown>): Promise<Record<string, unknown>> {
-  await unlinkDocumentFromProject(request.projectId as string, request.docId as string);
-  return { success: true };
-}
-
-async function handleListDocuments(request: Record<string, unknown>): Promise<Record<string, unknown>> {
-  const documents = await listDocuments(request.projectId as string);
-  return { documents };
-}
-
-async function handleGetDocument(request: Record<string, unknown>): Promise<Record<string, unknown>> {
-  const doc = await getDocument(request.docId as string);
-  return { document: doc || null };
-}
-
-async function handleDeleteDocument(request: Record<string, unknown>): Promise<Record<string, unknown>> {
-  await deleteDocument(request.docId as string);
-  // Library-wide search index only auto-picks-up ADDED docs; deletions need
-  // an explicit reset or stale hits point at ghosts.
-  resetLibraryIndex();
-  return {};
-}
-
 
 // ── Re-index library: re-chunk with the current chunker + embed everything ──
 let reindexRunning = false;
@@ -1060,15 +1032,6 @@ async function handleReindexLibrary(): Promise<Record<string, unknown>> {
   return { success: true, started: true };
 }
 
-async function handleGetDocumentCount(): Promise<Record<string, unknown>> {
-  const count = await getDocumentCount();
-  return { count };
-}
-
-async function handleUpdateDocumentSelection(request: Record<string, unknown>): Promise<Record<string, unknown>> {
-  await updateDocumentSelection(request.docId as string, request.enabled as boolean);
-  return { success: true };
-}
 
 // ─────────────────────────────────────────────
 // Cancellation Handler
