@@ -16,6 +16,7 @@ import { buildFrontmatter, hasFrontmatter } from '../lib/frontmatter';
 import { get as idbGet } from 'idb-keyval';
 import { runDeepResearch, generateSubQuestions, scrapeUrl, isJunkUrl } from './deep-researcher';
 import { harvestReferences } from '../lib/reference-harvest';
+import { needsIntentResolution, formatHistoryForIntent, parseGitHubRepo, selectTreePaths, formatTreeBlock } from '../lib/query-intent';
 import { addChunksToVectorStore, searchSessionChunks, resetSessionIndex, resetAllSessionIndexes } from '../lib/vector-store';
 import { replaceChunksForDoc } from '../lib/db';
 import { pdfBase64ToBody, pdfUrlToBody, ensureOffscreen as ensureOffscreenDoc } from '../lib/pdf-parser';
@@ -1020,6 +1021,33 @@ async function handleCancelTask(request: Record<string, unknown>): Promise<Recor
 // Chat Handler — Source-Grounded with Citations
 // ─────────────────────────────────────────────
 
+/**
+ * Rewrite a context-dependent question ("how to use it?") into a standalone
+ * one using the recent conversation + the page being discussed. The rewrite
+ * drives RETRIEVAL ONLY — the model still receives the user's own words
+ * (with full history), so the reply stays anchored to what they typed.
+ */
+async function resolveQuestionIntent(
+  prompt: string,
+  formattedHistory: Array<{ role: string; content: string }>,
+  pageTitle: string | undefined,
+  signal: AbortSignal
+): Promise<string> {
+  if (!needsIntentResolution(prompt, formattedHistory.length)) return prompt;
+  try {
+    const sys = `Rewrite the user's latest message as ONE standalone, search-friendly question. Resolve pronouns and references ("it", "this page", "the skill") using the conversation${pageTitle ? ' and the page they are viewing' : ''}. Keep the user's intent exactly — do not answer, broaden, or narrow it. Return ONLY the rewritten question.`;
+    const user = `${pageTitle ? `Page being viewed: ${pageTitle}\n\n` : ''}Conversation:\n${formatHistoryForIntent(formattedHistory)}\n\nLatest message: ${prompt}`;
+    const rewritten = (await chatWithCustom(sys, [], user, signal)).trim().replace(/^["']|["']$/g, '').split('\n')[0].trim();
+    if (rewritten.length > 5 && rewritten.length < 300) {
+      console.log(`[INTENT] "${prompt.slice(0, 60)}" → "${rewritten.slice(0, 80)}"`);
+      return rewritten;
+    }
+  } catch (e) {
+    console.warn('[INTENT] rewrite failed — using raw question', e);
+  }
+  return prompt;
+}
+
 /** Build the RAG system prompt + formatted history for a chat turn. */
 async function buildChatRequest(chatId: string, projectId: string, prompt: string, signal: AbortSignal, pageContext?: PageContext | null): Promise<{ systemPrompt: string; formattedHistory: Array<{ role: string; content: string }>; linkedPages: Array<{ title: string; url: string }> }> {
   // Get all documents for this project
@@ -1030,19 +1058,30 @@ async function buildChatRequest(chatId: string, projectId: string, prompt: strin
 
   console.log(`[RAG] Project ${projectId}: ${enabledDocs.length} enabled docs, ${docIds.length} IDs`);
 
+  // History first: intent resolution needs it (retrieved BEFORE the new user
+  // message is saved, so it holds only prior turns).
+  const history = await getChatHistory(chatId);
+  const formattedHistory = history
+    .filter((msg: any) => msg.role === 'user' || msg.role === 'assistant')
+    .map((msg: any) => ({ role: msg.role, content: msg.text }));
+
+  // Follow-up questions get rewritten into standalone ones so retrieval,
+  // page-section selection, and link scoring all see real signal.
+  const effectiveQuery = await resolveQuestionIntent(prompt, formattedHistory, pageContext?.title, signal);
+
   // ── Multi-Query Adaptive RAG ──
-  // 1. Initial search with the user's exact query
+  // 1. Initial search with the (intent-resolved) query
   // 2. If results are sparse, expand the query using the LLM into 2-3 variants
   // 3. Search each variant and merge results
   let relevantChunks: any[] = [];
   if (docIds.length > 0) {
-    relevantChunks = await searchSessionChunks(projectId, prompt, 25, docIds);
-    console.log(`[RAG] Initial search for "${prompt.slice(0, 50)}..." returned ${relevantChunks.length} chunks`);
+    relevantChunks = await searchSessionChunks(projectId, effectiveQuery, 25, docIds);
+    console.log(`[RAG] Initial search for "${effectiveQuery.slice(0, 50)}..." returned ${relevantChunks.length} chunks`);
 
     // Adaptive multi-query: only expand when initial results are sparse
-    if (relevantChunks.length < 5 && prompt.length > 10) {
+    if (relevantChunks.length < 5 && effectiveQuery.length > 10) {
       try {
-        const expandedQueries = await expandQuery(prompt, signal);
+        const expandedQueries = await expandQuery(effectiveQuery, signal);
         if (expandedQueries.length > 0) {
           console.log(`[RAG] Expanding query into ${expandedQueries.length} variants:`, expandedQueries);
           const existingIds = new Set(relevantChunks.map(c => c.id));
@@ -1100,19 +1139,13 @@ async function buildChatRequest(chatId: string, projectId: string, prompt: strin
       `Then answer using your general knowledge. Do not fabricate citations.`;
   }
 
-  // Retrieve history BEFORE saving the new user message
-  const history = await getChatHistory(chatId);
-  const formattedHistory = history
-    .filter((msg: any) => msg.role === 'user' || msg.role === 'assistant')
-    .map((msg: any) => ({ role: msg.role, content: msg.text }));
-
   // Ephemeral page context: the tab the user is looking at right now.
   // Deliberately fenced off from library sources — it has no citation
   // anchors and is never persisted.
   const linkedPages: Array<{ title: string; url: string }> = [];
   if (pageContext) {
     // Long pages switch to per-question retrieval (see selectPageMarkdown)
-    const md = await selectPageMarkdown(pageContext, prompt);
+    const md = await selectPageMarkdown(pageContext, effectiveQuery);
     systemPrompt +=
       `\n\n--- CURRENT PAGE (the user is viewing this in their browser right now; it is NOT saved in their library) ---\n` +
       `Title: ${pageContext.title}\nURL: ${pageContext.url}\n\n${md}\n` +
@@ -1120,12 +1153,21 @@ async function buildChatRequest(chatId: string, projectId: string, prompt: strin
       `You may answer from the current page. Attribute such claims in plain text, e.g. "according to the page you're viewing". ` +
       `NEVER use [anchor] citations for current-page content — anchors are only for library sources.`;
 
+    // GitHub repo pages: the scrape only sees the README — inline the repo's
+    // file tree so "where is X?" questions have real structure to answer from.
+    try {
+      const treeBlock = await buildGitHubTreeBlock(pageContext.url, effectiveQuery);
+      if (treeBlock) systemPrompt += treeBlock;
+    } catch (e) {
+      console.warn('[GH-TREE] skipped:', e);
+    }
+
     // Second hop: the page's own links, scored against the question and
     // fetched ephemerally. Best-effort — a failure never blocks the turn.
     try {
-      const linked = await expandRelevantLinks(pageContext, prompt);
+      const linked = await expandRelevantLinks(pageContext, effectiveQuery);
       for (const l of linked) {
-        const lmd = (await selectPageMarkdown(l, prompt)).slice(0, LINKED_PAGE_BUDGET);
+        const lmd = (await selectPageMarkdown(l, effectiveQuery)).slice(0, LINKED_PAGE_BUDGET);
         systemPrompt +=
           `\n\n--- LINKED PAGE (followed from the current page because it looked relevant to the question; NOT saved) ---\n` +
           `Title: ${l.title}\nURL: ${l.url}\n\n${lmd}\n` +
@@ -1156,6 +1198,52 @@ function linkedPagesFooter(pages: Array<{ title: string; url: string }>): string
     .map(p => `[${(p.title || p.url).replace(/[\[\]]/g, '')}](${p.url.replace(/\(/g, '%28').replace(/\)/g, '%29')})`)
     .join(' · ');
   return `\n\n---\n🔗 *Also read for this answer:* ${items}`;
+}
+
+// ─────────────────────────────────────────────
+// GitHub file-tree context — repo structure for "where is X?" questions
+// ─────────────────────────────────────────────
+// A GitHub repo page scrape captures the README, not the tree. When the
+// discussed page is a repo, pull its file listing from the public GitHub
+// API (keyless: 60 req/h — fine behind a 10-min per-repo cache) and inline
+// it ephemerally next to the page context.
+
+const githubTreeCache = new Map<string, { paths: string[]; ts: number }>();
+const GH_TREE_TTL_MS = 10 * 60 * 1000;
+const GH_TREE_MAX_ENTRIES = 8_000; // give up on monorepos — a truncated random slice misleads
+
+async function buildGitHubTreeBlock(pageUrl: string, question: string): Promise<string | null> {
+  const ref = parseGitHubRepo(pageUrl);
+  if (!ref) return null;
+
+  const cacheKey = `${ref.owner}/${ref.repo}@${ref.branch ?? ''}`;
+  let entry = githubTreeCache.get(cacheKey);
+  if (!entry || Date.now() - entry.ts > GH_TREE_TTL_MS) {
+    let branch = ref.branch;
+    if (!branch) {
+      const repoRes = await fetch(`https://api.github.com/repos/${ref.owner}/${ref.repo}`, {
+        headers: { 'Accept': 'application/vnd.github+json' }
+      });
+      if (!repoRes.ok) return null; // private / renamed / rate-limited — skip silently
+      branch = (await repoRes.json()).default_branch as string;
+    }
+    const treeRes = await fetch(
+      `https://api.github.com/repos/${ref.owner}/${ref.repo}/git/trees/${encodeURIComponent(branch!)}?recursive=1`,
+      { headers: { 'Accept': 'application/vnd.github+json' } }
+    );
+    if (!treeRes.ok) return null;
+    const tree = await treeRes.json();
+    const paths: string[] = (tree.tree || [])
+      .map((t: any) => t.type === 'tree' ? `${t.path}/` : t.path)
+      .filter(Boolean);
+    if (paths.length === 0 || paths.length > GH_TREE_MAX_ENTRIES) return null;
+    entry = { paths, ts: Date.now() };
+    githubTreeCache.set(cacheKey, entry);
+  }
+
+  const { selected, truncated } = selectTreePaths(entry.paths, question);
+  console.log(`[GH-TREE] ${cacheKey}: ${entry.paths.length} paths, inlined ${selected.length}${truncated ? ' (truncated)' : ''}`);
+  return formatTreeBlock(ref, selected, truncated);
 }
 
 // ─────────────────────────────────────────────

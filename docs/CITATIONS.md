@@ -46,6 +46,16 @@ now guarded by E2E). Locating the cited chunk in the document:
 Text-matching (not stored offsets) because content-cleaner normalization
 means chunk text can drift from stored content; it also survives re-chunking.
 
+## Question intent resolution
+
+Follow-up questions ("how to use it?", "I mean the skill Pro Max") carry no
+retrieval signal. `resolveQuestionIntent` (service worker) rewrites them into
+standalone questions with one small LLM call — gated by pure heuristics in
+`lib/query-intent.ts` (pronouns/deictics, continuation openers, ≤3 words;
+never on a chat's first message or slash commands). The rewrite drives
+retrieval, page-section selection, and link scoring ONLY — the model still
+receives the user's own words with full history.
+
 ## Retrieval gates that protect citation quality
 
 Rerank (ms-marco cross-encoder logits): absolute gate at −4 (junk floor −8,
