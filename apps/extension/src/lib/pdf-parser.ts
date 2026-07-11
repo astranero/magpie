@@ -61,7 +61,9 @@ export async function pdfBase64ToBody(
   }
   let res: any;
   try {
-    res = await sendToOffscreen({ action: 'OFFSCREEN_PARSE_PDF', base64 });
+    // Large scanned PDFs can take minutes to parse+render — long deadline,
+    // but finite (a wedged offscreen doc must not hang the import forever).
+    res = await sendToOffscreen({ action: 'OFFSCREEN_PARSE_PDF', base64 }, 8 * 60 * 1000);
   } catch (e: any) {
     throw new Error(`PDF transfer failed (likely too large, ~${Math.round(base64.length / 1.33 / 1024 / 1024)} MB): ${e.message}`);
   }
@@ -78,7 +80,9 @@ export async function pdfUrlToBody(
   url: string,
   ocrFn?: (dataUrl: string, instruction: string) => Promise<string>
 ): Promise<string> {
-  const res: any = await sendToOffscreen({ action: 'OFFSCREEN_PARSE_PDF_URL', url });
+  // Offscreen fetch is itself capped at 5 min (size-scaled) + parse time —
+  // give the round-trip 8 min before declaring the offscreen doc wedged.
+  const res: any = await sendToOffscreen({ action: 'OFFSCREEN_PARSE_PDF_URL', url }, 8 * 60 * 1000);
   if (!res?.ok) throw new Error(res?.error || 'PDF parse failed');
   return assemblePdfBody(res, ocrFn);
 }

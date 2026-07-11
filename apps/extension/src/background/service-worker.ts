@@ -1006,14 +1006,22 @@ async function handleReindexLibrary(): Promise<Record<string, unknown>> {
 async function handleCancelTask(request: Record<string, unknown>): Promise<Record<string, unknown>> {
   const chatId = request.chatId as string | undefined;
   const projectId = request.projectId as string | undefined;
-  
+
   if (chatId && abortControllers.has(chatId)) {
     abortControllers.get(chatId)?.abort();
     abortControllers.delete(chatId);
   }
-  if (projectId && abortControllers.has(projectId)) {
+  if (projectId) {
     abortControllers.get(projectId)?.abort();
     abortControllers.delete(projectId);
+    // Stop is a FORCE-clear, not just an abort: a run wedged in a
+    // non-abortable await (hung offscreen call, stalled stream) never
+    // reaches its cleanup `finally`, leaving the active job record
+    // blocking every future run. Clear it here unconditionally — if the
+    // zombie promise ever settles, its own cleanup is a no-op.
+    await markJobFinished().catch(() => {});
+    await clearResearchJob().catch(() => {});
+    chrome.runtime.sendMessage({ action: 'DEEP_RESEARCH_DONE', projectId }).catch(() => {});
   }
   return {};
 }
@@ -1775,10 +1783,21 @@ async function handleDeepResearch(request: Record<string, unknown>): Promise<Rec
 
   // One research run at a time: the job checkpoint is a singleton, and a
   // second run would stomp the first one's resume state. Chat stays usable
-  // during a run — this only guards research-on-research.
-  const runningJob = await getResearchJob().catch(() => null);
-  if ((runningJob as any)?.active || abortControllers.has(projectId as string)) {
-    throw new Error('A research run is already active. Wait for it to finish or press Stop first.');
+  // during a run — this only guards research-on-research. Crucially, the
+  // guard has an escape hatch: an `active` record whose heartbeat went
+  // stale is a DEAD run (worker killed, or wedged past its heartbeat), and
+  // must be reclaimed here or no research can ever start again.
+  if (abortControllers.has(projectId as string)) {
+    throw new Error('A research run is already active. Press Stop first, or wait for it to finish.');
+  }
+  const runningJob = await getResearchJob().catch(() => null) as any;
+  if (runningJob?.active) {
+    const fresh = runningJob.lastHeartbeatAt && (Date.now() - runningJob.lastHeartbeatAt) < HEARTBEAT_STALE_MS;
+    if (fresh) {
+      throw new Error('A research run is already active. Press Stop first, or wait for it to finish.');
+    }
+    console.warn('[RESEARCH] Reclaiming stale active job (heartbeat dead) before new start');
+    await clearResearchJob().catch(() => {});
   }
 
   const chatFn = (s: string, u: string) => chatWithCustom(s, [], u);
