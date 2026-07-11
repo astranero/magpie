@@ -7,7 +7,8 @@
     "dev": "vite",
     "build": "tsc && vite build && CONTENT_ENTRY=content vite build -c vite.content.config.ts && CONTENT_ENTRY=inject vite build -c vite.content.config.ts",
     "preview": "vite preview",
-    "test": "vitest run"
+    "test": "vitest run",
+    "test:e2e": "playwright test"
   },
   "dependencies": {
     "@base-ui/react": "^1.6.0",
@@ -36,6 +37,7 @@
     "xstate": "^5.32.4"
   },
   "devDependencies": {
+    "@playwright/test": "^1.61.1",
     "@types/chrome": "^0.0.268",
     "@types/mozilla-readability": "^0.2.1",
     "@types/react": "^18.3.3",
