@@ -13,6 +13,34 @@ interface DocumentViewProps {
   highlightAnchorId?: string | null;
   onBack: () => void;
   timeAgo: (iso: string) => string;
+  /** Open an external http(s) link as an in-panel preview instead of a tab. */
+  onOpenExternalLink?: (url: string) => void;
+}
+
+/** Shared markdown link renderer: in-panel preview by default, real tab on
+ *  Cmd/Ctrl-click. Falls back to target=_blank when no handler is wired. */
+function makeMdComponents(onOpenExternalLink?: (url: string) => void) {
+  return {
+    a: ({ href, children, ...props }: any) => {
+      if (href && /^https?:\/\//i.test(href) && onOpenExternalLink) {
+        return (
+          <a
+            href={href}
+            onClick={(e: React.MouseEvent) => {
+              if (e.metaKey || e.ctrlKey) return;
+              e.preventDefault();
+              onOpenExternalLink(href);
+            }}
+            title={`${href}\n\nClick: preview in panel · Cmd/Ctrl-click: open in browser`}
+            {...props}
+          >
+            {children}
+          </a>
+        );
+      }
+      return <a href={href} target="_blank" rel="noreferrer" {...props}>{children}</a>;
+    }
+  };
 }
 
 function safeHostname(url: string): string | null {
@@ -40,7 +68,9 @@ export const DocumentView: React.FC<DocumentViewProps> = ({
   highlightAnchorId,
   onBack,
   timeAgo,
+  onOpenExternalLink,
 }) => {
+  const mdComponents = makeMdComponents(onOpenExternalLink);
   const [highlight, setHighlight] = useState<ChunkHighlight | null>(null);
   const [citeCopied, setCiteCopied] = useState(false);
   const highlightRef = useRef<HTMLDivElement>(null);
@@ -216,6 +246,7 @@ export const DocumentView: React.FC<DocumentViewProps> = ({
            remarkPlugins={[remarkGfm, remarkMath]}
            rehypePlugins={[[rehypeKatex, { strict: false }]]}
            urlTransform={(url) => url.startsWith('data:image/') ? url : defaultUrlTransform(url)}
+           components={mdComponents}
          >
            {contentToRender}
          </ReactMarkdown>
@@ -242,6 +273,7 @@ export const DocumentView: React.FC<DocumentViewProps> = ({
               remarkPlugins={[remarkGfm, remarkMath]}
               rehypePlugins={[[rehypeKatex, { strict: false }]]}
               urlTransform={(url) => url.startsWith('data:image/') ? url : defaultUrlTransform(url)}
+              components={mdComponents}
             >
               {highlight.text}
             </ReactMarkdown>
@@ -250,6 +282,7 @@ export const DocumentView: React.FC<DocumentViewProps> = ({
             remarkPlugins={[remarkGfm, remarkMath]}
             rehypePlugins={[[rehypeKatex, { strict: false }]]}
             urlTransform={(url) => url.startsWith('data:image/') ? url : defaultUrlTransform(url)}
+            components={mdComponents}
           >
             {fullText}
           </ReactMarkdown>
@@ -272,6 +305,7 @@ export const DocumentView: React.FC<DocumentViewProps> = ({
             remarkPlugins={[remarkGfm, remarkMath]}
             rehypePlugins={[[rehypeKatex, { strict: false }]]}
             urlTransform={(url) => url.startsWith('data:image/') ? url : defaultUrlTransform(url)}
+            components={mdComponents}
           >
             {before}
           </ReactMarkdown>
@@ -287,6 +321,7 @@ export const DocumentView: React.FC<DocumentViewProps> = ({
             remarkPlugins={[remarkGfm, remarkMath]}
             rehypePlugins={[[rehypeKatex, { strict: false }]]}
             urlTransform={(url) => url.startsWith('data:image/') ? url : defaultUrlTransform(url)}
+            components={mdComponents}
           >
             {highlighted}
           </ReactMarkdown>
@@ -296,6 +331,7 @@ export const DocumentView: React.FC<DocumentViewProps> = ({
             remarkPlugins={[remarkGfm, remarkMath]}
             rehypePlugins={[[rehypeKatex, { strict: false }]]}
             urlTransform={(url) => url.startsWith('data:image/') ? url : defaultUrlTransform(url)}
+            components={mdComponents}
           >
             {after}
           </ReactMarkdown>

@@ -43,6 +43,9 @@ export const SLASH_COMMANDS: SlashCommand[] = [
     cmd: '/recall', desc: 'Pull relevant docs from Global Lore into this workspace', takesArg: true, kind: 'builtin'
   },
   {
+    cmd: '/follow', desc: 'Preview a link inside the panel — capture it if it\'s a keeper', takesArg: true, kind: 'builtin'
+  },
+  {
     cmd: '/compare', desc: 'Compare A vs B from sources', takesArg: true, kind: 'prompt',
     label: '⚖️ Comparison',
     systemPrompt: 'Compare and contrast the concepts the user names, using ONLY the provided sources. Structure with: ## Similarities, ## Differences (as a markdown table where sensible), ## Trade-offs, ## Verdict. Cite sources for every claim; note when the sources cover one side better than the other.'

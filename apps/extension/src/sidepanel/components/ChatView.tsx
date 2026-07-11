@@ -41,6 +41,9 @@ interface ChatViewProps {
   /** Research plan card actions. */
   onStartPlan?: (msgId: string, plan: ResearchPlan) => void;
   onCancelPlan?: (msgId: string) => void;
+
+  /** Open an external http(s) link as an in-panel preview. */
+  onOpenExternalLink?: (url: string) => void;
 }
 
 // ─────────────────────────────────────────────
@@ -215,6 +218,7 @@ interface MessageBodyProps {
   streaming?: boolean;
   resolveCitations: (text: string) => Promise<ResolvedCitation[]>;
   onOpenDocument?: (docId: string, anchorId?: string) => void;
+  onOpenExternalLink?: (url: string) => void;
 }
 
 // A single anchor, no surrounding brackets (used to normalize grouped citations)
@@ -258,7 +262,7 @@ function normalizeLatexDelimiters(text: string): string {
   return parts.join('');
 }
 
-const MessageBody: React.FC<MessageBodyProps> = React.memo(({ text: rawText, compact, streaming, resolveCitations, onOpenDocument }) => {
+const MessageBody: React.FC<MessageBodyProps> = React.memo(({ text: rawText, compact, streaming, resolveCitations, onOpenDocument, onOpenExternalLink }) => {
   const [citations, setCitations] = useState<Map<string, ResolvedCitation>>(new Map());
 
   // F2: while streaming, render as plain text — no regex passes, no markdown parse.
@@ -333,6 +337,24 @@ const MessageBody: React.FC<MessageBodyProps> = React.memo(({ text: rawText, com
                   >
                     {children}
                   </button>
+                );
+              }
+              // External links open INSIDE the panel (preview + capture);
+              // Cmd/Ctrl-click keeps the browser-tab escape hatch.
+              if (href && /^https?:\/\//i.test(href) && onOpenExternalLink) {
+                return (
+                  <a
+                    href={href}
+                    onClick={(e) => {
+                      if (e.metaKey || e.ctrlKey) return;
+                      e.preventDefault();
+                      onOpenExternalLink(href);
+                    }}
+                    title={`${href}\n\nClick: preview in panel · Cmd/Ctrl-click: open in browser`}
+                    {...props}
+                  >
+                    {children}
+                  </a>
                 );
               }
               return <a href={href} target="_blank" rel="noreferrer" {...props}>{children}</a>;
@@ -426,7 +448,8 @@ export const ChatView: React.FC<ChatViewProps> = ({
   customCommands = [],
   isActive = false,
   onStartPlan,
-  onCancelPlan
+  onCancelPlan,
+  onOpenExternalLink
 }) => {
   const msgEnd = useRef<HTMLDivElement>(null);
   const scrollBox = useRef<HTMLDivElement>(null);
@@ -599,7 +622,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
             >
               {m.role === 'assistant' || m.role === 'system' ? (
                 <CollapsibleMessage text={m.text} streaming={m.streaming}>
-                  <MessageBody text={m.text} compact={m.role === 'system'} streaming={m.streaming} resolveCitations={resolveCitations} onOpenDocument={onOpenDocument} />
+                  <MessageBody text={m.text} compact={m.role === 'system'} streaming={m.streaming} resolveCitations={resolveCitations} onOpenDocument={onOpenDocument} onOpenExternalLink={onOpenExternalLink} />
                 </CollapsibleMessage>
               ) : (
                 <CollapsibleMessage text={m.text}>

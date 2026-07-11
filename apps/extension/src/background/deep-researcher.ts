@@ -283,7 +283,7 @@ async function searchGoogleNewsRss(query: string, signal?: AbortSignal): Promise
  * and extracts text from PDFs, returns clean markdown.
  * Fallback: local fetch + offscreen Readability parse.
  */
-async function scrapeUrl(url: string, signal?: AbortSignal): Promise<ParsedPage | null> {
+export async function scrapeUrl(url: string, signal?: AbortSignal): Promise<ParsedPage | null> {
   let parsed: ParsedPage | null = null;
 
   // 1) Jina Reader

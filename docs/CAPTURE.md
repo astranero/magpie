@@ -13,6 +13,7 @@ chunk → embed → save. Nothing enters the library implicitly.
 | **Local `.md` files/folder** | File System Access picker; relative images inlined as data URLs (`lib/import-helpers.ts`); existing frontmatter preserved |
 | **Local PDF/images** | Base64 path (guarded: >48 MB errors with size instead of OOM), async with BroadcastChannel progress; images described by the vision model |
 | **Right-click** | "Capture page to Library" / capture selection |
+| **Link follow** | Clicking any external link in chat or a document (or `/follow <url>`) fetches it through the research scrape pipeline and previews it **inside the panel** — nothing stored until the user hits Capture (tag `link-follow`). Cmd/Ctrl-click keeps the browser-tab escape hatch; links inside a preview chain into further previews |
 | **Research** | Every gathered source is saved as a first-class document and linked to the workspace (keeps citation anchors permanently resolvable); the run also saves the synthesis report and a consolidated `research-sources` list (see RESEARCH-PIPELINE.md) |
 
 Capture destination: Global Lore always; linked to the active workspace when

@@ -3,6 +3,7 @@ import { get, set } from 'idb-keyval';
 import { Edit2, Trash2, FileText, Library, MessageSquare, SlidersHorizontal } from 'lucide-react';
 import { LocalDocument, Project, Chat, ChatMessage, ResearchPlan, ResolvedCitation, TabInfo, View } from './types';
 import { LoreView } from './components/LoreView';
+import { LinkPreview, LinkPreviewState } from './components/LinkPreview';
 import { MagpieMark } from './components/BrandMark';
 
 // Brand import moved to top level, removing here due to TS import rule
@@ -195,6 +196,37 @@ export default function App() {
       });
     }
   }, []);
+
+  // ── Link preview: follow links without leaving the panel ──
+  const [linkPreview, setLinkPreview] = useState<LinkPreviewState | null>(null);
+
+  const openLinkPreview = useCallback(async (url: string) => {
+    setLinkPreview({ url, loading: true });
+    const res = await msg('FETCH_URL_PREVIEW', { url });
+    setLinkPreview(prev => {
+      // A newer preview request replaced this one — don't clobber it
+      if (!prev || prev.url !== url) return prev;
+      return res.success !== false && res.markdown
+        ? { url, title: res.title as string, markdown: res.markdown as string, loading: false }
+        : { url, loading: false, error: (res.error as string) || 'Fetch failed' };
+    });
+  }, []);
+
+  const captureLinkPreview = useCallback(async () => {
+    if (!linkPreview?.url || linkPreview.capturing) return;
+    setLinkPreview(prev => prev ? { ...prev, capturing: true } : prev);
+    const res = await msg('CAPTURE_URL', { url: linkPreview.url, projectId: activeProjectId });
+    if (res.success !== false && res.docId) {
+      setLinkPreview(prev => prev ? { ...prev, capturing: false, captured: true } : prev);
+      showToast('success', res.isDuplicate
+        ? 'Already in your library — linked to this workspace'
+        : `✓ Captured: "${String(res.title || '').slice(0, 40)}"`);
+      if (activeProjectId) loadDocuments(activeProjectId);
+    } else {
+      setLinkPreview(prev => prev ? { ...prev, capturing: false } : prev);
+      showToast('error', (res.error as string) || 'Capture failed');
+    }
+  }, [linkPreview, activeProjectId]);
 
   // Update one message in a chat in place (used by the in-chat plan card)
   const updateMessage = useCallback((chatId: string, msgId: string, updater: (m: ChatMessage) => ChatMessage) => {
@@ -1075,6 +1107,16 @@ export default function App() {
       return;
     }
 
+    // /follow <url> — preview a link inside the panel (capture optional)
+    if (text.toLowerCase().startsWith('/follow ')) {
+      let url = text.slice('/follow '.length).trim();
+      if (!url) { showToast('error', 'Please provide a URL after /follow'); return; }
+      if (!/^https?:\/\//i.test(url)) url = `https://${url}`;
+      setInput('');
+      openLinkPreview(url);
+      return;
+    }
+
     if (text.toLowerCase().startsWith('/page ')) {
       messageText = text.slice('/page '.length).trim();
       if (!messageText) {
@@ -1538,6 +1580,7 @@ export default function App() {
                 setView(docReturnViewRef.current);
               }}
               timeAgo={timeAgo}
+              onOpenExternalLink={openLinkPreview}
             />
           )}
 
@@ -1566,6 +1609,7 @@ export default function App() {
               customCommands={customCommands}
               onStartPlan={(msgId, plan) => executeDeepResearch(msgId, plan)}
               onCancelPlan={cancelResearchPlan}
+              onOpenExternalLink={openLinkPreview}
 
               onOpenDocument={async (docId, anchorId) => {
                 // If doc is not in current lists, fetch it to globalDocuments so DocumentView can display it
@@ -1632,6 +1676,16 @@ export default function App() {
           )}
         </div>
       </main>
+
+      {/* ── Link preview overlay — follow links without leaving the panel ── */}
+      {linkPreview && (
+        <LinkPreview
+          preview={linkPreview}
+          onClose={() => setLinkPreview(null)}
+          onCapture={captureLinkPreview}
+          onFollow={openLinkPreview}
+        />
+      )}
 
       {/* ── Bottom Navigation Bar ── */}
       <nav className="flex items-center justify-between px-3 py-2.5 bg-card border-t border-border shrink-0">

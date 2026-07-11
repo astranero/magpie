@@ -14,7 +14,7 @@ import { chunkDocument, makeDocShortId } from '../lib/chunker';
 import { buildCitationContext, CITATION_SYSTEM_PROMPT, parseResponseCitations } from '../lib/citations';
 import { buildFrontmatter, hasFrontmatter } from '../lib/frontmatter';
 import { get as idbGet } from 'idb-keyval';
-import { runDeepResearch, generateSubQuestions } from './deep-researcher';
+import { runDeepResearch, generateSubQuestions, scrapeUrl } from './deep-researcher';
 import { addChunksToVectorStore, searchSessionChunks, resetSessionIndex, resetAllSessionIndexes } from '../lib/vector-store';
 import { replaceChunksForDoc } from '../lib/db';
 import { pdfBase64ToBody, pdfUrlToBody, ensureOffscreen as ensureOffscreenDoc } from '../lib/pdf-parser';
@@ -335,6 +335,10 @@ const messageHandlers: Record<string, MessageHandler> = {
   PREVIEW_DEEP_RESEARCH: handlePreviewDeepResearch,
   REFINE_RESEARCH_PLAN: handleRefineResearchPlan,
   CREATE_SKILL: handleCreateSkill,
+
+  // ── Link following (in-panel preview + capture) ──
+  FETCH_URL_PREVIEW: handleFetchUrlPreview,
+  CAPTURE_URL: handleCaptureUrl,
   GET_RESEARCH_STATUS: async () => {
     const job = await getResearchJob().catch(() => null);
     const running = job ? abortControllers.has(job.projectId) : false;
@@ -395,6 +399,74 @@ const messageHandlers: Record<string, MessageHandler> = {
 // ─────────────────────────────────────────────
 // Document Handlers — Local-First
 // ─────────────────────────────────────────────
+// ─────────────────────────────────────────────
+// Link following — preview any URL inside the panel, capture if it's a keeper
+// ─────────────────────────────────────────────
+// Reading a captured page surfaces links worth chasing. Instead of bouncing
+// the user out to a browser tab, fetch the target through the same pipeline
+// research uses (Jina → local parse → quality-aware, PDFs via pdf.js) and
+// show it in the side panel. Nothing is stored until the user hits Capture.
+
+interface FetchedLinkPage { title: string; url: string; markdown: string; wordCount: number; isPdf: boolean }
+
+async function fetchLinkPage(rawUrl: string): Promise<FetchedLinkPage> {
+  const url = (rawUrl || '').trim();
+  if (!/^https?:\/\//i.test(url)) throw new Error('Only http/https links can be previewed.');
+
+  if (/\.pdf($|\?)/i.test(url) || await urlIsPdf(url).catch(() => false)) {
+    const markdown = await pdfUrlToBody(url);
+    const title = decodeURIComponent(url.split('/').pop() || url).replace(/\.pdf.*$/i, '') || url;
+    return { title, url, markdown, wordCount: markdown.split(/\s+/).filter(Boolean).length, isPdf: true };
+  }
+
+  const scraped = await scrapeUrl(url);
+  if (!scraped?.markdown) throw new Error('Could not extract readable content from that link (blocked or empty page).');
+  return { title: scraped.title || url, url, markdown: scraped.markdown, wordCount: scraped.wordCount, isPdf: false };
+}
+
+async function handleFetchUrlPreview(request: Record<string, unknown>): Promise<Record<string, unknown>> {
+  const page = await fetchLinkPage(request.url as string);
+  return { title: page.title, url: page.url, markdown: page.markdown, wordCount: page.wordCount };
+}
+
+async function handleCaptureUrl(request: Record<string, unknown>): Promise<Record<string, unknown>> {
+  const page = await fetchLinkPage(request.url as string);
+  const linkTarget = await resolveLinkTarget((request.projectId as string) || null);
+
+  const now = new Date().toISOString();
+  const fullMarkdown = buildFrontmatter({
+    title: page.title,
+    type: page.isPdf ? 'pdf' : 'web-capture',
+    source: page.url,
+    captured: now,
+    wordCount: page.wordCount,
+    tags: ['link-follow']
+  }) + page.markdown;
+
+  const docShortId = makeDocShortId(crypto.randomUUID?.() ?? `${Date.now()}`);
+  const chunks = chunkDocument({ docShortId, content: fullMarkdown });
+
+  const { id: docId, chunks: savedChunks, isDuplicate } = await saveDocument({
+    title: page.title,
+    url: page.url,
+    content: fullMarkdown,
+    capturedAt: now,
+    favicon: '',
+    wordCount: page.wordCount,
+    syncedToDrive: false
+  }, chunks);
+
+  if (!isDuplicate && linkTarget) {
+    await linkDocumentToProject(linkTarget, docId);
+    await addChunksToVectorStore(linkTarget, savedChunks);
+  } else if (isDuplicate && linkTarget) {
+    // Already in the library from an earlier capture/run — just link it here
+    await linkDocumentToProject(linkTarget, docId);
+  }
+
+  return { docId, title: page.title, chunkCount: chunks.length, linkedTo: linkTarget, isDuplicate: !!isDuplicate };
+}
+
 async function handleCapture(request: Record<string, unknown>): Promise<Record<string, unknown>> {
   // projectId is optional: captures always land in the global library and are
   // additionally linked per resolveLinkTarget (explicit id / auto-link setting).
