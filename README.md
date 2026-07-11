@@ -62,7 +62,7 @@ so Obsidian and other tools can index it.
 | `/challenge` · `/connect` · `/extract` · `/brief` | Reasoning modes over your sources |
 | `/page <q>` | Ask about the page you're viewing (nothing saved). Relevant links **on** that page are auto-fetched one hop deep and included ephemerally too |
 | `/recall <topic>` | Pull relevant docs from your Global Lore into the active workspace |
-| `/follow <url>` | Preview any link **inside the panel**, then capture it if it's a keeper. Clicking links in chat or documents does the same (Cmd/Ctrl-click for a browser tab) |
+| `/follow <url>` | Preview a link **inside the panel**, then capture it if it's a keeper. Clicking a link in chat or documents forwards your **current tab** there instead (Cmd/Ctrl-click for a new tab) |
 | `/clear` · `/help` | Clear chat · full list |
 
 Define your own commands in Config → Custom Commands (trigger + prompt — they

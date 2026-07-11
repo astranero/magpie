@@ -212,6 +212,22 @@ export default function App() {
     });
   }, []);
 
+  // Clicking a link in chat/documents forwards the CURRENT tab there — the
+  // page opens beside the panel, ready for the page-context toggle. The
+  // in-panel preview stays available via /follow (and link-chaining inside
+  // a preview); Cmd/Ctrl-click opens a fresh browser tab.
+  const openLinkInTab = useCallback((url: string) => {
+    if (typeof chrome !== 'undefined' && chrome.tabs?.query) {
+      chrome.tabs.query({ active: true, lastFocusedWindow: true }, (tabs) => {
+        const t = tabs?.[0];
+        if (t?.id != null) chrome.tabs.update(t.id, { url });
+        else window.open(url, '_blank');
+      });
+    } else {
+      window.open(url, '_blank');
+    }
+  }, []);
+
   const captureLinkPreview = useCallback(async () => {
     if (!linkPreview?.url || linkPreview.capturing) return;
     setLinkPreview(prev => prev ? { ...prev, capturing: true } : prev);
@@ -1580,7 +1596,7 @@ export default function App() {
                 setView(docReturnViewRef.current);
               }}
               timeAgo={timeAgo}
-              onOpenExternalLink={openLinkPreview}
+              onOpenExternalLink={openLinkInTab}
             />
           )}
 
@@ -1609,7 +1625,7 @@ export default function App() {
               customCommands={customCommands}
               onStartPlan={(msgId, plan) => executeDeepResearch(msgId, plan)}
               onCancelPlan={cancelResearchPlan}
-              onOpenExternalLink={openLinkPreview}
+              onOpenExternalLink={openLinkInTab}
 
               onOpenDocument={async (docId, anchorId) => {
                 // If doc is not in current lists, fetch it to globalDocuments so DocumentView can display it

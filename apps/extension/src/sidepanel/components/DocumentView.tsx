@@ -31,7 +31,7 @@ function makeMdComponents(onOpenExternalLink?: (url: string) => void) {
               e.preventDefault();
               onOpenExternalLink(href);
             }}
-            title={`${href}\n\nClick: preview in panel · Cmd/Ctrl-click: open in browser`}
+            title={`${href}\n\nClick: open in current tab · Cmd/Ctrl-click: new tab · /follow for in-panel preview`}
             {...props}
           >
             {children}
