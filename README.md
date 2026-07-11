@@ -60,7 +60,7 @@ so Obsidian and other tools can index it.
 | `/create-skill [focus]` | Distill this workspace's research into a reusable custom command (+ a browsable skill file in Lore) |
 | `/compare A vs B` · `/timeline <topic>` | Structured views over your sources |
 | `/challenge` · `/connect` · `/extract` · `/brief` | Reasoning modes over your sources |
-| `/page <q>` | Ask about the page you're viewing (nothing saved) |
+| `/page <q>` | Ask about the page you're viewing (nothing saved). Relevant links **on** that page are auto-fetched one hop deep and included ephemerally too |
 | `/recall <topic>` | Pull relevant docs from your Global Lore into the active workspace |
 | `/follow <url>` | Preview any link **inside the panel**, then capture it if it's a keeper. Clicking links in chat or documents does the same (Cmd/Ctrl-click for a browser tab) |
 | `/clear` · `/help` | Clear chat · full list |

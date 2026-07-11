@@ -14,7 +14,8 @@ import { chunkDocument, makeDocShortId } from '../lib/chunker';
 import { buildCitationContext, CITATION_SYSTEM_PROMPT, parseResponseCitations } from '../lib/citations';
 import { buildFrontmatter, hasFrontmatter } from '../lib/frontmatter';
 import { get as idbGet } from 'idb-keyval';
-import { runDeepResearch, generateSubQuestions, scrapeUrl } from './deep-researcher';
+import { runDeepResearch, generateSubQuestions, scrapeUrl, isJunkUrl } from './deep-researcher';
+import { harvestReferences } from '../lib/reference-harvest';
 import { addChunksToVectorStore, searchSessionChunks, resetSessionIndex, resetAllSessionIndexes } from '../lib/vector-store';
 import { replaceChunksForDoc } from '../lib/db';
 import { pdfBase64ToBody, pdfUrlToBody, ensureOffscreen as ensureOffscreenDoc } from '../lib/pdf-parser';
@@ -1117,9 +1118,84 @@ async function buildChatRequest(chatId: string, projectId: string, prompt: strin
       `--- END CURRENT PAGE ---\n` +
       `You may answer from the current page. Attribute such claims in plain text, e.g. "according to the page you're viewing". ` +
       `NEVER use [anchor] citations for current-page content — anchors are only for library sources.`;
+
+    // Second hop: the page's own links, scored against the question and
+    // fetched ephemerally. Best-effort — a failure never blocks the turn.
+    try {
+      const linked = await expandRelevantLinks(pageContext, prompt);
+      for (const l of linked) {
+        const lmd = (await selectPageMarkdown(l, prompt)).slice(0, LINKED_PAGE_BUDGET);
+        systemPrompt +=
+          `\n\n--- LINKED PAGE (followed from the current page because it looked relevant to the question; NOT saved) ---\n` +
+          `Title: ${l.title}\nURL: ${l.url}\n\n${lmd}\n` +
+          `--- END LINKED PAGE ---\n` +
+          `Attribute claims from it in plain text, e.g. "according to ${l.title} (linked from the page)". No [anchor] citations.`;
+      }
+      if (linked.length > 0) {
+        console.log(`[LINK-EXPAND] Inlined ${linked.length} linked page(s): ${linked.map(l => l.url).join(', ')}`);
+      }
+    } catch (e) {
+      console.warn('[LINK-EXPAND] skipped:', e);
+    }
   }
 
   return { systemPrompt, formattedHistory };
+}
+
+// ─────────────────────────────────────────────
+// Ephemeral link expansion — second-hop context, never saved
+// ─────────────────────────────────────────────
+// When the user chats WITH a page, the answer often lives one click deeper.
+// Score the page's outgoing links against the question (offscreen
+// cross-encoder on anchor text), fetch the best 1-2 ephemerally, and inline
+// them next to the page context. Same contract as page context: in-memory
+// TTL cache only, nothing touches IndexedDB or the vector store, and the
+// model must not fake [anchor] citations for it.
+
+const LINK_EXPANSION_MAX = 2;
+const LINK_EXPANSION_MIN_SCORE = 0.5;   // reranker sigmoid — “more likely relevant than not”
+const LINKED_PAGE_BUDGET = 5_000;       // chars per linked page in the prompt
+const LINK_FETCH_TIMEOUT_MS = 15_000;
+
+async function expandRelevantLinks(pageCtx: PageContext, question: string): Promise<PageContext[]> {
+  // Only markdown links with real anchor text are scoreable; bare DOIs/arXiv
+  // ids on a page are literature plumbing, not conversational leads.
+  const refs = harvestReferences([pageCtx.markdown], {
+    seenUrls: new Set([pageCtx.url]),
+    isJunk: isJunkUrl,
+    max: 40
+  }).filter(r => r.kind === 'web' && r.anchorText);
+  if (refs.length === 0) return [];
+
+  let ranked = refs;
+  try {
+    const res: any = await sendToOffscreen({
+      action: 'OFFSCREEN_RERANK',
+      query: question,
+      passages: refs.map(r => r.anchorText!)
+    });
+    if (!res?.ok || !Array.isArray(res.scores)) return [];
+    ranked = refs
+      .map((r, i) => ({ r, score: res.scores[i] ?? 0 }))
+      .filter(x => x.score >= LINK_EXPANSION_MIN_SCORE)
+      .sort((a, b) => b.score - a.score)
+      .map(x => x.r);
+  } catch {
+    return []; // no scorer → no expansion (never fetch unscored links)
+  }
+
+  const chosen = ranked.slice(0, LINK_EXPANSION_MAX);
+  const results = await Promise.allSettled(chosen.map(async ref => {
+    const cached = pageContextCache.get(ref.url);
+    if (cached && Date.now() - cached.ts < PAGE_CONTEXT_TTL_MS) return cached.ctx;
+    const scraped = await scrapeUrl(ref.url, AbortSignal.timeout(LINK_FETCH_TIMEOUT_MS));
+    if (!scraped?.markdown) throw new Error('unreadable');
+    const ctx: PageContext = { title: scraped.title || ref.url, url: ref.url, markdown: scraped.markdown };
+    // Same cache page context uses → selectPageMarkdown reuses chunk embeddings
+    pageContextCache.set(ref.url, { ctx, ts: Date.now() });
+    return ctx;
+  }));
+  return results.filter((r): r is PromiseFulfilledResult<PageContext> => r.status === 'fulfilled').map(r => r.value);
 }
 
 /**

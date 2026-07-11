@@ -494,7 +494,7 @@ function renderSourceEntry(r: SourceRecord): string {
  * files, tracker endpoints. These leak in from link extraction on scraped
  * pages (e.g. http://www.w3.org/TR/html4/loose.dtd).
  */
-function isJunkUrl(url: string): boolean {
+export function isJunkUrl(url: string): boolean {
   if (!/^https?:\/\//i.test(url)) return true;
   if (/\.(dtd|xsd|css|js|ico|woff2?|ttf|svg|png|jpe?g|gif|webp)(\?|$)/i.test(url)) return true;
   if (/\/\/(www\.)?(w3\.org|schema\.org|purl\.org|xmlns\.com|ogp\.me)\//i.test(url)) return true;
