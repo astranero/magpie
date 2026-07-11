@@ -1347,8 +1347,21 @@ async function buildRepoTreeBlock(pageUrl: string, question: string): Promise<st
 
 const LINK_EXPANSION_MAX = 2;
 const LINK_EXPANSION_MIN_SCORE = 0.5;   // reranker sigmoid — “more likely relevant than not”
+// Hub/TOC pages (docs indexes, link directories) carry almost no answer text
+// of their own — the value is entirely behind the links. Fetch more of them,
+// with a slightly softer gate.
+const HUB_EXPANSION_MAX = 4;
+const HUB_MIN_SCORE = 0.4;
 const LINKED_PAGE_BUDGET = 5_000;       // chars per linked page in the prompt
 const LINK_FETCH_TIMEOUT_MS = 15_000;
+
+/** Link-dominated page: many links, little prose between them. */
+function isHubPage(markdown: string): boolean {
+  const linkCount = (markdown.match(/\]\(https?:\/\//g) || []).length;
+  if (linkCount < 25) return false;
+  const prose = markdown.replace(/\[([^\]]*)\]\([^)]*\)/g, '$1');
+  return linkCount / Math.max(1, prose.split(/\s+/).length) > 0.04; // ≥1 link per ~25 words
+}
 
 async function expandRelevantLinks(pageCtx: PageContext, question: string): Promise<PageContext[]> {
   // Only markdown links with real anchor text are scoreable; bare DOIs/arXiv
@@ -1356,9 +1369,13 @@ async function expandRelevantLinks(pageCtx: PageContext, question: string): Prom
   const refs = harvestReferences([pageCtx.markdown], {
     seenUrls: new Set([pageCtx.url]),
     isJunk: isJunkUrl,
-    max: 40
+    max: 150
   }).filter(r => r.kind === 'web' && r.anchorText);
   if (refs.length === 0) return [];
+
+  const hub = isHubPage(pageCtx.markdown);
+  const minScore = hub ? HUB_MIN_SCORE : LINK_EXPANSION_MIN_SCORE;
+  const maxLinks = hub ? HUB_EXPANSION_MAX : LINK_EXPANSION_MAX;
 
   let ranked = refs;
   try {
@@ -1370,14 +1387,17 @@ async function expandRelevantLinks(pageCtx: PageContext, question: string): Prom
     if (!res?.ok || !Array.isArray(res.scores)) return [];
     ranked = refs
       .map((r, i) => ({ r, score: res.scores[i] ?? 0 }))
-      .filter(x => x.score >= LINK_EXPANSION_MIN_SCORE)
+      .filter(x => x.score >= minScore)
       .sort((a, b) => b.score - a.score)
       .map(x => x.r);
   } catch {
     return []; // no scorer → no expansion (never fetch unscored links)
   }
 
-  const chosen = ranked.slice(0, LINK_EXPANSION_MAX);
+  if (hub && ranked.length > 0) {
+    console.log(`[LINK-EXPAND] Hub page detected (${refs.length} links) — following up to ${maxLinks}`);
+  }
+  const chosen = ranked.slice(0, maxLinks);
   const results = await Promise.allSettled(chosen.map(async ref => {
     const cached = pageContextCache.get(ref.url);
     if (cached && Date.now() - cached.ts < PAGE_CONTEXT_TTL_MS) return cached.ctx;

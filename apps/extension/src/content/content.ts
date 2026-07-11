@@ -271,6 +271,31 @@ async function scrapePage(): Promise<{
   // Clean up excessive newlines
   markdown = markdown.replace(/\n{4,}/g, '\n\n\n').trim();
 
+  // Documentation hubs / TOC pages are mostly links — and Readability often
+  // strips nav-style link lists, leaving bare titles with no hrefs. Chat's
+  // link-expansion step needs real URLs to follow, so when the page's DOM is
+  // link-rich but the extracted markdown is link-poor, append the page's
+  // links as a markdown list (ephemeral page-context use, not saved content).
+  const mdLinkCount = (markdown.match(/\]\(https?:\/\//g) || []).length;
+  if (mdLinkCount < 15) {
+    const seen = new Set<string>();
+    const items: string[] = [];
+    for (const a of Array.from(document.querySelectorAll<HTMLAnchorElement>('a[href]'))) {
+      const text = (a.textContent || '').replace(/\s+/g, ' ').trim();
+      if (text.length < 4 || text.length > 120) continue;
+      let abs: string;
+      try { abs = new URL(a.getAttribute('href')!, window.location.href).href; } catch { continue; }
+      if (!/^https?:\/\//.test(abs) || abs.split('#')[0] === url.split('#')[0]) continue;
+      if (seen.has(abs)) continue;
+      seen.add(abs);
+      items.push(`- [${text.replace(/[\[\]]/g, '')}](${abs})`);
+      if (items.length >= 150) break;
+    }
+    if (items.length >= 15) {
+      markdown += `\n\n## Links on this page\n\n${items.join('\n')}`;
+    }
+  }
+
   // If the title looks like a generic site name (e.g. "Google Gemini"),
   // try to extract a real content title from the first markdown heading.
   if (isGenericTitle(title)) {
