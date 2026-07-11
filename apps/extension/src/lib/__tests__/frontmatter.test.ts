@@ -41,3 +41,25 @@ describe('frontmatter', () => {
   });
 });
 
+
+describe('contentHasTag', () => {
+  it('finds a tag written by buildFrontmatter', async () => {
+    const { buildFrontmatter, contentHasTag } = await import('../frontmatter');
+    const content = buildFrontmatter({ title: 'T', type: 'web-capture', tags: ['research-source', 'web'] }) + 'Body';
+    expect(contentHasTag(content, 'research-source')).toBe(true);
+    expect(contentHasTag(content, 'web')).toBe(true);
+  });
+
+  it('does not match tag prefixes (research-source vs research-sources)', async () => {
+    const { buildFrontmatter, contentHasTag } = await import('../frontmatter');
+    const content = buildFrontmatter({ title: 'T', type: 'research-sources', tags: ['research-sources'] }) + 'Body';
+    expect(contentHasTag(content, 'research-source')).toBe(false);
+    expect(contentHasTag(content, 'research-sources')).toBe(true);
+  });
+
+  it('returns false for content without frontmatter', async () => {
+    const { contentHasTag } = await import('../frontmatter');
+    expect(contentHasTag('# Just a doc\n\ntext', 'research-source')).toBe(false);
+    expect(contentHasTag('', 'research-source')).toBe(false);
+  });
+});

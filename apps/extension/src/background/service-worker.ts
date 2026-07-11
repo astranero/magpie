@@ -1263,7 +1263,7 @@ async function resolveResearchTopic(
   if (!recent && !titles) return topic;
 
   const res = await chatFn(
-    `You rewrite a user's research request into ONE self-contained, web-searchable research topic. The request may reference the conversation or the user's workspace documents ("these", "this model", "the above"). Resolve those references using the provided context. Return ONLY the rewritten topic as a single sentence — no quotes, no explanation. If the request is already self-contained, return it unchanged.`,
+    `Today's date is ${new Date().toISOString().slice(0, 10)}. You rewrite a user's research request into ONE self-contained, web-searchable research topic. The request may reference the conversation or the user's workspace documents ("these", "this model", "the above"). Resolve those references using the provided context. Return ONLY the rewritten topic as a single sentence — no quotes, no explanation. If the request is already self-contained, return it unchanged.`,
     `Workspace documents: ${titles || '(none)'}\n\nRecent conversation:\n${recent || '(none)'}\n\nResearch request: ${topic}`
   );
 

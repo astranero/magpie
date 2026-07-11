@@ -253,8 +253,12 @@ async function generateEmbeddings(texts: string[]): Promise<number[][]> {
   const extractor = await getEmbedder();
   if (texts.length === 0) return [];
   
-  // conservative limit for ONNX WASM backends to avoid integer overflow
-  const MAX_BATCH_SIZE = 256;
+  // Peak ONNX memory per batch ≈ batch_size × LONGEST-sequence length (every
+  // text is padded to the max), so 256 was no limit at all — one long chunk
+  // in a big batch still blew the WASM heap (std::bad_alloc from OrtRun).
+  // 8 bounds peak allocation regardless of document size; throughput loss is
+  // negligible next to model inference time.
+  const MAX_BATCH_SIZE = 8;
   
   const processBatch = async (batchTexts: string[]): Promise<number[][]> => {
     try {

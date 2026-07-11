@@ -60,6 +60,11 @@ export async function startJob(seed: Omit<ResearchJob, 'startedAt' | 'phase' | '
     active: false
   };
   await chrome.storage.local.set({ [JOB_KEY]: full });
+  // A NEW job invalidates the scraped-page cache: it exists so a RESUMED run
+  // (which never passes through startJob) can replay its own pages — not so
+  // pages from a previous topic leak into an unrelated one. Without this,
+  // the academic agent's cache-restore imported stale papers into every run.
+  await clearPages().catch(() => {});
 }
 
 /** Merge-patch the current job. No-op if there is no job. */

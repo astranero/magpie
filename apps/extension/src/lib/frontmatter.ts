@@ -69,6 +69,17 @@ export function hasFrontmatter(content: string): boolean {
   return /^---\r?\n/.test(content.trimStart());
 }
 
+/**
+ * True when the document's frontmatter tags include `tag` exactly.
+ * Used to recognize machine-generated docs (tag `research-source`) so the
+ * Lore list can group them and the local-folder mirror can skip them.
+ */
+export function contentHasTag(content: string, tag: string): boolean {
+  const { yaml } = splitFrontmatter(content || '');
+  if (!yaml) return false;
+  return parseFrontmatterFields(yaml).tags.includes(tag);
+}
+
 // ── Frontmatter reading (shared by DocumentView, chunker, tests) ──
 
 /** Tolerates BOM and leading whitespace before the opening fence. */

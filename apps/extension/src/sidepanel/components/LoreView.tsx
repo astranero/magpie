@@ -1,5 +1,6 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { LocalDocument } from '../types';
+import { contentHasTag } from '../../lib/frontmatter';
 import { Download, ExternalLink, Trash2, Cloud, CloudDownload, Plus, Minus, Library, BookOpen, FileUp, FolderUp, FileText, Image, Search, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { MagpieEmptyIllustration } from './BrandMark';
@@ -73,6 +74,12 @@ export const LoreView: React.FC<LoreViewProps> = ({
   const docsToShow = (showLore ? globalDocuments : documents)
     .filter(d => !titleFilter || d.title.toLowerCase().includes(titleFilter));
   const projectDocIds = new Set(documents.map(d => d.id));
+
+  // Machine-gathered research sources (a deep run captures dozens) collapse
+  // into one group so they don't bury the user's own curated documents.
+  const isResearchSource = (d: LocalDocument) => contentHasTag(d.content || '', 'research-source');
+  const curatedDocs = docsToShow.filter(d => !isResearchSource(d));
+  const researchSourceDocs = docsToShow.filter(isResearchSource);
 
   return (
     <div className="flex-1 flex flex-col overflow-hidden bg-background">
@@ -222,7 +229,7 @@ export const LoreView: React.FC<LoreViewProps> = ({
           </div>
         ) : (
           <div className="space-y-3">
-            {docsToShow.map(doc => {
+            {curatedDocs.map(doc => {
               const isLinked = projectDocIds.has(doc.id);
               return (
                 <div
@@ -361,6 +368,48 @@ export const LoreView: React.FC<LoreViewProps> = ({
                 </div>
               );
             })}
+
+            {/* Machine-gathered research sources — compact, collapsed group */}
+            {researchSourceDocs.length > 0 && (
+              <details className="rounded-lg border border-border bg-card shadow-card overflow-hidden">
+                <summary className="card-rule-thin px-3.5 py-2 text-[10px] font-mono font-bold uppercase tracking-widest text-muted-foreground cursor-pointer select-none hover:text-foreground">
+                  Research sources ({researchSourceDocs.length})
+                </summary>
+                <div className="p-1.5 space-y-0.5 max-h-72 overflow-y-auto no-scrollbar">
+                  {researchSourceDocs.map(doc => (
+                    <div key={doc.id} className="group/row flex items-center gap-2 px-2 py-1.5 rounded-md hover:bg-accent transition-colors">
+                      {doc.favicon ? (
+                        <img className="w-3.5 h-3.5 object-contain shrink-0" src={doc.favicon} alt="" />
+                      ) : (
+                        <FileText size={12} className="text-muted-foreground shrink-0" aria-hidden="true" />
+                      )}
+                      <button
+                        type="button"
+                        className="flex-1 min-w-0 text-left text-xs truncate hover:underline"
+                        onClick={() => onDocumentClick(doc.id)}
+                        title={doc.title}
+                      >
+                        {doc.title}
+                      </button>
+                      <span className="text-[10px] font-mono text-muted-foreground shrink-0 tabular-nums">
+                        {doc.wordCount.toLocaleString()}w
+                      </span>
+                      {doc.url && (
+                        <button
+                          type="button"
+                          className="text-muted-foreground hover:text-foreground shrink-0 opacity-0 group-hover/row:opacity-100 focus:opacity-100 transition-opacity"
+                          onClick={() => window.open(doc.url, '_blank')}
+                          title="Open original source"
+                          aria-label={`Open source for ${doc.title}`}
+                        >
+                          <ExternalLink size={12} />
+                        </button>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              </details>
+            )}
           </div>
         )}
       </div>

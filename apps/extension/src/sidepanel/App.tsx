@@ -12,6 +12,7 @@ import { DocumentView } from './components/DocumentView';
 import { Button } from '@/components/ui/button';
 import { Select, SelectContent, SelectItem, SelectSeparator, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { findPromptCommand, buildHelpText, loadCustomSkills, SlashCommand } from '../lib/commands';
+import { contentHasTag } from '../lib/frontmatter';
 import { timeAgo } from '../lib/format';
 import { fileToDataUrl, collectDirectoryFiles, inlineRelativeImages } from '../lib/import-helpers';
 
@@ -362,6 +363,11 @@ export default function App() {
 
         for (const doc of documents) {
           if (!doc.content) continue;
+          // Machine-gathered research sources stay in the extension library
+          // (citations resolve against them) but do NOT flood the user's .md
+          // folder — a deep run captures 30-150 of them. The report and the
+          // consolidated Research Sources list ARE mirrored.
+          if (contentHasTag(doc.content, 'research-source')) continue;
           const cleanTitle = doc.title.trim()
             .normalize('NFC')
             .replace(/[\u200E\u200F\u200B\u200C\u200D\uFEFF]/g, '')
@@ -648,6 +654,9 @@ export default function App() {
 
   const writeDocToLocalFolder = async (doc: LocalDocument) => {
     try {
+      // Same exclusion as the bulk mirror: scraped research sources never
+      // land in the user's folder (report + sources list still do).
+      if (doc.content && contentHasTag(doc.content, 'research-source')) return;
       const handle = await get('ara-local-directory-handle');
       if (handle) {
         // NOTE: never call requestPermission here — this runs after async

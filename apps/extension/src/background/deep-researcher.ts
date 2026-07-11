@@ -338,8 +338,13 @@ async function scrapeUrl(url: string, signal?: AbortSignal): Promise<ParsedPage 
 
 // ── LLM planning ──
 
+/** Today, spelled out — models otherwise guess a date from their training era. */
+function todayLine(): string {
+  return `Today's date is ${new Date().toISOString().slice(0, 10)}.`;
+}
+
 export async function generateSearchQueries(topic: string, llmChatFn: (sys: string, user: string) => Promise<string>): Promise<string[]> {
-  const sysPrompt = `You are an expert research planner specializing in finding authoritative, high-quality sources. Given a topic, generate 7 precise web search queries that would surface:
+  const sysPrompt = `${todayLine()} You are an expert research planner specializing in finding authoritative, high-quality sources. Given a topic, generate 7 precise web search queries that would surface:
 - Academic papers and peer-reviewed research
 - Technical documentation and official blog posts
 - Expert analysis from reputable publications (Nature, IEEE, ACM, Wired, Ars Technica, HBR)
@@ -364,7 +369,7 @@ Return ONLY a JSON array of strings, nothing else. Example: ["query 1", "query 2
 }
 
 export async function generateSubQuestions(topic: string, llmChatFn: (sys: string, user: string) => Promise<string>): Promise<string[]> {
-  const sysPrompt = `You are a research strategist. Decompose the given topic into 5-7 distinct research sub-questions that together give comprehensive coverage: core mechanisms, current state of the art, applications, limitations, open debates, and recent developments. Return ONLY a JSON array of strings, nothing else.`;
+  const sysPrompt = `${todayLine()} You are a research strategist. Decompose the given topic into 5-7 distinct research sub-questions that together give comprehensive coverage: core mechanisms, current state of the art, applications, limitations, open debates, and recent developments. Return ONLY a JSON array of strings, nothing else.`;
   const res = await llmChatFn(sysPrompt, topic);
   try {
     const start = res.indexOf('[');
@@ -1210,16 +1215,10 @@ export async function runDeepResearch(
 
   const rawSynthesis = await (synthesisFn ?? llmChatFn)(sysPrompt, `SOURCE EXCERPTS:\n\n${contextText}`);
 
-  // ── External Evaluator pass (Improvement 1) ──────────────────────────────
-  let synthesis = rawSynthesis;
-  const evalLlm = evaluatorFn ?? llmChatFn;
-  onProgress(`[EVALUATING] Running quality evaluation on report…`);
-  const evaluation = await evaluateReport(topic, rawSynthesis, evalLlm).catch(() => null);
-  if (evaluation) {
-    const verdictLabel = evaluation.verdict === 'PASS' ? '✅ PASS' : evaluation.verdict === 'NEEDS_REVISION' ? '⚠️ NEEDS REVISION' : '❌ FAIL';
-    onProgress(`[EVALUATING] Quality verdict: ${verdictLabel} (${evaluation.score}/10) — ${evaluation.recommendation}`);
-    synthesis = rawSynthesis + formatEvaluationBlock(evaluation);
-  }
+  // Evaluator gate: audit, revise once if flagged, append collapsed audit
+  const synthesis = await evaluateAndRefine(
+    topic, rawSynthesis, contextText, llmChatFn, evaluatorFn ?? llmChatFn, onProgress
+  );
 
   await saveSynthesisReport(projectId, topic, synthesis, agent.sources, 'quick');
 
@@ -1398,13 +1397,16 @@ Return ONLY the JSON. No explanation outside it.`;
 }
 
 /**
- * Format evaluation result as a collapsible markdown section appended to report.
+ * Format evaluation result appended to the report: a one-line verdict with
+ * the full audit collapsed behind <details> — the evaluation is a quality
+ * signal, not part of the research content, so it must not dominate the page.
  */
-function formatEvaluationBlock(ev: EvaluationResult): string {
+function formatEvaluationBlock(ev: EvaluationResult, revised: boolean): string {
   const icon = ev.verdict === 'PASS' ? '✅' : ev.verdict === 'NEEDS_REVISION' ? '⚠️' : '❌';
   const lines = [
     `\n\n---\n`,
-    `## ${icon} Quality Evaluation — ${ev.verdict} (${ev.score}/10)`,
+    `<details>`,
+    `<summary>${icon} Quality audit: ${ev.verdict} (${ev.score}/10)${revised ? ' — after one revision pass' : ''}</summary>`,
     ``,
     `> ${ev.recommendation}`,
     ``,
@@ -1424,7 +1426,75 @@ function formatEvaluationBlock(ev: EvaluationResult): string {
     ev.flaggedSections.forEach(f => lines.push(`- \`${f}\``));
     lines.push('');
   }
+  lines.push(`</details>`);
   return lines.join('\n');
+}
+
+/**
+ * One bounded revision pass: feed the evaluator's weaknesses back to the
+ * synthesis model together with the ORIGINAL source excerpts. Runs at most
+ * once (no evaluate→revise loops), and only when the judge flags the report.
+ */
+async function reviseSynthesis(
+  topic: string,
+  synthesis: string,
+  evaluation: EvaluationResult,
+  sourceContext: string,
+  llmChatFn: LlmChatFn
+): Promise<string> {
+  const sys =
+    `You are revising a research report on: "${topic}" after a quality audit flagged problems.
+Auditor's findings:
+${evaluation.weaknesses.map(w => `- ${w}`).join('\n')}
+${evaluation.flaggedSections.length ? `Flagged sections: ${evaluation.flaggedSections.join('; ')}` : ''}
+
+Rewrite the report to address these findings using ONLY the source excerpts provided.
+- If the sources genuinely cannot answer the topic, say so prominently in the first paragraph and keep the report short — do NOT pad with tangentially related material.
+- Preserve correct [anchor_id] citations; never fabricate anchors.
+- Cut content the auditor called irrelevant rather than defending it.
+
+${RESEARCH_CITATION_RULES}`;
+  const user = `ORIGINAL REPORT:\n\n${synthesis.slice(0, 12_000)}\n\nSOURCE EXCERPTS:\n\n${sourceContext.slice(0, 30_000)}`;
+  const revised = await llmChatFn(sys, user);
+  return revised.trim().length > 200 ? revised : synthesis;
+}
+
+/**
+ * Evaluate → optionally revise once → append the collapsed audit block.
+ * Returns the final report text. Used by both quick and deep modes.
+ */
+async function evaluateAndRefine(
+  topic: string,
+  synthesis: string,
+  sourceContext: string,
+  llmChatFn: LlmChatFn,
+  evaluatorFn: LlmChatFn,
+  onProgress: (s: string) => void
+): Promise<string> {
+  onProgress(`[EVALUATING] Running quality evaluation on report…`);
+  const first = await evaluateReport(topic, synthesis, evaluatorFn).catch(() => null);
+  if (!first) return synthesis;
+
+  const label = (ev: EvaluationResult) =>
+    ev.verdict === 'PASS' ? '✅ PASS' : ev.verdict === 'NEEDS_REVISION' ? '⚠️ NEEDS REVISION' : '❌ FAIL';
+  onProgress(`[EVALUATING] Verdict: ${label(first)} (${first.score}/10) — ${first.recommendation}`);
+
+  if (first.verdict === 'PASS' || first.score >= 7) {
+    return synthesis + formatEvaluationBlock(first, false);
+  }
+
+  // Flagged: one revision pass, then re-audit so the shown verdict is honest.
+  onProgress(`[EVALUATING] Revising report to address auditor findings…`);
+  const revised = await reviseSynthesis(topic, synthesis, first, sourceContext, llmChatFn).catch(() => synthesis);
+  if (revised === synthesis) {
+    return synthesis + formatEvaluationBlock(first, false);
+  }
+  const second = await evaluateReport(topic, revised, evaluatorFn).catch(() => null);
+  if (second) {
+    onProgress(`[EVALUATING] Post-revision verdict: ${label(second)} (${second.score}/10)`);
+    return revised + formatEvaluationBlock(second, true);
+  }
+  return revised + formatEvaluationBlock(first, true);
 }
 
 /**
@@ -1949,6 +2019,9 @@ async function runDeeperResearch(
   await updateJob({ phase: 'synthesizing' }).catch(() => {});
 
   let synthesis: string;
+  // Source context handed to the evaluator's revision pass — briefs on the
+  // staged path, the packed excerpts on the fallback path.
+  let revisionContext = '';
 
   if (completedBriefs.length > 0) {
     // Staged path: merge all stage briefs into one comprehensive paper
@@ -2000,20 +2073,22 @@ async function runDeeperResearch(
     }
     const fallbackSys = `You are a senior research analyst. Using ONLY the excerpts below, write a comprehensive markdown report on: "${topic}".\n\nSub-questions:\n${subQuestions.map(q => `- ${q}`).join('\n')}\n\n${RESEARCH_CITATION_RULES}`;
     synthesis = await (synthesisFn ?? llmChatFn)(fallbackSys, `SOURCE EXCERPTS:\n\n${contextText}`);
+    revisionContext = contextText;
   }
 
   // Prepend source-mix banner
   synthesis = `> **Source mix:** ${mixStr}\n\n${synthesis}`;
 
-  // ── External Evaluator pass (Improvement 1) ──────────────────────────────
-  const evalLlm = evaluatorFn ?? llmChatFn;
-  onProgress(`[EVALUATING] Running quality evaluation on final paper…`);
-  const evaluation = await evaluateReport(topic, synthesis, evalLlm).catch(() => null);
-  if (evaluation) {
-    const verdictLabel = evaluation.verdict === 'PASS' ? '✅ PASS' : evaluation.verdict === 'NEEDS_REVISION' ? '⚠️ NEEDS REVISION' : '❌ FAIL';
-    onProgress(`[EVALUATING] Quality verdict: ${verdictLabel} (${evaluation.score}/10) — ${evaluation.recommendation}`);
-    synthesis = synthesis + formatEvaluationBlock(evaluation);
+  // Evaluator gate: audit, revise once if flagged (stage briefs act as the
+  // source context for the staged path; packed excerpts on the fallback path)
+  if (completedBriefs.length > 0) {
+    revisionContext = completedBriefs
+      .map((b, i) => `## Stage ${i + 1} Research Brief\n\n${b}`)
+      .join('\n\n---\n\n');
   }
+  synthesis = await evaluateAndRefine(
+    topic, synthesis, revisionContext, llmChatFn, evaluatorFn ?? llmChatFn, onProgress
+  );
 
   await saveSynthesisReport(projectId, topic, synthesis, allSources, 'deep');
   onProgress(`[DONE] ${completedBriefs.length} stage briefs → final paper — ${allSources.length} sources total.`);
