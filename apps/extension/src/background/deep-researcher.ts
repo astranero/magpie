@@ -2055,14 +2055,18 @@ async function runDeeperResearch(
     if (docsSoFar.length > 0) {
       const evidenceForGap = await searchSessionChunks(projectId, topic, 20, docsSoFar);
       const evidence = evidenceForGap.map(c => c.text).join('\n\n');
-      const analysis = await analyzeGaps(topic, subQuestions, evidence, llmChatFn);
-      if (!analysis) {
-        onProgress(`[STAGE ${stage}/${rounds}] Gap analysis inconclusive — finishing gathering early`);
-        break;
+      const analysis = await analyzeGaps(topic, subQuestions, evidence, llmChatFn).catch(() => null);
+      if (analysis) {
+        stageQueries = analysis.queries;
+        onProgress(`[STAGE ${stage}/${rounds}] Next stage queries: ${analysis.queries.join(' | ')}`);
+      } else {
+        // One unparseable planning call must not collapse a multi-stage run
+        // into stage 1: fall back to the sub-questions as the next stage's
+        // queries — they were the plan the user approved.
+        stageQueries = subQuestions.slice(0, activeLimits.webQueries);
+        onProgress(`[STAGE ${stage}/${rounds}] Gap analysis inconclusive — continuing with sub-questions as queries`);
       }
-      stageQueries = analysis.queries;
-      onProgress(`[STAGE ${stage}/${rounds}] Next stage queries: ${analysis.queries.join(' | ')}`);
-      await updateJob({ webQueries: analysis.queries }).catch(() => {});
+      await updateJob({ webQueries: stageQueries }).catch(() => {});
     }
   }
 

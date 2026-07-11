@@ -212,6 +212,20 @@ export default function App() {
     });
   }, []);
 
+  // Auto-name placeholder workspaces from the first meaningful signal (a
+  // research topic or the first chat message). Only ever renames titles
+  // that are still defaults — a name the user chose is never touched.
+  const DEFAULT_TITLE_RE = /^(default session|session \d|new workspace|untitled)/i;
+  const maybeAutoNameProject = useCallback(async (candidate: string) => {
+    const project = projects.find(p => p.id === activeProjectId);
+    if (!project || !DEFAULT_TITLE_RE.test(project.title.trim())) return;
+    const title = candidate.replace(/\s+/g, ' ').trim().replace(/[.?!]+$/, '').slice(0, 60);
+    if (title.length < 4) return;
+    await msg('UPDATE_PROJECT', { id: activeProjectId, title });
+    await loadProjects();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [projects, activeProjectId]);
+
   // Clicking a link in chat/documents forwards the CURRENT tab there — the
   // page opens beside the panel, ready for the page-context toggle. The
   // in-panel preview stays available via /follow (and link-chaining inside
@@ -498,17 +512,32 @@ export default function App() {
     }
   }, [activeChatId]);
 
-  // When switching to chat view, verify research is still actually running.
-  // If the worker finished while the panel was on another tab or closed,
-  // DEEP_RESEARCH_DONE may have been missed — this clears the stale flag.
+  // Self-healing "researching" flag: DEEP_RESEARCH_DONE broadcasts can be
+  // missed (panel closed, other window asleep), which left the field-log
+  // card up forever. While ANY project shows researching, poll the worker
+  // every 5s and clear flags for projects with no live run.
   useEffect(() => {
-    if (view !== 'chat' || !activeProjectId) return;
-    msg('GET_RESEARCH_STATUS').then((res: any) => {
-      if (res?.success && !res.running && researching[activeProjectId]) {
-        setResearching(prev => ({ ...prev, [activeProjectId]: false }));
-      }
-    }).catch(() => {});
-  }, [view, activeProjectId]);
+    const anyResearching = Object.values(researching).some(Boolean);
+    if (!anyResearching) return;
+    const check = () => {
+      msg('GET_RESEARCH_STATUS').then((res: any) => {
+        if (!res?.success) return;
+        setResearching(prev => {
+          const liveProject = res.running ? res.job?.projectId : null;
+          let changed = false;
+          const next = { ...prev };
+          for (const pid of Object.keys(next)) {
+            if (next[pid] && pid !== liveProject) { next[pid] = false; changed = true; }
+          }
+          return changed ? next : prev;
+        });
+      }).catch(() => {});
+    };
+    check();
+    const interval = window.setInterval(check, 5000);
+    return () => window.clearInterval(interval);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [Object.values(researching).some(Boolean)]);
 
   useEffect(() => {
     if (msgEnd.current) {
@@ -1233,6 +1262,7 @@ export default function App() {
 
     const currentChatId = activeChatId;
     const currentProjectId = activeProjectId;
+    maybeAutoNameProject(messageText).catch(() => {});
     const userMsg: ChatMessage = {
       id: Date.now().toString(),
       role: 'user',
@@ -1402,6 +1432,7 @@ export default function App() {
     updateMessage(activeChatId, planMsgId, m => ({ ...m, plan: { ...m.plan!, status: 'started' } }));
     setResearching(prev => ({ ...prev, [activeProjectId]: true }));
     setResearchLogs(prev => ({ ...prev, [activeProjectId]: [] }));
+    maybeAutoNameProject(plan.effectiveTopic).catch(() => {});
 
     const currentChatId = activeChatId;
 
