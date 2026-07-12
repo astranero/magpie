@@ -112,6 +112,11 @@ export default function App() {
   const researchChatRef = useRef<Record<string, string>>({});
   const researchDeltaBufferRef = useRef<Record<string, string>>({});
   const researchDeltaTimerRef = useRef<number | null>(null);
+  // Chat questions queued behind an active research run (per chat), drained in
+  // order when the run finishes. A ref so the once-registered DONE listener
+  // always calls the freshest drain closure.
+  const queuedRef = useRef<Record<string, Array<{ id: string; text: string; forcePageContext: boolean; projectId: string }>>>({});
+  const drainQueueRef = useRef<(projectId: string) => void>(() => {});
 
 
   // User-defined slash commands (Settings → Custom Commands)
@@ -411,6 +416,9 @@ export default function App() {
         setResearchLogs(prev => ({ ...prev, [m.projectId]: [...(prev[m.projectId] || []), line] }));
         if (m.cancelled) showToast('info', 'Research cancelled');
         else showToast(m.error ? 'error' : 'success', m.error ? `Research failed: ${m.error}` : 'Deep research complete!');
+
+        // Run anything the user queued during the run, in order.
+        drainQueueRef.current(m.projectId);
       }
     };
 
@@ -1264,27 +1272,67 @@ export default function App() {
 
     const currentChatId = activeChatId;
     const currentProjectId = activeProjectId;
+    setInput('');
+
+    // Real queue: while research runs on this project, a chat question waits
+    // behind it instead of racing it. Show the message now with a "Queued"
+    // badge; drainQueue runs it (and any others, in order) once research ends.
+    if (researching[currentProjectId]) {
+      const uid = `q-${Date.now()}`;
+      setMessages(prev => ({
+        ...prev,
+        [currentChatId]: [...(prev[currentChatId] || []), {
+          id: uid, role: 'user' as const,
+          text: forcePageContext ? `[📄 Current Page] ${messageText}` : messageText,
+          queued: true
+        }]
+      }));
+      (queuedRef.current[currentChatId] ||= []).push({ id: uid, text: messageText, forcePageContext, projectId: currentProjectId });
+      return;
+    }
+
     maybeAutoNameProject(messageText).catch(() => {});
-    const userMsg: ChatMessage = {
-      id: Date.now().toString(),
-      role: 'user',
-      text: forcePageContext ? `[📄 Current Page] ${messageText}` : messageText
-    };
+    await runChatStream(currentChatId, currentProjectId, messageText, forcePageContext);
+  };
+
+  /**
+   * Stream one chat turn over a long-lived port. Resolves when the stream
+   * finishes (DONE/ERROR/disconnect). `existingUserMsgId` is set when the user
+   * bubble already exists (a queued message being drained) — we just clear its
+   * "queued" badge instead of adding a new bubble.
+   */
+  const runChatStream = (
+    currentChatId: string, currentProjectId: string, messageText: string,
+    forcePageContext: boolean, existingUserMsgId?: string
+  ): Promise<void> => new Promise<void>((resolve) => {
     const assistantId = `${Date.now() + 1}`;
 
-    setMessages(prev => ({
-      ...prev,
-      [currentChatId]: [...(prev[currentChatId] || []), userMsg]
-    }));
-    setInput('');
+    if (existingUserMsgId) {
+      setMessages(prev => {
+        const list = prev[currentChatId] || [];
+        const idx = list.findIndex(x => x.id === existingUserMsgId);
+        if (idx === -1) return prev;
+        const copy = [...list];
+        copy[idx] = { ...copy[idx], queued: false };
+        return { ...prev, [currentChatId]: copy };
+      });
+    } else {
+      setMessages(prev => ({
+        ...prev,
+        [currentChatId]: [...(prev[currentChatId] || []), {
+          id: Date.now().toString(), role: 'user' as const,
+          text: forcePageContext ? `[📄 Current Page] ${messageText}` : messageText
+        }]
+      }));
+    }
     setGenerating(prev => ({ ...prev, [currentChatId]: true }));
 
     if (typeof chrome === 'undefined' || !chrome.runtime?.connect) {
       setGenerating(prev => ({ ...prev, [currentChatId]: false }));
+      resolve();
       return;
     }
 
-    // Stream tokens over a long-lived port (also keeps the MV3 worker alive)
     const port = chrome.runtime.connect({ name: 'chat-stream' });
     chatPortRef.current = port;
     let finished = false;
@@ -1292,12 +1340,13 @@ export default function App() {
     const finish = () => {
       if (finished) return;
       finished = true;
-      // See the other stream handler: a disconnect without DONE must still
-      // clear the streaming flag or the blinking cursor sticks forever.
+      // A disconnect without DONE must still clear the streaming flag or the
+      // blinking cursor sticks forever.
       finalizeStreamingMessage(currentChatId, assistantId);
       setGenerating(prev => ({ ...prev, [currentChatId]: false }));
       setThinkingStatus(prev => ({ ...prev, [currentChatId]: '' }));
       if (chatPortRef.current === port) chatPortRef.current = null;
+      resolve();
     };
 
     port.onMessage.addListener((m: any) => {
@@ -1315,8 +1364,7 @@ export default function App() {
         setMessages(prev => ({
           ...prev,
           [currentChatId]: [...(prev[currentChatId] || []), {
-            id: `${Date.now() + 2}`,
-            role: 'system',
+            id: `${Date.now() + 2}`, role: 'system' as const,
             text: (m.error as string) || 'Error — check Settings.'
           }]
         }));
@@ -1334,7 +1382,24 @@ export default function App() {
       projectId: currentProjectId,
       includePageContext: includePageContext || forcePageContext
     });
+  });
+
+  /** Run every message queued behind a finished research run, in order. */
+  const drainQueue = async (projectId: string) => {
+    for (const chatId of Object.keys(queuedRef.current)) {
+      const items = queuedRef.current[chatId] || [];
+      const mine = items.filter(it => it.projectId === projectId);
+      if (mine.length === 0) continue;
+      queuedRef.current[chatId] = items.filter(it => it.projectId !== projectId);
+      for (const it of mine) {
+        // Sequential — each waits for the prior stream to finish (and the
+        // offscreen mutex keeps embeds from colliding regardless).
+        await runChatStream(chatId, projectId, it.text, it.forcePageContext, it.id).catch(() => {});
+      }
+    }
   };
+  // Latest drainQueue for the once-registered DONE listener to call.
+  drainQueueRef.current = drainQueue;
 
   const clearChat = async () => {
     if (!activeChatId) return;

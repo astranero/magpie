@@ -41,6 +41,9 @@ export interface ChatMessage {
   renderLive?: boolean;
   /** Research plan card — rendered instead of the text body when present. */
   plan?: ResearchPlan;
+  /** A user message waiting in the queue behind an active research run —
+   *  shown with a "Queued" badge until the run finishes and it executes. */
+  queued?: boolean;
 }
 
 /**

@@ -656,11 +656,17 @@ export const ChatView: React.FC<ChatViewProps> = ({
             </div>
           </div>
         ) : (
-          <div key={m.id} className={`flex ${m.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+          <div key={m.id} className={`flex flex-col ${m.role === 'user' ? 'items-end' : 'items-start'}`}>
+            {m.queued && (
+              <span className="mb-1 inline-flex items-center gap-1 rounded-full bg-highlight/15 text-amber-700 dark:text-highlight px-2 py-0.5 text-[10px] font-medium">
+                <span className="w-1.5 h-1.5 rounded-full bg-current animate-pulse motion-reduce:animate-none" aria-hidden="true" />
+                Queued — runs after research
+              </span>
+            )}
             <div
               className={`max-w-[85%] rounded-xl border px-4 py-2.5 text-sm shadow-card ${
                 m.role === 'user'
-                  ? 'bg-primary text-primary-foreground border-primary rounded-br-md'
+                  ? `bg-primary text-primary-foreground border-primary rounded-br-md ${m.queued ? 'opacity-70' : ''}`
                   : m.role === 'system'
                   ? 'bg-muted/40 border-border/70 text-muted-foreground w-full'
                   : 'bg-card border-border/80 text-card-foreground rounded-bl-md'
