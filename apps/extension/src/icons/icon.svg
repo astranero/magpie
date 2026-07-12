@@ -1,0 +1,47 @@
+<svg width="128" height="128" viewBox="0 0 128 128" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="128" y2="128" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#0e88b3"/>
+      <stop offset="0.55" stop-color="#1f6fd0"/>
+      <stop offset="1" stop-color="#7c4fdc"/>
+    </linearGradient>
+    <linearGradient id="gem" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffd45e"/>
+      <stop offset="1" stop-color="#f5a623"/>
+    </linearGradient>
+    <linearGradient id="sheen" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.26"/>
+      <stop offset="0.5" stop-color="#ffffff" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="128" height="128" rx="30" fill="url(#bg)"/>
+  <rect width="128" height="128" rx="30" fill="url(#sheen)"/>
+
+  <!-- Perched magpie facing up-right toward the gem. Built from primitives
+       that all fill white and merge into one silhouette. -->
+  <g fill="#ffffff">
+    <!-- long tapered tail sweeping down-left: broad root → point -->
+    <polygon points="44,74 58,86 12,108"/>
+    <!-- body -->
+    <ellipse cx="58" cy="72" rx="21" ry="17.5" transform="rotate(18 58 72)"/>
+    <!-- head -->
+    <circle cx="76" cy="52" r="15"/>
+    <!-- beak pointing up-right toward gem -->
+    <polygon points="88,46 100,39 90,55"/>
+  </g>
+
+  <!-- folded wing: soft ink two-tone hint -->
+  <path fill="#0f3f72" fill-opacity="0.18" d="M50 72 C58 64 72 64 80 70 C72 82 58 84 48 78 Z"/>
+
+  <!-- eye -->
+  <circle cx="80" cy="49" r="4.6" fill="#123a63"/>
+  <circle cx="81.6" cy="47.4" r="1.5" fill="#ffffff"/>
+
+  <!-- gem the magpie eyes / collects -->
+  <g transform="translate(106 30)">
+    <path d="M0 -10 L8 -1 L0 11 L-8 -1 Z" fill="url(#gem)"/>
+    <path d="M0 -10 L8 -1 L0 -1 Z" fill="#ffffff" fill-opacity="0.5"/>
+    <path d="M-8 -1 L8 -1 L0 11 Z" fill="#000000" fill-opacity="0.08"/>
+  </g>
+</svg>

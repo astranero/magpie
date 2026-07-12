@@ -334,9 +334,18 @@ export default function App() {
       }
 
       if (m.action === 'DEEP_RESEARCH_DONE') {
-        loadChatHistory(m.chatId);
         setResearching(prev => ({ ...prev, [m.projectId]: false }));
-
+        if (m.chatId) loadChatHistory(m.chatId);
+        loadDocuments(m.projectId);
+        setResearchLogs(prev => ({
+          ...prev,
+          [m.projectId]: [...(prev[m.projectId] || []),
+            m.error
+              ? `[ERROR] Research failed: ${m.error}`
+              : '[SUCCESS] Deep research complete — results added to chat.'
+          ]
+        }));
+        showToast(m.error ? 'error' : 'success', m.error ? `Research failed: ${m.error}` : 'Deep research complete!');
       }
     };
 
@@ -1363,35 +1372,17 @@ export default function App() {
     setResearchLogs(prev => ({ ...prev, [activeProjectId]: [] }));
     maybeAutoNameProject(plan.effectiveTopic).catch(() => {});
 
-    const currentChatId = activeChatId;
-
-    const researchRes = await msg('START_DEEP_RESEARCH', {
+    // Fire-and-forget: Chrome drops sendResponse after ~5 min, which
+    // would make msg() resolve with "No response" and show a false
+    // "Research failed" error. Instead, we don't await the result at all.
+    // Completion/failure is handled by the DEEP_RESEARCH_DONE broadcast.
+    msg('START_DEEP_RESEARCH', {
       projectId: activeProjectId,
-      chatId: currentChatId,
+      chatId: activeChatId,
       topic: plan.effectiveTopic,
       mode: plan.mode
-    });
-
-    if (!researchRes.success) {
-      // Failed to start or failed mid-run — DEEP_RESEARCH_DONE won't fire
-      setResearching(prev => ({ ...prev, [activeProjectId]: false }));
-      showToast('error', `Research failed: ${researchRes.error}`);
-      setMessages(prev => ({
-        ...prev,
-        [currentChatId]: [...(prev[currentChatId] || []), {
-          id: `${Date.now()}`, role: 'system', text: `Research failed: ${researchRes.error}`
-        }]
-      }));
-      return;
-    }
-
-    // setResearching(false) handled by DEEP_RESEARCH_DONE handler
-    setResearchLogs(prev => ({
-      ...prev,
-      [activeProjectId]: [...(prev[activeProjectId] || []), '[SUCCESS] Deep research complete — results added to chat.']
-    }));
-    showToast('success', 'Deep research complete!');
-    loadDocuments(activeProjectId);
+    }).catch(() => {});
+    // All state updates happen in the DEEP_RESEARCH_DONE and DEEP_RESEARCH_LOG handlers
   };
 
   const cancelTask = async () => {

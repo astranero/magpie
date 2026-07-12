@@ -68,7 +68,24 @@ async function insertChunks(db: any, chunks: Chunk[]) {
  * documents that are not indexed yet (e.g. after a service worker restart).
  * Caps at maxChunks to avoid embedding thousands of chunks for large projects.
  */
-export async function ensureProjectIndexed(projectId: string, maxChunks = 500): Promise<void> {
+// Prevent concurrent rehydration (chat question + research both calling this)
+const rehydrating = new Map<string, Promise<void>>();
+
+export async function ensureProjectIndexed(projectId: string, maxChunks = 2000): Promise<void> {
+  // If already rehydrating this session, wait for it to finish
+  const existing = rehydrating.get(projectId);
+  if (existing) return existing;
+
+  const promise = _ensureProjectIndexedInner(projectId, maxChunks);
+  rehydrating.set(projectId, promise);
+  try {
+    await promise;
+  } finally {
+    rehydrating.delete(projectId);
+  }
+}
+
+async function _ensureProjectIndexedInner(projectId: string, maxChunks: number): Promise<void> {
   const db = await getSessionDB(projectId);
   const indexed = getIndexedSet(projectId);
 
@@ -77,18 +94,12 @@ export async function ensureProjectIndexed(projectId: string, maxChunks = 500): 
   if (missing.length === 0) return;
 
   const chunks = await getChunksForDocs(missing);
-  
-  // Deduplicate: keep only first chunk per document, then limit total
-  const firstChunkPerDoc = new Map<string, Chunk>();
-  for (const chunk of chunks) {
-    if (chunk.docId && !firstChunkPerDoc.has(chunk.docId)) {
-      firstChunkPerDoc.set(chunk.docId, chunk);
-    }
-  }
-  
-  const dedupedChunks = Array.from(firstChunkPerDoc.values()).slice(0, maxChunks);
-  await insertChunks(db, dedupedChunks);
-  dedupedChunks.forEach(c => { if (c.docId) indexed.add(c.docId); });
+
+  // Index ALL chunks (not just one per doc), capped at maxChunks
+  const toInsert = chunks.slice(0, maxChunks);
+  await insertChunks(db, toInsert);
+  // Mark all docs as indexed (even if some chunks were cut by the cap)
+  missing.forEach(docId => indexed.add(docId));
 }
 
 /**
