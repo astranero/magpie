@@ -28,9 +28,7 @@ interface SettingsViewProps {
   logout: () => void;
   folderName: string;
   setFolderName: (val: string) => void;
-  localFolderName: string | null;
-  diskMirrorEnabled: boolean;
-  setDiskMirrorEnabled: (val: boolean) => void;
+  exportWorkspace: () => void;
   autoLinkCaptures: boolean;
   setAutoLinkCaptures: (val: boolean) => void;
   saveSettings: () => void;
@@ -38,7 +36,7 @@ interface SettingsViewProps {
 
 export const SettingsView: React.FC<SettingsViewProps> = ({
   customUrl, setCustomUrl, customKey, setCustomKey, customModel, setCustomModel, visionModel, setVisionModel, customModels, fetchCustomModels,
-  docCount, globalDocCount, onCleanupOrphans, authed, profile, login, logout, folderName, setFolderName, localFolderName, diskMirrorEnabled, setDiskMirrorEnabled,
+  docCount, globalDocCount, onCleanupOrphans, authed, profile, login, logout, folderName, setFolderName, exportWorkspace,
   autoLinkCaptures, setAutoLinkCaptures, saveSettings
 }) => {
 
@@ -486,27 +484,19 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
               Re-index
             </Button>
           </div>
-          <div className="flex items-center justify-between">
-            <div>
-              <span className="text-xs font-medium">Save to disk</span>
-              <p className="text-[10px] text-muted-foreground mt-0.5 leading-normal">
-                Mirrors your workspace to <span className="font-mono">Downloads/{localFolderName}/</span> as .md
-                files. Always on — no permission to grant, never expires.
-              </p>
-            </div>
-            <button
-              type="button"
-              role="switch"
-              aria-checked={diskMirrorEnabled}
-              onClick={() => setDiskMirrorEnabled(!diskMirrorEnabled)}
-              className={`relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors ${diskMirrorEnabled ? 'bg-primary' : 'bg-muted'}`}
-            >
-              <span className={`inline-block h-3.5 w-3.5 rounded-full bg-background transition-transform ${diskMirrorEnabled ? 'translate-x-5' : 'translate-x-1'}`} />
-            </button>
+          <div>
+            <span className="text-xs font-medium">Stored in your browser</span>
+            <p className="text-[10px] text-muted-foreground mt-0.5 leading-normal">
+              Every workspace, chat, and document lives in local browser storage — nothing to set
+              up, nothing to grant, and it survives restarts. No files are downloaded.
+            </p>
           </div>
-          <p className="text-[10px] text-muted-foreground leading-normal">
-            Open <span className="font-mono">Downloads/{localFolderName}/</span> in Finder or Explorer to read the
-            files directly. Chrome can't open the folder for you — browse to it manually.
+          <Button variant="outline" size="sm" className="w-full mt-1 rounded-lg font-medium text-xs" onClick={exportWorkspace}>
+            Export this workspace to a folder…
+          </Button>
+          <p className="text-[10px] text-muted-foreground mt-1 leading-normal">
+            Optional. Writes the active workspace's docs as <span className="font-mono">.md</span> files to a
+            folder you pick — one-time, no download, no recurring permission.
           </p>
 
           <div className="flex items-center justify-between mt-4">

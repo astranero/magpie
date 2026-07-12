@@ -1,10 +1,16 @@
 import { useState, useEffect, useRef, useCallback, Fragment } from 'react';
 import { set } from 'idb-keyval';
 
-// Disk mirror lands under the user's Downloads folder. chrome.downloads can't
-// target an arbitrary absolute path, but it never expires — the trade we make.
-// (To relocate: point Chrome's own download dir elsewhere in chrome://settings.)
-const LOCAL_FOLDER_NAME = 'magpie';
+// Keep one path segment (folder or filename stem) safe across OSes.
+const sanitizeSegment = (name: string): string =>
+  (name || '')
+    .normalize('NFC')
+    .replace(/[‎‏​‌‍﻿]/g, '')
+    .replace(/[^\w\s\-().,'!&+#@\[\]{}]/g, '')
+    .replace(/\s+/g, ' ')
+    .replace(/^\.+/, '').replace(/\.+$/, '')
+    .trim()
+    .slice(0, 100);
 import { Edit2, Trash2, FileText, Library, MessageSquare, SlidersHorizontal } from 'lucide-react';
 import { LocalDocument, Project, Chat, ChatMessage, ResearchPlan, ResolvedCitation, TabInfo, View } from './types';
 import { LoreView } from './components/LoreView';
@@ -124,9 +130,6 @@ export default function App() {
   const [authed, setAuthed] = useState(false);
   const [syncing, setSyncing] = useState(false);
   const [profile, setProfile] = useState<{ name: string; email: string; picture: string } | null>(null);
-
-  // Disk mirror — always Downloads/AI_AW via chrome.downloads (never expires).
-  const [diskMirrorEnabled, setDiskMirrorEnabled] = useState(true);
 
   // Chat
   const [messages, setMessages] = useState<Record<string, ChatMessage[]>>({});
@@ -300,12 +303,6 @@ export default function App() {
     loadSettings();
     trySilentAuth();
 
-    // Disk-mirror preference (default on). No permission handle to restore —
-    // chrome.downloads needs none, which is the whole point of the switch.
-    chrome.storage.local.get('diskMirrorEnabled').then(({ diskMirrorEnabled }) => {
-      if (typeof diskMirrorEnabled === 'boolean') setDiskMirrorEnabled(diskMirrorEnabled);
-    }).catch(() => {});
-
     const messageListener = (m: any) => {
       if (m.action === 'DEEP_RESEARCH_LOG') {
         // Batch log lines: buffer in a ref, flush every 300ms. A setState per
@@ -396,39 +393,51 @@ export default function App() {
     return () => channel.close();
   }, [activeProjectId, activeChatId]);
 
-  // ──────── Mirror documents to disk when they change ────────
-  // Writes via chrome.downloads (Downloads/AI_AW/<workspace>/*.md). Unlike the
-  // old File System Access folder this NEVER expires and needs no re-grant —
-  // the whole reason for the switch. The service worker owns the write.
-  const mirrorWorkspaceToFolder = useCallback(async () => {
-    if (!diskMirrorEnabled || !activeProjectId || documents.length === 0) return;
+  // ──────── Export the active workspace to a folder (on demand) ────────
+  // Documents already live in the browser (IndexedDB) — the source of truth.
+  // This is the ONLY disk write, and only when the user clicks Export: a
+  // one-shot File System Access grant used inside the click, so there is no
+  // stored handle to expire and no download. Research-source scrapes are
+  // excluded (the report + consolidated list are kept).
+  const exportWorkspaceToFolder = async () => {
+    // @ts-ignore — showDirectoryPicker isn't in older TS lib DOM defs
+    if (typeof window.showDirectoryPicker !== 'function') {
+      showToast('error', 'This browser can\'t open a folder picker — use a Chromium browser.');
+      return;
+    }
     const project = projects.find(p => p.id === activeProjectId);
     const files = documents
-      // Machine-gathered research sources stay in the library (citations
-      // resolve against them) but do NOT flood the folder — a deep run
-      // captures 30-150. The report + consolidated list ARE mirrored.
       .filter(doc => doc.content && !contentHasTag(doc.content, 'research-source'))
       .map(doc => ({ name: doc.title, content: doc.content }));
-    if (files.length === 0) return;
+    if (files.length === 0) { showToast('error', 'Nothing to export in this workspace yet.'); return; }
     try {
-      await chrome.runtime.sendMessage({
-        action: 'MIRROR_FILES',
-        folder: LOCAL_FOLDER_NAME,
-        workspace: project?.title || 'workspace',
-        files
-      });
-    } catch (err) {
-      console.warn('[mirror] send failed:', err);
+      // requestPermission is implicit in showDirectoryPicker; keep it the FIRST
+      // await so Chrome still sees the click's user activation.
+      // @ts-ignore
+      const dir = await window.showDirectoryPicker({ mode: 'readwrite' });
+      const wsName = sanitizeSegment(project?.title || 'workspace');
+      const wsDir = await dir.getDirectoryHandle(wsName, { create: true });
+      let written = 0;
+      for (const f of files) {
+        const fileName = `${sanitizeSegment(f.name) || 'untitled'}.md`;
+        try {
+          const fh = await wsDir.getFileHandle(fileName, { create: true });
+          const w = await fh.createWritable();
+          await w.write(f.content);
+          await w.close();
+          written++;
+        } catch (e) {
+          console.warn(`[export] failed ${fileName}:`, e);
+        }
+      }
+      showToast('success', `Exported ${written} file(s) to ${dir.name}/${wsName}/`);
+    } catch (err: any) {
+      if (err?.name !== 'AbortError') {
+        console.error('[export] failed:', err);
+        showToast('error', `Export failed — ${err?.message || 'check the folder permissions'}`);
+      }
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [documents, activeProjectId, projects, diskMirrorEnabled]);
-
-  // Auto-mirror whenever the workspace's documents change; also invoked
-  // directly after a folder (re-)grant so the backfill doesn't wait for the
-  // next document change.
-  useEffect(() => {
-    mirrorWorkspaceToFolder().catch(() => {});
-  }, [mirrorWorkspaceToFolder]);
+  };
 
   // ──────── Async Import Progress (PDF + Images) ────────
   useEffect(() => {
@@ -691,33 +700,6 @@ export default function App() {
     setTimeout(() => setToast(null), 4000);
   };
 
-  // Toggle the disk mirror on/off (persisted). When turned on, backfill now.
-  const toggleDiskMirror = (on: boolean) => {
-    setDiskMirrorEnabled(on);
-    chrome.storage.local.set({ diskMirrorEnabled: on });
-    if (on) mirrorWorkspaceToFolder().catch(() => {});
-  };
-
-  // Single-doc mirror (used right after a capture/import) — same never-expiring
-  // chrome.downloads path as the bulk mirror.
-  const writeDocToLocalFolder = async (doc: LocalDocument) => {
-    if (!diskMirrorEnabled) return;
-    // Scraped research sources never land on disk (report + list still do).
-    if (doc.content && contentHasTag(doc.content, 'research-source')) return;
-    if (!doc.content) return;
-    const project = projects.find(p => p.id === activeProjectId);
-    try {
-      await chrome.runtime.sendMessage({
-        action: 'MIRROR_FILES',
-        folder: LOCAL_FOLDER_NAME,
-        workspace: project?.title || 'workspace',
-        files: [{ name: doc.title, content: doc.content }]
-      });
-    } catch (err) {
-      console.warn('[mirror] single-doc send failed:', err);
-    }
-  };
-
   const capture = async () => {
     if (!tabInfo) { showToast('error', 'Navigate to a web page first'); return; }
     setCapturing(true);
@@ -729,10 +711,6 @@ export default function App() {
       const where = res.linkedTo ? 'workspace' : 'library';
       showToast('success', `✓ Captured to ${where}: "${(res.title as string || '').slice(0, 40)}…" (${res.chunkCount} chunks)`);
       if (activeProjectId) loadDocuments(activeProjectId);
-      const docRes = await msg('GET_DOCUMENT', { docId: res.docId });
-      if (docRes.success && docRes.document) {
-        writeDocToLocalFolder(docRes.document as LocalDocument);
-      }
     } else {
       showToast('error', (res.error as string) || 'Capture failed');
     }
@@ -1403,12 +1381,6 @@ export default function App() {
     }));
     showToast('success', 'Deep research complete!');
     loadDocuments(activeProjectId);
-    const docsRes = await msg('LIST_DOCUMENTS', { projectId: activeProjectId });
-    if (docsRes.success && Array.isArray(docsRes.documents)) {
-      for (const d of docsRes.documents) {
-        await writeDocToLocalFolder(d as LocalDocument);
-      }
-    }
   };
 
   const cancelTask = async () => {
@@ -1649,9 +1621,7 @@ export default function App() {
               logout={logout}
               folderName={folderName}
               setFolderName={setFolderName}
-              diskMirrorEnabled={diskMirrorEnabled}
-              setDiskMirrorEnabled={toggleDiskMirror}
-              localFolderName={LOCAL_FOLDER_NAME}
+              exportWorkspace={exportWorkspaceToFolder}
               autoLinkCaptures={autoLinkCaptures}
               setAutoLinkCaptures={(v) => {
                 setAutoLinkCaptures(v);
