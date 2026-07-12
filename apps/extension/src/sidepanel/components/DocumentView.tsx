@@ -149,6 +149,11 @@ export const DocumentView: React.FC<DocumentViewProps> = ({
     }
   }, [highlight]);
 
+  // Declared BEFORE the `!document` early return: hooks must run on every
+  // render regardless of branch, else opening a doc (null→present) changes
+  // the hook count → React #310 → white panel.
+  const [showRaw, setShowRaw] = React.useState(false);
+
   if (!document) {
     return (
       <div className="flex-1 flex flex-col p-4">
@@ -163,7 +168,6 @@ export const DocumentView: React.FC<DocumentViewProps> = ({
 
   const hostname = document.url ? safeHostname(document.url) : null;
   const content = document.content || '*No content available for this document.*';
-  const [showRaw, setShowRaw] = React.useState(false);
 
   // Parse frontmatter at top if present (tolerate BOM / leading whitespace)
   let fmFields: Array<[string, string]> = [];

@@ -292,9 +292,47 @@ function normalizeLatexDelimiters(text: string): string {
 const MessageBody: React.FC<MessageBodyProps> = React.memo(({ text: rawText, compact, streaming, resolveCitations, onOpenDocument, onOpenExternalLink }) => {
   const [citations, setCitations] = useState<Map<string, ResolvedCitation>>(new Map());
 
-  // F2: while streaming, render as plain text — no regex passes, no markdown parse.
-  // The parser is O(N) in text length and re-runs on every delta; skipping it while
-  // tokens are still arriving is the single biggest streaming-perf win.
+  // HOOK-ORDER RULE: every hook below runs on EVERY render, streaming or not.
+  // A message flips streaming:true→false when it finalizes; if a hook sat
+  // behind that branch the hook count would change mid-life → React #310
+  // ("rendered more hooks than during the previous render") → white panel.
+  // So the streaming FAST-PATH lives INSIDE each hook (skip the regex work),
+  // and the `streaming` branch gates only the returned JSX — never a hook.
+
+  // F2: while streaming, skip the O(N) regex/markdown passes — they re-run on
+  // every delta. Pass rawText straight through; parse only once it settles.
+  const text = useMemo(
+    () => streaming ? rawText : normalizeLatexDelimiters(normalizeCitations(rawText)),
+    [rawText, streaming]
+  );
+
+  // Number the anchors in order of first appearance (skipped while streaming).
+  const anchorOrder = useMemo(() => {
+    if (streaming) return [] as string[];
+    const order: string[] = [];
+    const regex = new RegExp(CITATION_REGEX.source, 'g');
+    let m: RegExpExecArray | null;
+    while ((m = regex.exec(text)) !== null) {
+      if (!order.includes(m[1])) order.push(m[1]);
+    }
+    return order;
+  }, [text, streaming]);
+
+  useEffect(() => {
+    let alive = true;
+    if (anchorOrder.length === 0) return undefined;  // also the streaming case
+    // Debounced — resolve once the message settles, not per token.
+    const timer = setTimeout(() => {
+      resolveCitations(text).then(list => {
+        if (!alive) return;
+        setCitations(new Map(list.map(c => [c.anchorId, c])));
+      }).catch(() => {});
+    }, 300);
+    return () => { alive = false; clearTimeout(timer); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [text, anchorOrder.length]);
+
+  // Streaming fast-path render — AFTER all hooks, so hook order stays stable.
   if (streaming) {
     return (
       <div>
@@ -305,35 +343,6 @@ const MessageBody: React.FC<MessageBodyProps> = React.memo(({ text: rawText, com
       </div>
     );
   }
-
-  // F7: memoize the regex passes so the fully-rendered path doesn't rescan on every parent re-render.
-  const text = useMemo(() => normalizeLatexDelimiters(normalizeCitations(rawText)), [rawText]);
-
-  // Number the anchors in order of first appearance
-  const anchorOrder = useMemo(() => {
-    const order: string[] = [];
-    const regex = new RegExp(CITATION_REGEX.source, 'g');
-    let m: RegExpExecArray | null;
-    while ((m = regex.exec(text)) !== null) {
-      if (!order.includes(m[1])) order.push(m[1]);
-    }
-    return order;
-  }, [text]);
-
-  useEffect(() => {
-    let alive = true;
-    if (anchorOrder.length === 0) return undefined;
-    // Debounced — during streaming `text` changes per token; only resolve
-    // once the message settles instead of hammering the service worker.
-    const timer = setTimeout(() => {
-      resolveCitations(text).then(list => {
-        if (!alive) return;
-        setCitations(new Map(list.map(c => [c.anchorId, c])));
-      }).catch(() => {});
-    }, 300);
-    return () => { alive = false; clearTimeout(timer); };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [text]);
 
   // Replace [anchor] markers with markdown links our renderer turns into chips
   const processed = text.replace(
