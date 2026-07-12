@@ -207,4 +207,49 @@
     padding-bottom: 0.25rem;
     border-bottom: 1px solid hsl(var(--rule) / 0.4);
   }
+
+  /* Lists: branded, denser, cleaner. The typography plugin's default markers
+     are a faint gray and the rows sit loose — tighten them and color the
+     bullets/numbers with the magpie teal so lists read as intentional. */
+  .prose {
+    --tw-prose-bullets: hsl(var(--primary));
+    --tw-prose-counters: hsl(var(--primary));
+  }
+  .dark .prose,
+  .prose.dark\:prose-invert {
+    --tw-prose-invert-bullets: hsl(var(--primary));
+    --tw-prose-invert-counters: hsl(var(--primary));
+  }
+  .prose :is(ul, ol) {
+    margin-top: 0.45em;
+    margin-bottom: 0.45em;
+    padding-left: 1.35em;
+  }
+  .prose li {
+    margin-top: 0.18em;
+    margin-bottom: 0.18em;
+    padding-left: 0.15em;
+  }
+  .prose li::marker {
+    font-weight: 600;   /* firmer bullet/number */
+  }
+  /* Tight paragraphs inside list items (multi-line bullets don't balloon). */
+  .prose li > p {
+    margin-top: 0.2em;
+    margin-bottom: 0.2em;
+  }
+  /* Task lists: drop the redundant bullet next to the checkbox, align, and
+     tint the box with the brand color. */
+  .prose .contains-task-list {
+    list-style: none;
+    padding-left: 0.2em;
+  }
+  .prose .contains-task-list li {
+    padding-left: 0;
+  }
+  .prose input[type="checkbox"] {
+    accent-color: hsl(var(--primary));
+    margin-right: 0.5em;
+    transform: translateY(1px);
+  }
 }
