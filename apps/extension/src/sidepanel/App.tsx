@@ -109,9 +109,6 @@ export default function App() {
   // Live research synthesis: report tokens stream in during [SYNTHESIZING] and
   // render as markdown live. Which chat the report belongs to (projectId→chatId,
   // set at start), a per-project text buffer, and one throttle timer.
-  const researchChatRef = useRef<Record<string, string>>({});
-  const researchDeltaBufferRef = useRef<Record<string, string>>({});
-  const researchDeltaTimerRef = useRef<number | null>(null);
   // Chat questions queued behind an active research run (per chat), drained in
   // order when the run finishes. A ref so the once-registered DONE listener
   // always calls the freshest drain closure.
@@ -318,37 +315,11 @@ export default function App() {
 
     const messageListener = (m: any) => {
       if (m.action === 'DEEP_RESEARCH_DELTA') {
-        // Stream the report into its chat as ONE renderLive assistant message,
-        // throttled (~150ms) so live markdown parsing stays cheap.
-        const chatId = researchChatRef.current[m.projectId];
-        if (!chatId) return;
-        researchDeltaBufferRef.current[m.projectId] =
-          (researchDeltaBufferRef.current[m.projectId] || '') + (m.delta || '');
-        if (!researchDeltaTimerRef.current) {
-          researchDeltaTimerRef.current = window.setTimeout(() => {
-            researchDeltaTimerRef.current = null;
-            const pending = researchDeltaBufferRef.current;
-            researchDeltaBufferRef.current = {};
-            setMessages(prev => {
-              const next = { ...prev };
-              for (const [pid, chunk] of Object.entries(pending)) {
-                const cid = researchChatRef.current[pid];
-                if (!cid || !chunk) continue;
-                const id = `research-live-${pid}`;
-                const list = next[cid] || [];
-                const idx = list.findIndex(x => x.id === id);
-                if (idx === -1) {
-                  next[cid] = [...list, { id, role: 'assistant' as const, text: chunk, streaming: true, renderLive: true }];
-                } else {
-                  const copy = [...list];
-                  copy[idx] = { ...copy[idx], text: copy[idx].text + chunk };
-                  next[cid] = copy;
-                }
-              }
-              return next;
-            });
-          }, 150);
-        }
+        // Report tokens are intentionally NOT rendered live. Re-parsing the
+        // whole growing markdown report every flush saturated the main thread
+        // (frozen caret / unresponsive panel, worst while a second session was
+        // open). The field log shows synthesis progress; the fully-rendered
+        // report lands via loadChatHistory on DONE. Deltas are dropped here.
         return;
       }
       if (m.action === 'DEEP_RESEARCH_LOG') {
@@ -388,25 +359,8 @@ export default function App() {
         if (now - (doneGuardRef.current[m.projectId] || 0) < 4000) return;
         doneGuardRef.current[m.projectId] = now;
 
-        // Stop routing live report deltas for this run.
-        const liveCid = m.chatId || researchChatRef.current[m.projectId];
-        delete researchChatRef.current[m.projectId];
-        delete researchDeltaBufferRef.current[m.projectId];
-
-        if (m.chatId) {
-          // Persisted report (rendered) replaces the temp live message.
-          loadChatHistory(m.chatId);
-        } else if (liveCid) {
-          // Cancel path has no chat to reload — just settle the partial report.
-          setMessages(prev => {
-            const list = prev[liveCid] || [];
-            const idx = list.findIndex(x => x.id === `research-live-${m.projectId}`);
-            if (idx === -1) return prev;
-            const copy = [...list];
-            copy[idx] = { ...copy[idx], streaming: false };
-            return { ...prev, [liveCid]: copy };
-          });
-        }
+        // The persisted, fully-rendered report lands here (not streamed live).
+        if (m.chatId) loadChatHistory(m.chatId);
         loadDocuments(m.projectId);
         const line = m.cancelled
           ? '[STOPPED] Research cancelled.'
@@ -1507,8 +1461,6 @@ export default function App() {
 
     updateMessage(activeChatId, planMsgId, m => ({ ...m, plan: { ...m.plan!, status: 'started' } }));
     researchStartedAtRef.current[activeProjectId] = Date.now();
-    // Route this run's live report deltas to this chat.
-    researchChatRef.current[activeProjectId] = activeChatId;
     setResearching(prev => ({ ...prev, [activeProjectId]: true }));
     setResearchLogs(prev => ({ ...prev, [activeProjectId]: [] }));
     maybeAutoNameProject(plan.effectiveTopic).catch(() => {});
