@@ -1003,7 +1003,13 @@ export default function App() {
     const finish = () => {
       if (finished) return;
       finished = true;
+      // ALWAYS clear the streaming flag here — a port that disconnects without
+      // a DONE (MV3 worker evicted mid-answer, network drop) would otherwise
+      // leave the message frozen with its blinking cursor forever. Idempotent:
+      // DONE/ERROR already finalized, this is a no-op then.
+      finalizeStreamingMessage(currentChatId, assistantId);
       setGenerating(prev => ({ ...prev, [currentChatId]: false }));
+      setThinkingStatus(prev => ({ ...prev, [currentChatId]: '' }));
       if (chatPortRef.current === port) chatPortRef.current = null;
     };
 
@@ -1229,6 +1235,9 @@ export default function App() {
     const finish = () => {
       if (finished) return;
       finished = true;
+      // See the other stream handler: a disconnect without DONE must still
+      // clear the streaming flag or the blinking cursor sticks forever.
+      finalizeStreamingMessage(currentChatId, assistantId);
       setGenerating(prev => ({ ...prev, [currentChatId]: false }));
       setThinkingStatus(prev => ({ ...prev, [currentChatId]: '' }));
       if (chatPortRef.current === port) chatPortRef.current = null;

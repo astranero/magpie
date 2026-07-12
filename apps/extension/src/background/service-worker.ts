@@ -1642,6 +1642,13 @@ chrome.runtime.onConnect.addListener((port) => {
     const localController = controller;
     let full = '';
 
+    // Keep the MV3 worker alive for the whole turn. Context assembly (intent
+    // call, retrieval, link scrapes) and a slow provider's time-to-first-token
+    // are silent gaps; a >30s gap with no chrome API activity evicts the worker
+    // mid-answer → dropped port → lost/incomplete response. A periodic API call
+    // resets the idle timer. (Same guard the research run uses.)
+    const keepAlive = setInterval(() => { chrome.runtime.getPlatformInfo?.().catch(() => {}); }, 20000);
+
     try {
       const pageCtx = req.includePageContext ? await getPageContext().catch(() => null) : null;
       let { systemPrompt, formattedHistory, linkedPages } = await buildChatRequest(
@@ -1701,6 +1708,7 @@ chrome.runtime.onConnect.addListener((port) => {
         safePost({ type: 'ERROR', error: String(err instanceof Error ? err.message : err) });
       }
     } finally {
+      clearInterval(keepAlive);
       if (abortControllers.get(chatId) === localController) abortControllers.delete(chatId);
     }
   });
