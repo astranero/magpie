@@ -205,7 +205,7 @@ const CollapsibleMessage: React.FC<CollapsibleMessageProps> = ({ text, streaming
                      hover:from-card/90 transition-colors cursor-pointer w-full"
         >
           <span className="flex items-center gap-1 rounded-full bg-card border border-border
-                           px-2.5 py-0.5 text-[10px] font-bold font-mono uppercase tracking-widest
+                           px-2.5 py-0.5 text-[11px] font-medium
                            text-muted-foreground shadow-sm">
             <ChevronDown size={10} />
             {wordCount} words
@@ -220,7 +220,7 @@ const CollapsibleMessage: React.FC<CollapsibleMessageProps> = ({ text, streaming
           onClick={() => setExpanded(false)}
           aria-label="Collapse message"
           className="mt-2 flex items-center gap-1 rounded-full border border-border
-                     px-2.5 py-0.5 text-[10px] font-bold font-mono uppercase tracking-widest
+                     px-2.5 py-0.5 text-[11px] font-medium
                      text-muted-foreground hover:text-foreground hover:border-primary/50 transition-colors"
         >
           <ChevronUp size={10} />
@@ -408,7 +408,7 @@ const MessageBody: React.FC<MessageBodyProps> = React.memo(({ text: rawText, com
         return (
           <div className="mt-3 pt-2 border-t border-border/60">
             {/* Sources section label — text-xs floor for legibility */}
-            <div className="text-xs font-mono font-bold uppercase tracking-widest text-muted-foreground mb-1.5">Sources</div>
+            <div className="text-xs font-medium text-muted-foreground mb-1.5">Sources</div>
             <div className="space-y-2">
               {groups.map(group => (
                 <div key={group.docId}>
@@ -663,7 +663,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
                 <div className="w-1.5 h-1.5 rounded-full bg-primary animate-pulse" style={{ animationDelay: '150ms' }} />
                 <div className="w-1.5 h-1.5 rounded-full bg-primary animate-pulse" style={{ animationDelay: '300ms' }} />
               </div>
-              <span className="text-[10px] text-muted-foreground font-bold font-mono uppercase tracking-widest" aria-live="polite">
+              <span className="text-xs text-muted-foreground font-medium" aria-live="polite">
                 THINKING...
               </span>
             </div>
@@ -676,7 +676,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
             <div className="w-full max-w-[95%] rounded-xl ink-panel shadow-card overflow-hidden animate-in fade-in motion-reduce:animate-none">
               <div className="flex items-center gap-2 px-3.5 py-2 border-b border-white/10">
                 <Loader2 size={12} className="animate-spin motion-reduce:animate-none text-highlight shrink-0" aria-hidden="true" />
-                <span className="text-[10px] font-bold font-mono uppercase tracking-widest opacity-80 flex-1">
+                <span className="text-xs font-medium opacity-80 flex-1">
                   Field log — chat stays open
                 </span>
                 <span className="text-[10px] font-mono opacity-50 tabular-nums">
@@ -685,7 +685,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
                 <button
                   type="button"
                   onClick={cancelTask}
-                  className="text-[10px] font-bold font-mono uppercase tracking-widest opacity-70 border border-current rounded-sm px-1.5 py-0.5 hover:opacity-100 hover:text-red-300 transition-opacity"
+                  className="text-[11px] font-medium opacity-70 border border-current rounded-md px-1.5 py-0.5 hover:opacity-100 hover:text-red-300 transition-opacity"
                   aria-label="Stop research"
                 >
                   Stop
@@ -772,7 +772,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
               <Button
                 variant="ghost"
                 size="icon"
-                className="h-8 w-8 rounded-md text-destructive hover:text-destructive border-2 border-transparent hover:border-destructive hover:bg-destructive/10"
+                className="h-8 w-8 rounded-lg text-destructive hover:text-destructive hover:bg-destructive/10"
                 onClick={cancelTask}
                 title="Stop generation"
                 aria-label="Stop generation"
@@ -783,7 +783,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
               <Button
                 variant="ghost"
                 size="icon"
-                className={`h-8 w-8 rounded-md transition-colors border-2 ${input.trim() ? 'bg-primary text-primary-foreground border-primary hover:bg-primary/90' : 'text-muted-foreground border-transparent'}`}
+                className={`h-8 w-8 rounded-lg transition-colors ${input.trim() ? 'bg-primary text-primary-foreground hover:bg-primary/90' : 'text-muted-foreground'}`}
                 onClick={send}
                 disabled={!input.trim()}
                 title="Send message"

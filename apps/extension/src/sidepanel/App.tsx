@@ -1619,7 +1619,7 @@ export default function App() {
       {/* ── Main Content Area ── */}
       <main className="flex-1 flex flex-col overflow-hidden relative bg-background border-b border-border">
         {toast && (
-          <div className="absolute top-4 left-1/2 -translate-x-1/2 z-50 px-4 py-2 bg-primary text-primary-foreground text-xs font-bold uppercase tracking-widest animate-in slide-in-from-top-2 border-2 border-primary shadow-card">
+          <div className="absolute top-4 left-1/2 -translate-x-1/2 z-50 px-4 py-2 bg-primary text-primary-foreground text-xs font-medium rounded-lg animate-in slide-in-from-top-2 shadow-card">
             {toast.text}
           </div>
         )}
@@ -1634,8 +1634,8 @@ export default function App() {
                 <FileText size={14} />
               </div>
             )}
-            <div className="text-sm truncate font-medium flex-1 text-foreground font-mono">{tabInfo.title}</div>
-            <Button size="sm" onClick={capture} disabled={capturing} variant="default" className="shrink-0 h-8 text-xs rounded-md border-2 border-primary uppercase font-bold tracking-wider">
+            <div className="text-sm truncate font-medium flex-1 text-foreground">{tabInfo.title}</div>
+            <Button size="sm" onClick={capture} disabled={capturing} variant="default" className="shrink-0 h-8 text-xs rounded-lg font-semibold">
               {capturing ? 'CAPTURING...' : 'CAPTURE'}
             </Button>
           </div>

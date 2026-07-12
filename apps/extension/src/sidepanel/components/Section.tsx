@@ -37,8 +37,8 @@ export const Section: React.FC<{
         aria-expanded={open}
       >
         <div>
-          <h3 className="font-bold font-mono tracking-widest uppercase text-sm">{title}</h3>
-          {subtitle && <p className="text-xs text-muted-foreground mt-1 font-mono uppercase">{subtitle}</p>}
+          <h3 className="font-semibold text-sm">{title}</h3>
+          {subtitle && <p className="text-xs text-muted-foreground mt-1">{subtitle}</p>}
         </div>
         <ChevronDown size={16} className={`shrink-0 transition-transform ${open ? '' : '-rotate-90'}`} />
       </button>

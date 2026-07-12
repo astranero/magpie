@@ -152,7 +152,7 @@ export const DocumentView: React.FC<DocumentViewProps> = ({
   if (!document) {
     return (
       <div className="flex-1 flex flex-col p-4">
-        <Button variant="outline" className="w-fit mb-4 border-2" onClick={onBack}>
+        <Button variant="outline" className="w-fit mb-4" onClick={onBack}>
           <ArrowLeft className="w-4 h-4 mr-2" />
           Back
         </Button>
@@ -201,7 +201,7 @@ export const DocumentView: React.FC<DocumentViewProps> = ({
   const metadataCard = fmFields.length > 0 && (
     <div className="card-rule mb-5 rounded-lg border border-border bg-card shadow-card px-4 py-3 pb-4">
       <div className="flex items-baseline justify-between mb-2.5">
-        <div className="text-[10px] font-mono font-bold uppercase tracking-widest text-muted-foreground">Metadata</div>
+        <div className="text-[11px] font-medium text-muted-foreground">Metadata</div>
         <button
           type="button"
           onClick={() => setShowRaw(!showRaw)}
@@ -214,7 +214,7 @@ export const DocumentView: React.FC<DocumentViewProps> = ({
       <dl className="grid grid-cols-[5.5rem_1fr] gap-x-3 gap-y-1.5 text-xs font-mono items-baseline">
         {cardFields.map(([k, v]) => (
           <React.Fragment key={k}>
-            <dt className="text-muted-foreground uppercase text-[10px] tracking-widest truncate">{k}</dt>
+            <dt className="text-muted-foreground text-[10px] truncate">{k}</dt>
             <dd className="min-w-0">
               {/^https?:\/\//.test(v)
                 ? <a href={v} target="_blank" rel="noreferrer" className="text-primary hover:underline break-all">{v}</a>
@@ -224,7 +224,7 @@ export const DocumentView: React.FC<DocumentViewProps> = ({
         ))}
         {fmTags.length > 0 && (
           <>
-            <dt className="text-muted-foreground uppercase text-[10px] tracking-widest">tags</dt>
+            <dt className="text-muted-foreground text-[10px]">tags</dt>
             <dd className="min-w-0 flex flex-wrap gap-1">
               {fmTags.map(t => (
                 <span key={t} className="px-1.5 py-0.5 rounded-full border border-primary/30 bg-primary/10 text-primary text-[10px]">
@@ -264,9 +264,9 @@ export const DocumentView: React.FC<DocumentViewProps> = ({
         <>
           <div
             ref={highlightRef}
-            className="border-2 border-primary bg-primary/5 shadow-card p-3 mb-4"
+            className="rounded-lg border border-primary/50 bg-primary/5 shadow-card p-3 mb-4"
           >
-            <div className="text-xs font-mono font-bold uppercase tracking-widest text-primary mb-2 pb-1.5 border-b-2 border-primary/20">
+            <div className="text-xs font-medium text-primary mb-2 pb-1.5 border-b-2 border-primary/20">
               [CITED] Position not found — doc may have changed
             </div>
             <ReactMarkdown
@@ -312,9 +312,9 @@ export const DocumentView: React.FC<DocumentViewProps> = ({
         )}
         <div
           ref={highlightRef}
-          className="border-2 border-primary bg-primary/5 shadow-card p-3 my-2 transition-all duration-500"
+          className="rounded-lg border border-primary/50 bg-primary/5 shadow-card p-3 my-2 transition-all duration-500"
         >
-          <div className="text-xs font-mono font-bold uppercase tracking-widest text-primary mb-2 pb-1.5 border-b-2 border-primary/20">
+          <div className="text-xs font-medium text-primary mb-2 pb-1.5 border-b-2 border-primary/20">
             [CITED]
           </div>
           <ReactMarkdown
@@ -344,7 +344,7 @@ export const DocumentView: React.FC<DocumentViewProps> = ({
     <div className="flex-1 flex flex-col overflow-hidden bg-background">
       {/* Header */}
       <div className="flex items-center gap-2 p-4 border-b border-border bg-card shrink-0">
-        <Button variant="outline" size="sm" onClick={onBack} className="border-2 border-primary">
+        <Button variant="outline" size="sm" onClick={onBack} className="border border-primary/50 rounded-lg">
           <ArrowLeft className="w-4 h-4 mr-2" />
           Back
         </Button>
@@ -352,7 +352,7 @@ export const DocumentView: React.FC<DocumentViewProps> = ({
           <Button
             variant="outline"
             size="sm"
-            className="border-2 shrink-0 font-mono text-xs"
+            className="shrink-0 font-mono text-xs rounded-lg"
             title="Copy BibTeX citation to clipboard"
             onClick={() => {
               navigator.clipboard.writeText(document.bibtex!).then(
@@ -374,7 +374,7 @@ export const DocumentView: React.FC<DocumentViewProps> = ({
             {hostname ? (
               <span className="truncate">{hostname}</span>
             ) : (
-              <span className="truncate font-mono uppercase tracking-widest text-[10px]">Local</span>
+              <span className="truncate font-mono text-[10px]">Local</span>
             )}
             <span>•</span>
             <span>{timeAgo(document.capturedAt)}</span>
@@ -385,7 +385,7 @@ export const DocumentView: React.FC<DocumentViewProps> = ({
             href={document.url}
             target="_blank"
             rel="noreferrer"
-            className="p-2 hover:bg-muted transition-colors rounded-md border-2 border-transparent hover:border-primary"
+            className="p-2 hover:bg-muted transition-colors rounded-lg border-transparent hover:border-primary"
             title="Open original URL"
           >
             <ExternalLink className="w-5 h-5 text-muted-foreground" />
@@ -395,7 +395,7 @@ export const DocumentView: React.FC<DocumentViewProps> = ({
 
       {/* Content */}
       <div ref={contentRef} className="flex-1 overflow-y-auto p-6 bg-background">
-        <div className="prose prose-sm dark:prose-invert max-w-none prose-img:rounded-md prose-img:border-2 prose-img:border-border prose-headings:font-bold prose-a:text-primary prose-pre:rounded-md">
+        <div className="prose prose-sm dark:prose-invert max-w-none prose-img:rounded-md prose-img:border prose-img:border-border prose-headings:font-bold prose-a:text-primary prose-pre:rounded-md">
            <>
              {metadataCard}
              {renderContent()}

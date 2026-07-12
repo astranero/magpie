@@ -126,7 +126,7 @@ export const LoreView: React.FC<LoreViewProps> = ({
         </div>
         {searchQuery.trim().length >= 3 && (
           <div className="mt-2 space-y-1">
-            <div className="text-[10px] font-mono font-bold uppercase tracking-widest text-muted-foreground">
+            <div className="text-[11px] font-medium text-muted-foreground">
               {searching ? 'Searching contents…' : `Content matches ${searchHits ? `(${searchHits.length})` : ''}`}
             </div>
             {!searching && searchHits && searchHits.length === 0 && (
@@ -161,13 +161,13 @@ export const LoreView: React.FC<LoreViewProps> = ({
             }
           }}
         >
-          <summary className="px-4 py-1.5 text-xs font-mono font-bold uppercase tracking-widest text-muted-foreground cursor-pointer select-none hover:text-foreground">
+          <summary className="px-4 py-1.5 text-xs font-medium text-muted-foreground cursor-pointer select-none hover:text-foreground">
             Import Tools
           </summary>
           <div className="flex gap-2 px-4 pb-2">
             <Button
               variant="outline"
-              className="flex-1 h-7 text-[10px] rounded-md border-2 font-mono font-bold uppercase tracking-widest"
+              className="flex-1 h-7 text-[10px] rounded-lg font-medium"
               onClick={importMarkdownFiles}
               disabled={importing}
               title="Import local .md files"
@@ -176,7 +176,7 @@ export const LoreView: React.FC<LoreViewProps> = ({
             </Button>
             <Button
               variant="outline"
-              className="flex-1 h-7 text-[10px] rounded-md border-2 font-mono font-bold uppercase tracking-widest"
+              className="flex-1 h-7 text-[10px] rounded-lg font-medium"
               onClick={importMarkdownFolder}
               disabled={importing}
               title="Import a folder of .md files — relative images are embedded"
@@ -185,7 +185,7 @@ export const LoreView: React.FC<LoreViewProps> = ({
             </Button>
             <Button
               variant="outline"
-              className="flex-1 h-7 text-[10px] rounded-md border-2 font-mono font-bold uppercase tracking-widest"
+              className="flex-1 h-7 text-[10px] rounded-lg font-medium"
               onClick={importPdfFiles}
               disabled={importing}
               title="Import PDFs — text extracted by code, scanned pages read by vision model"
@@ -194,7 +194,7 @@ export const LoreView: React.FC<LoreViewProps> = ({
             </Button>
             <Button
               variant="outline"
-              className="flex-1 h-7 text-[10px] rounded-md border-2 font-mono font-bold uppercase tracking-widest"
+              className="flex-1 h-7 text-[10px] rounded-lg font-medium"
               onClick={importImageFiles}
               disabled={importing}
               title="Import images — read into text with the vision model"
@@ -372,7 +372,7 @@ export const LoreView: React.FC<LoreViewProps> = ({
             {/* Machine-gathered research sources — compact, collapsed group */}
             {researchSourceDocs.length > 0 && (
               <details className="rounded-lg border border-border bg-card shadow-card overflow-hidden">
-                <summary className="card-rule-thin px-3.5 py-2 text-[10px] font-mono font-bold uppercase tracking-widest text-muted-foreground cursor-pointer select-none hover:text-foreground">
+                <summary className="card-rule-thin px-3.5 py-2 text-[11px] font-medium text-muted-foreground cursor-pointer select-none hover:text-foreground">
                   Research sources ({researchSourceDocs.length})
                 </summary>
                 <div className="p-1.5 space-y-0.5 max-h-72 overflow-y-auto no-scrollbar">

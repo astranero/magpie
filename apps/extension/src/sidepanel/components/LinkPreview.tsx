@@ -35,7 +35,7 @@ export const LinkPreview: React.FC<LinkPreviewProps> = ({ preview, onClose, onCa
       {/* Header — catalog card rule under the fetched page's identity */}
       <div className="card-rule-thin shrink-0 bg-card px-3.5 pt-2.5 pb-2">
         <div className="flex items-center gap-2">
-          <span className="text-[10px] font-bold font-mono uppercase tracking-widest text-muted-foreground flex-1">
+          <span className="text-xs font-medium text-muted-foreground flex-1">
             Link preview — not saved
           </span>
           <button
@@ -115,7 +115,7 @@ export const LinkPreview: React.FC<LinkPreviewProps> = ({ preview, onClose, onCa
       {!preview.loading && !preview.error && (
         <div className="shrink-0 border-t border-border bg-card px-3.5 py-2.5 flex gap-2">
           <Button
-            className="flex-1 h-8 text-[10px] font-bold font-mono uppercase tracking-widest"
+            className="flex-1 h-8 text-xs font-semibold rounded-lg"
             onClick={onCapture}
             disabled={preview.capturing || preview.captured}
           >
@@ -129,7 +129,7 @@ export const LinkPreview: React.FC<LinkPreviewProps> = ({ preview, onClose, onCa
           </Button>
           <Button
             variant="ghost"
-            className="h-8 text-[10px] font-mono border border-border uppercase tracking-widest text-muted-foreground"
+            className="h-8 text-xs font-medium rounded-lg text-muted-foreground hover:text-foreground"
             onClick={onClose}
           >
             Close
