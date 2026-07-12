@@ -103,4 +103,23 @@ describe('gatherWebSnippets (chat web fallback)', () => {
     expect(sources.some(s => s.title.includes('DocsMCP'))).toBe(true);
     expect(context).toContain('central twist');
   });
+
+  it('honors the deadline and returns fast when fetches hang', async () => {
+    // Every fetch would take 5s; the deadline must abort them well before that
+    // so a chat turn never sits "Searching the web…" for a minute (the freeze).
+    (globalThis as any).fetch = vi.fn((_url: string, init?: any) => new Promise((resolve, reject) => {
+      const s = init?.signal;
+      if (s?.aborted) return reject(new Error('AbortError'));
+      const t = setTimeout(() => resolve({ ok: true, headers: { get: () => 'text/html' }, text: async () => '<html>slow</html>', url: _url } as any), 5000);
+      s?.addEventListener('abort', () => { clearTimeout(t); reject(new Error('AbortError')); }, { once: true });
+    }));
+
+    const start = Date.now();
+    const { context, sources } = await gatherWebSnippets('slow query', { deadlineMs: 100 });
+    const elapsed = Date.now() - start;
+
+    expect(elapsed).toBeLessThan(1500);
+    expect(context).toBe('');
+    expect(sources).toEqual([]);
+  });
 });

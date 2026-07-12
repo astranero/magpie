@@ -187,7 +187,13 @@ export async function searchSessionChunks(
         chunk,
         score: rerankRes.scores[idx] ?? 0
       }));
-      return gateRerankedChunks(scored, limit);
+      const selected = gateRerankedChunks(scored, limit);
+      // Tag each survivor with its rerank score so callers can judge
+      // confidence (e.g. chat's web fallback fires when the best match is only
+      // borderline noise). Additive field — chunk shape is otherwise unchanged.
+      const scoreOf = new Map(scored.map(s => [s.chunk, s.score]));
+      for (const c of selected) (c as any).rerankScore = scoreOf.get(c);
+      return selected;
     }
   } catch (e) {
     console.warn('Local reranking failed, returning candidate chunks directly', e);

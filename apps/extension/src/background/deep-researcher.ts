@@ -393,20 +393,32 @@ export async function scrapeUrl(url: string, signal?: AbortSignal): Promise<Pars
  */
 export async function gatherWebSnippets(
   query: string,
-  opts: { signal?: AbortSignal; onStatus?: (s: string) => void } = {}
+  opts: { signal?: AbortSignal; onStatus?: (s: string) => void; deadlineMs?: number } = {}
 ): Promise<{ context: string; sources: { title: string; url: string }[] }> {
-  const { signal, onStatus } = opts;
-  const MAX_FETCH = 3;        // top results to actually scrape
+  const { signal, onStatus, deadlineMs = 10000 } = opts;
+  const MAX_FETCH = 2;        // top results to actually scrape (chat wants speed)
   const PER_DOC_CHARS = 1500; // excerpt cap per source — enough to answer, cheap to send
   const blocks: string[] = [];
   const sources: { title: string; url: string }[] = [];
 
+  // HARD DEADLINE — this runs on a chat turn's critical path. Jina/DDG scrapes
+  // can each burn 15-20s; without a ceiling the panel sits "Searching the web…"
+  // for a minute (looks frozen). One controller aborts every in-flight fetch at
+  // the deadline; it's also chained to the caller's signal (Stop / disconnect).
+  const ac = new AbortController();
+  const deadline = setTimeout(() => ac.abort(new Error('web-fallback deadline')), deadlineMs);
+  if (signal) {
+    if (signal.aborted) ac.abort();
+    else signal.addEventListener('abort', () => ac.abort(), { once: true });
+  }
+  const inner = ac.signal;
+  try {
   // 1) Web search → scrape the top few results in parallel.
   try {
-    const urls = (await performWebSearch(query, signal)).slice(0, MAX_FETCH);
+    const urls = (await performWebSearch(query, inner)).slice(0, MAX_FETCH);
     if (urls.length > 0) {
       onStatus?.('Reading web results…');
-      const parsed = await Promise.all(urls.map(u => scrapeUrl(u, signal).catch(() => null)));
+      const parsed = await Promise.all(urls.map(u => scrapeUrl(u, inner).catch(() => null)));
       urls.forEach((url, i) => {
         const p = parsed[i];
         if (!p || !p.markdown.trim()) return;
@@ -425,12 +437,12 @@ export async function gatherWebSnippets(
   try {
     const servers = (await getMcpServers()).filter(s => s.enabled);
     for (const server of servers) {
-      if (signal?.aborted) break;
+      if (inner.aborted) break;
       try {
         const conn = new McpConnection(server);
         const tools = (await conn.listTools()).filter(isSearchLikeTool).slice(0, 1);
         for (const tool of tools) {
-          if (signal?.aborted) break;
+          if (inner.aborted) break;
           onStatus?.(`Querying ${server.name}…`);
           const args = topicArgFor(tool);
           args[Object.keys(args)[0]] = query;
@@ -446,6 +458,9 @@ export async function gatherWebSnippets(
     }
   } catch (e) {
     console.warn('[chat web] MCP search failed', e);
+  }
+  } finally {
+    clearTimeout(deadline);
   }
 
   return { context: blocks.join('\n\n---\n\n'), sources };

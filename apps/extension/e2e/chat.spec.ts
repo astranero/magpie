@@ -76,7 +76,7 @@ async function configureMockProvider(page: import('@playwright/test').Page) {
     } else {
       stableSince = 0;
       await page.evaluate(async (base) => {
-        await (globalThis as any).chrome.storage.local.set({ customUrl: base, customModel: 'mock-model', customKey: '' });
+        await (globalThis as any).chrome.storage.local.set({ customUrl: base, customModel: 'mock-model', customKey: '', chatWebFallback: false });
       }, mock.url);
     }
     await page.waitForTimeout(200);

@@ -50,7 +50,10 @@ async function configureMockProvider(page: Page, url: string) {
       if (Date.now() - stableSince >= 800) return;
     } else {
       stableSince = 0;
-      await page.evaluate((u) => (globalThis as any).chrome.storage.local.set({ customUrl: u, customModel: 'mock-model', customKey: '' }), url);
+      // chatWebFallback:false — this spec tests streaming/render, not the web
+      // fallback; leaving it on makes an empty-workspace turn run a real ~10s
+      // web search first and blow the tight timeouts.
+      await page.evaluate((u) => (globalThis as any).chrome.storage.local.set({ customUrl: u, customModel: 'mock-model', customKey: '', chatWebFallback: false }), url);
     }
     await page.waitForTimeout(150);
   }

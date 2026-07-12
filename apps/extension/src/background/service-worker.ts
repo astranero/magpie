@@ -19,7 +19,7 @@ import { harvestReferences } from '../lib/reference-harvest';
 import { needsIntentResolution, formatHistoryForIntent, parseRepoUrl, selectTreePaths, formatTreeBlock, matchFilesInTree, isChitchat, RepoRef } from '../lib/query-intent';
 import { getResearchLimits } from '../lib/research-limits';
 import { looksLikeBuildLog, extractLogHighlights } from '../lib/log-highlights';
-import { addChunksToVectorStore, searchSessionChunks, resetSessionIndex, resetAllSessionIndexes } from '../lib/vector-store';
+import { addChunksToVectorStore, searchSessionChunks, resetSessionIndex, resetAllSessionIndexes, RERANK_MIN_SCORE } from '../lib/vector-store';
 import { replaceChunksForDoc } from '../lib/db';
 import { pdfUrlToBody, pdfOpfsToBody, ensureOffscreen as ensureOffscreenDoc } from '../lib/pdf-parser';
 import { setEnsureOffscreen, sendToOffscreen } from '../lib/offscreen-client';
@@ -1210,7 +1210,19 @@ async function buildChatRequest(chatId: string, projectId: string, prompt: strin
   // Web-search fallback sources (below) surface as clickable footer links.
   let webSources: Array<{ title: string; url: string }> = [];
 
-  if (relevantChunks.length > 0) {
+  // Confidence gate: retrieval's keyword fallback almost always returns SOME
+  // chunk, so "length > 0" is a poor "we have an answer" signal — a question
+  // like "weather tomorrow" pulls borderline noise and then trips the citation
+  // refusal instead of searching the web. Only treat the workspace as having
+  // the answer when the best chunk cleared the rerank relevance gate. When
+  // rerank scores are absent (reranker unavailable) we don't second-guess.
+  const rerankScores = relevantChunks
+    .map(c => (c as any).rerankScore)
+    .filter((s: unknown): s is number => typeof s === 'number');
+  const confidentMatch = relevantChunks.length > 0 &&
+    (rerankScores.length === 0 || Math.max(...rerankScores) > RERANK_MIN_SCORE);
+
+  if (confidentMatch) {
     // Build citation-anchored context (generous — favor fuller grounding over
     // "I couldn't find it" cutoffs; only fires for library-source questions).
     const context = buildCitationContext(relevantChunks, docTitles, 32000);
@@ -1246,7 +1258,7 @@ async function buildChatRequest(chatId: string, projectId: string, prompt: strin
         RESPONSE_STYLE +
         `\n--- WEB RESULTS ---\n${web.context}\n--- END WEB RESULTS ---`;
     } else {
-      console.warn(`[RAG] No chunks found for project ${projectId} — falling back to general knowledge`);
+      console.warn(`[RAG] No confident workspace match for project ${projectId} — falling back to general knowledge`);
       // General conversation fallback
       systemPrompt = `You are a helpful AI assistant. No relevant documents were found in the user's research workspace for this question. ` +
         `Begin your answer with this exact italic line: *No matching sources in this workspace — answering from general knowledge.* ` +
