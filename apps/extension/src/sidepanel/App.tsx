@@ -123,6 +123,10 @@ export default function App() {
   // Local File System
   const [localFolderName, setLocalFolderName] = useState<string | null>(null);
   const [folderPermission, setFolderPermission] = useState<'granted' | 'expired' | null>(null);
+  // Live handle kept in a ref so the re-grant click can call
+  // requestPermission IMMEDIATELY — any await before it (like an IDB read)
+  // risks Chrome discarding the user activation and refusing the prompt.
+  const folderHandleRef = useRef<any>(null);
 
   // Chat
   const [messages, setMessages] = useState<Record<string, ChatMessage[]>>({});
@@ -296,6 +300,7 @@ export default function App() {
 
     get('ara-local-directory-handle').then(async handle => {
       if (handle && handle.name) {
+        folderHandleRef.current = handle;
         setLocalFolderName(handle.name);
         // Chrome silently expires File System Access permissions between
         // sessions — surface it, or "my folder stopped saving" is invisible.
@@ -737,9 +742,10 @@ export default function App() {
   const pickLocalFolder = async () => {
     try {
       // Expired permission on an existing handle: re-request on the SAME
-      // folder first (the button click provides the required user gesture) —
-      // no need to re-pick AI_AW in the picker every time Chrome forgets.
-      const existing = await get('ara-local-directory-handle').catch(() => null);
+      // folder first. The handle comes from a ref, NOT an awaited IDB read —
+      // requestPermission must be the first await in the click handler or
+      // Chrome may treat the user activation as spent and refuse the prompt.
+      const existing = folderHandleRef.current;
       if (existing && folderPermission === 'expired') {
         try {
           // @ts-ignore
@@ -751,7 +757,12 @@ export default function App() {
             mirrorWorkspaceToFolder().catch(() => {});
             return;
           }
-        } catch { /* fall through to the picker */ }
+          // 'prompt'/'denied' without a dialog: Chrome refused the request in
+          // this context — fall through to the picker (fresh activation path).
+          console.warn(`[local-folder] requestPermission returned "${perm}" — falling back to picker`);
+        } catch (e: any) {
+          console.warn('[local-folder] requestPermission failed — falling back to picker:', e?.message || e);
+        }
       }
 
       // Request readwrite HERE, inside the user gesture — later auto-saves
@@ -759,6 +770,7 @@ export default function App() {
       // @ts-ignore
       const handle = await window.showDirectoryPicker({ mode: 'readwrite' });
       await set('ara-local-directory-handle', handle);
+      folderHandleRef.current = handle;
       setLocalFolderName(handle.name);
       setFolderPermission('granted');
       permissionWarnedRef.current = false;
@@ -768,7 +780,7 @@ export default function App() {
       // AbortError = user dismissed the picker — not an error
       if (err?.name !== 'AbortError') {
         console.error('Failed to pick local folder:', err);
-        showToast('error', 'Could not access folder — check browser permissions');
+        showToast('error', `Could not access folder — ${err?.message || 'check browser permissions'}`);
       }
     }
   };
