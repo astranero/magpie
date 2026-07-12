@@ -29,6 +29,7 @@ interface SettingsViewProps {
   folderName: string;
   setFolderName: (val: string) => void;
   localFolderName: string | null;
+  folderPermission?: 'granted' | 'expired' | null;
   pickLocalFolder: () => void;
   autoLinkCaptures: boolean;
   setAutoLinkCaptures: (val: boolean) => void;
@@ -37,7 +38,7 @@ interface SettingsViewProps {
 
 export const SettingsView: React.FC<SettingsViewProps> = ({
   customUrl, setCustomUrl, customKey, setCustomKey, customModel, setCustomModel, visionModel, setVisionModel, customModels, fetchCustomModels,
-  docCount, globalDocCount, onCleanupOrphans, authed, profile, login, logout, folderName, setFolderName, localFolderName, pickLocalFolder,
+  docCount, globalDocCount, onCleanupOrphans, authed, profile, login, logout, folderName, setFolderName, localFolderName, folderPermission, pickLocalFolder,
   autoLinkCaptures, setAutoLinkCaptures, saveSettings
 }) => {
 
@@ -488,15 +489,27 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           <div className="flex items-center justify-between">
             <span className="text-xs font-bold font-mono uppercase tracking-widest">Local Storage</span>
             {localFolderName ? (
-              <span className="inline-flex items-center border-2 px-2.5 py-0.5 text-[10px] uppercase tracking-widest font-bold bg-primary text-primary-foreground">
-                <span className="w-1.5 h-1.5 bg-background mr-1.5" /> {localFolderName}
-              </span>
+              folderPermission === 'expired' ? (
+                <span className="inline-flex items-center rounded-md border border-highlight px-2.5 py-0.5 text-[10px] uppercase tracking-widest font-bold text-amber-700 dark:text-highlight">
+                  <span className="w-1.5 h-1.5 rounded-full bg-current mr-1.5" /> {localFolderName} — permission expired
+                </span>
+              ) : (
+                <span className="inline-flex items-center rounded-md px-2.5 py-0.5 text-[10px] uppercase tracking-widest font-bold bg-primary text-primary-foreground">
+                  <span className="w-1.5 h-1.5 rounded-full bg-background mr-1.5" /> {localFolderName}
+                </span>
+              )
             ) : (
-              <span className="inline-flex items-center border-2 border-muted px-2.5 py-0.5 text-[10px] uppercase tracking-widest font-bold text-muted-foreground">
+              <span className="inline-flex items-center rounded-md border border-muted px-2.5 py-0.5 text-[10px] uppercase tracking-widest font-bold text-muted-foreground">
                 NONE SELECTED
               </span>
             )}
           </div>
+          {folderPermission === 'expired' && (
+            <p className="text-[10px] font-mono text-amber-700 dark:text-highlight leading-normal">
+              Chrome expired write access to this folder — nothing is being saved to disk.
+              Click the button below to re-grant it.
+            </p>
+          )}
           
           <Button variant="outline" size="sm" className="w-full mt-2 rounded-md border-2 font-bold font-mono uppercase text-xs" onClick={pickLocalFolder}>
             {localFolderName ? 'Change Save Folder' : 'Choose Local Save Folder'}

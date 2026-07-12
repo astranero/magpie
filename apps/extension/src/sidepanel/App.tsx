@@ -122,6 +122,7 @@ export default function App() {
 
   // Local File System
   const [localFolderName, setLocalFolderName] = useState<string | null>(null);
+  const [folderPermission, setFolderPermission] = useState<'granted' | 'expired' | null>(null);
 
   // Chat
   const [messages, setMessages] = useState<Record<string, ChatMessage[]>>({});
@@ -293,9 +294,18 @@ export default function App() {
     loadSettings();
     trySilentAuth();
 
-    get('ara-local-directory-handle').then(handle => {
+    get('ara-local-directory-handle').then(async handle => {
       if (handle && handle.name) {
         setLocalFolderName(handle.name);
+        // Chrome silently expires File System Access permissions between
+        // sessions — surface it, or "my folder stopped saving" is invisible.
+        try {
+          // @ts-ignore
+          const perm = await handle.queryPermission({ mode: 'readwrite' });
+          setFolderPermission(perm === 'granted' ? 'granted' : 'expired');
+        } catch {
+          setFolderPermission('expired');
+        }
       }
     }).catch(console.error);
 
@@ -724,6 +734,7 @@ export default function App() {
       const handle = await window.showDirectoryPicker({ mode: 'readwrite' });
       await set('ara-local-directory-handle', handle);
       setLocalFolderName(handle.name);
+      setFolderPermission('granted');
       showToast('success', 'Local folder selected');
     } catch (err: any) {
       // AbortError = user dismissed the picker — not an error
@@ -1721,6 +1732,7 @@ export default function App() {
               folderName={folderName}
               setFolderName={setFolderName}
               localFolderName={localFolderName}
+              folderPermission={folderPermission}
               pickLocalFolder={pickLocalFolder}
               autoLinkCaptures={autoLinkCaptures}
               setAutoLinkCaptures={(v) => {

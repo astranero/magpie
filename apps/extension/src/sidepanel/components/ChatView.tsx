@@ -65,7 +65,7 @@ const PlanCard: React.FC<PlanCardProps> = ({ msgId, plan, onStart, onCancel }) =
   const isBusy = plan.status === 'loading' || plan.status === 'refining';
 
   return (
-    <div className={`w-full rounded-lg border bg-card shadow-card overflow-hidden transition-opacity animate-in fade-in slide-in-from-bottom-2 motion-reduce:animate-none ${
+    <div className={`w-full rounded-xl border bg-card shadow-card overflow-hidden transition-opacity animate-in fade-in slide-in-from-bottom-2 motion-reduce:animate-none ${
       plan.status === 'cancelled' ? 'border-border opacity-55' : 'border-border'
     }`}>
       {/* Catalog-card header: mono eyebrow over the red index-card rule */}
@@ -104,23 +104,34 @@ const PlanCard: React.FC<PlanCardProps> = ({ msgId, plan, onStart, onCancel }) =
             </div>
 
             {/* Pipeline spec line: what the run will do + what it costs */}
-            <div className="flex items-center gap-1.5 text-[10px] font-mono uppercase tracking-widest text-muted-foreground border-y border-border/60 py-1.5">
-              <span className="text-foreground/80 font-bold">Gather{(plan.stages ?? 1) > 1 ? ` ×${plan.stages}` : ''}</span>
-              <span aria-hidden="true">→</span>
-              <span className="text-foreground/80 font-bold">Analyze</span>
-              <span aria-hidden="true">→</span>
-              <span className="text-foreground/80 font-bold">Report</span>
+            <div className="flex items-center gap-2 text-[10px] font-mono uppercase tracking-wider text-muted-foreground">
+              {[`Gather${(plan.stages ?? 1) > 1 ? ` ×${plan.stages}` : ''}`, 'Analyze', 'Report'].map((phase, i) => (
+                <React.Fragment key={phase}>
+                  {i > 0 && <span className="text-border" aria-hidden="true">──</span>}
+                  <span className="rounded-full border border-border bg-background px-2 py-0.5 font-bold text-foreground/75">{phase}</span>
+                </React.Fragment>
+              ))}
               {plan.estMinutes && (
-                <span className="ml-auto normal-case tracking-normal">~{plan.estMinutes} min · chat stays open</span>
+                <span className="ml-auto normal-case tracking-normal">~{plan.estMinutes} min</span>
               )}
             </div>
 
+            {/* Directive ledger: numbered stops on the expedition, connected
+                by a rail — each row is one thing the agent will go find out. */}
             {plan.subQuestions.length > 0 && (
-              <ol className="space-y-2">
+              <ol className="relative">
                 {plan.subQuestions.map((q, i) => (
-                  <li key={i} className="text-xs text-foreground flex gap-2.5 leading-relaxed">
-                    <span className="font-mono text-primary/70 font-bold shrink-0 w-4 text-right tabular-nums">{i + 1}</span>
-                    <span>{q}</span>
+                  <li key={i} className="relative flex gap-3 pb-2.5 last:pb-0 group">
+                    {/* rail segment */}
+                    {i < plan.subQuestions.length - 1 && (
+                      <span className="absolute left-[9px] top-5 bottom-0 w-px bg-border" aria-hidden="true" />
+                    )}
+                    <span className="relative z-10 mt-0.5 w-[19px] h-[19px] shrink-0 rounded-full border border-primary/40 bg-card text-primary
+                                     flex items-center justify-center text-[9px] font-mono font-bold tabular-nums
+                                     group-hover:bg-primary group-hover:text-primary-foreground transition-colors">
+                      {i + 1}
+                    </span>
+                    <span className="text-xs text-foreground/90 leading-relaxed pt-0.5">{q}</span>
                   </li>
                 ))}
               </ol>
@@ -624,12 +635,12 @@ export const ChatView: React.FC<ChatViewProps> = ({
         ) : (
           <div key={m.id} className={`flex ${m.role === 'user' ? 'justify-end' : 'justify-start'}`}>
             <div
-              className={`max-w-[85%] rounded-lg border px-4 py-2.5 text-sm shadow-card ${
+              className={`max-w-[85%] rounded-xl border px-4 py-2.5 text-sm shadow-card ${
                 m.role === 'user'
-                  ? 'bg-primary text-primary-foreground border-primary rounded-br-sm'
+                  ? 'bg-primary text-primary-foreground border-primary rounded-br-md'
                   : m.role === 'system'
-                  ? 'bg-muted/50 border-border text-muted-foreground w-full'
-                  : 'bg-card border-border text-card-foreground rounded-bl-sm'
+                  ? 'bg-muted/40 border-border/70 text-muted-foreground w-full'
+                  : 'bg-card border-border/80 text-card-foreground rounded-bl-md'
               }`}
             >
               {m.role === 'assistant' || m.role === 'system' ? (
@@ -662,7 +673,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
           <div className="flex justify-start">
             {/* The field log: night-ledger ink panel — the one dark surface in
                 the app, reserved for the agent working through the stacks. */}
-            <div className="w-full max-w-[95%] rounded-lg ink-panel shadow-card overflow-hidden animate-in fade-in motion-reduce:animate-none">
+            <div className="w-full max-w-[95%] rounded-xl ink-panel shadow-card overflow-hidden animate-in fade-in motion-reduce:animate-none">
               <div className="flex items-center gap-2 px-3.5 py-2 border-b border-white/10">
                 <Loader2 size={12} className="animate-spin motion-reduce:animate-none text-highlight shrink-0" aria-hidden="true" />
                 <span className="text-[10px] font-bold font-mono uppercase tracking-widest opacity-80 flex-1">
