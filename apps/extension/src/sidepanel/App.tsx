@@ -840,13 +840,27 @@ export default function App() {
       });
       if (!activeProjectId) { showToast('error', 'No active session'); return; }
       
-      // Read all files to base64 first (this is fast)
+      // Guard on file.size BEFORE reading. A large PDF (10 MB+, hundreds of
+      // pages) OOM-crashes the panel/offscreen renderer the moment we read it
+      // to base64 — so reject by size here and never touch the bytes. (Uses
+      // file.size, which is instant metadata, not a read.)
+      const MAX_PDF_MB = 6;
       const files: Array<{ name: string; base64: string }> = [];
+      const skipped: string[] = [];
       for (const h of handles) {
         const file: File = await h.getFile();
+        if (file.size > MAX_PDF_MB * 1024 * 1024) {
+          skipped.push(`${file.name} (${(file.size / 1024 / 1024).toFixed(1)} MB)`);
+          continue;
+        }
         const base64 = await fileToBase64(file);
         files.push({ name: file.name, base64 });
       }
+
+      if (skipped.length > 0) {
+        showToast('error', `Too large to import (limit ${MAX_PDF_MB} MB — bigger PDFs can crash the browser): ${skipped.join(', ')}. Split it into smaller PDFs.`);
+      }
+      if (files.length === 0) return;
 
       showToast('success', `📄 Sending ${files.length} PDF(s) for background parsing...`);
       
