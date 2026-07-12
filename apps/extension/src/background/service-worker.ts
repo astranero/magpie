@@ -1132,6 +1132,14 @@ async function buildChatRequest(chatId: string, projectId: string, prompt: strin
 
   let systemPrompt: string;
 
+  // Answers render in a ~400px side panel; a 500-word tutorial for a
+  // definition question is scroll punishment. Calibrate length to the ask.
+  const RESPONSE_STYLE =
+    `\nRESPONSE STYLE: Match length to the question. A definition or factual question gets 2-4 sentences; ` +
+    `a how-to gets a compact step list; use section headings ONLY when the user asked several distinct things. ` +
+    `No filler introductions, no closing summaries, no "Important Note" essays — one short caveat sentence at most. ` +
+    `The user can always ask a follow-up; do not pre-answer questions they haven't asked.`;
+
   if (relevantChunks.length > 0) {
     // Build citation-anchored context
     const context = buildCitationContext(relevantChunks, docTitles, 25000);
@@ -1139,13 +1147,15 @@ async function buildChatRequest(chatId: string, projectId: string, prompt: strin
     // We add strict anti-hallucination prompts to the system prompt
     systemPrompt = CITATION_SYSTEM_PROMPT +
       `\nCRITICAL ANTI-HALLUCINATION RULE: If the answer cannot be found in the provided sources, you MUST say "I cannot answer this based on the provided sources." DO NOT rely on external knowledge.\n` +
+      RESPONSE_STYLE +
       `\n--- SOURCES ---\n${context}\n--- END SOURCES ---`;
   } else {
     console.warn(`[RAG] No chunks found for project ${projectId} — falling back to general knowledge`);
     // General conversation fallback
     systemPrompt = `You are a helpful AI assistant. No relevant documents were found in the user's research workspace for this question. ` +
       `Begin your answer with this exact italic line: *No matching sources in this workspace — answering from general knowledge.* ` +
-      `Then answer using your general knowledge. Do not fabricate citations.`;
+      `Then answer using your general knowledge. Do not fabricate citations.` +
+      RESPONSE_STYLE;
   }
 
   // Ephemeral page context: the tab the user is looking at right now.
