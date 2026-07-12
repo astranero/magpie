@@ -2,8 +2,9 @@ import { useState, useEffect, useRef, useCallback, Fragment } from 'react';
 import { set } from 'idb-keyval';
 
 // Disk mirror lands under the user's Downloads folder. chrome.downloads can't
-// target an arbitrary path, but it never expires — the trade we're making.
-const LOCAL_FOLDER_NAME = 'AI_AW';
+// target an arbitrary absolute path, but it never expires — the trade we make.
+// (To relocate: point Chrome's own download dir elsewhere in chrome://settings.)
+const LOCAL_FOLDER_NAME = 'magpie';
 import { Edit2, Trash2, FileText, Library, MessageSquare, SlidersHorizontal } from 'lucide-react';
 import { LocalDocument, Project, Chat, ChatMessage, ResearchPlan, ResolvedCitation, TabInfo, View } from './types';
 import { LoreView } from './components/LoreView';
