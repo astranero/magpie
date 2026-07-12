@@ -168,12 +168,19 @@ export function matchFilesInTree(paths: string[], question: string, max = 2): st
   const filePaths = paths.filter(p => !p.endsWith('/') && !BINARY_EXT_RE.test(p));
   // Tokens that look like file names/paths: contain a dot or slash
   const fileTokens = (question.match(/[\w][\w./_-]*\.\w{1,8}/g) || []).map(t => t.toLowerCase());
-  if (fileTokens.length === 0) return [];
+  // Code identifiers ("handleCapture", "paper_rank", "deep-researcher"):
+  // "where is the code for X" names a symbol/module, not a file — match it
+  // against basenames so the file's contents can still be fetched.
+  const identTokens = (question.match(/\b(?:[a-z]+[A-Z][A-Za-z]+|[a-z0-9]+(?:[_-][a-z0-9]+)+)\b/g) || [])
+    .map(t => t.toLowerCase())
+    .filter(t => t.length >= 5 && !fileTokens.some(f => f.includes(t)));
+  if (fileTokens.length === 0 && identTokens.length === 0) return [];
 
   const scored = filePaths
     .map(p => {
       const lower = p.toLowerCase();
       const base = lower.split('/').pop()!;
+      const stem = base.replace(/\.\w{1,8}$/, '');
       let score = 0;
       for (const t of fileTokens) {
         const tBase = t.split('/').pop()!;
@@ -182,6 +189,12 @@ export function matchFilesInTree(paths: string[], question: string, max = 2): st
         if (base === tBase) score += 10;           // exact filename
         if (t.includes('/') && lower.endsWith(t)) score += 8;  // full path named
         else if (lower.includes(t) && t !== tBase) score += 2;
+      }
+      for (const t of identTokens) {
+        const norm = t.replace(/[_-]/g, '');
+        const stemNorm = stem.replace(/[_-]/g, '');
+        if (stemNorm === norm) score += 6;         // module named after the symbol
+        else if (stemNorm.includes(norm)) score += 3;
       }
       return { p, score, depth: p.split('/').length };
     })

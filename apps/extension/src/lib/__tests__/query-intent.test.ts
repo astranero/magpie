@@ -125,3 +125,18 @@ describe('matchFilesInTree', () => {
     expect(matchFilesInTree(tree, 'how does the build work?')).toEqual([]);
   });
 });
+
+describe('matchFilesInTree — identifier tokens', () => {
+  const tree = ['src/paper-rank.ts', 'src/deep-researcher.ts', 'src/db.ts', 'README.md'];
+
+  it('matches code identifiers against module basenames', async () => {
+    const { matchFilesInTree } = await import('../query-intent');
+    expect(matchFilesInTree(tree, 'where is the code related to paper_rank scoring?')[0]).toBe('src/paper-rank.ts');
+    expect(matchFilesInTree(tree, 'what does deepResearcher do?')[0]).toBe('src/deep-researcher.ts');
+  });
+
+  it('ignores short/plain words', async () => {
+    const { matchFilesInTree } = await import('../query-intent');
+    expect(matchFilesInTree(tree, 'where is the database code?')).toEqual([]);
+  });
+});

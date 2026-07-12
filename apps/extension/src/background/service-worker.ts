@@ -866,6 +866,21 @@ async function handleImportLocalPdf(request: Record<string, unknown>): Promise<R
         const title = file.name.replace(/\.pdf$/i, '');
         // Notify UI that we're starting this file
         notifyImportProgress({ type: 'pdf-progress', file: file.name, status: 'parsing', imported, total: files.length });
+
+        // Real PDFs start with "%PDF-". A few hundred bytes without that
+        // header is almost always a macOS Finder alias / Windows shortcut
+        // picked instead of the document it points to — say so, instead of
+        // letting pdf.js fail with "Invalid PDF structure".
+        const head = atob(file.base64.slice(0, 8));
+        if (!head.startsWith('%PDF')) {
+          const approxBytes = Math.round(file.base64.length * 0.75);
+          throw new Error(
+            approxBytes < 16_384
+              ? `not a PDF (${approxBytes} bytes — this looks like a shortcut/alias to the real file; open its location and pick the original)`
+              : 'not a PDF (missing %PDF header)'
+          );
+        }
+
         const body = await pdfBase64ToBody(file.base64, imageToText);
         const content = buildFrontmatter({
           title, type: 'pdf', source: 'local-pdf',
