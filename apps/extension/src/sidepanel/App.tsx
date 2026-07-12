@@ -481,7 +481,10 @@ export default function App() {
     const importChannel = new BroadcastChannel('ai_research_assistant_import');
     importChannel.onmessage = (event) => {
       const data = event.data;
-      if (data.type === 'pdf-progress') {
+      if (data.type === 'pdf-page') {
+        // Live per-page progress for big PDFs — proves the parse is alive.
+        showToast('info', `📄 Parsing page ${data.page}/${data.totalPages}…`);
+      } else if (data.type === 'pdf-progress') {
         if (data.status === 'parsing') {
           showToast('success', `📄 Parsing: ${data.file}...`);
         } else if (data.status === 'done') {

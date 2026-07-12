@@ -64,52 +64,84 @@ async function parsePdfUrl(url: string): Promise<{ pages: string[]; imagePages: 
 const MAX_PDF_PAGES = 800;
 
 async function parsePdfData(data: Uint8Array): Promise<{ pages: string[]; imagePages: { index: number; dataUrl: string }[] }> {
-  const pdf = await pdfjsLib.getDocument({ data, isEvalSupported: false }).promise;
+  // Font handling dominates per-page cost. We only need TEXT (scanned pages
+  // render separately), so skip @font-face construction and prefer system
+  // fonts — this cut per-page time by ~an order of magnitude for big PDFs,
+  // which is what let a 470-page book finish instead of hitting the timeout.
+  const pdf = await pdfjsLib.getDocument({
+    data,
+    isEvalSupported: false,
+    disableFontFace: true,
+    useSystemFonts: true,
+  }).promise;
   const pages: string[] = [];
   const imagePages: { index: number; dataUrl: string }[] = [];
 
   const pageLimit = Math.min(pdf.numPages, MAX_PDF_PAGES);
-  for (let p = 1; p <= pageLimit; p++) {
-    const page = await pdf.getPage(p);
-    const content = await page.getTextContent();
-    
-    const items: TextBlock[] = content.items
-      .filter((it: any) => 'str' in it && 'transform' in it)
-      .map((it: any) => {
-        const transform = it.transform;
-        const fontSize = Math.abs(transform[3]);
-        return {
-          text: it.str,
-          x: transform[4],
-          y: transform[5],
-          width: typeof it.width === 'number' ? it.width : 0,
-          fontSize
-        };
-      });
+  // Per-page progress so a long parse is observably alive (not a dead
+  // "parsing…"), and so a stall pinpoints the offending page.
+  const postProgress = (pg: number) => {
+    try {
+      const ch = new BroadcastChannel('ai_research_assistant_import');
+      ch.postMessage({ type: 'pdf-page', page: pg, totalPages: pageLimit });
+      ch.close();
+    } catch { /* ignore */ }
+  };
+  try {
+    for (let p = 1; p <= pageLimit; p++) {
+      const page = await pdf.getPage(p);
+      try {
+        const content = await page.getTextContent();
 
-    const rawText = items.map(it => it.text).join(' ').replace(/\s+/g, ' ').trim();
+        const items: TextBlock[] = content.items
+          .filter((it: any) => 'str' in it && 'transform' in it)
+          .map((it: any) => {
+            const transform = it.transform;
+            const fontSize = Math.abs(transform[3]);
+            return {
+              text: it.str,
+              x: transform[4],
+              y: transform[5],
+              width: typeof it.width === 'number' ? it.width : 0,
+              fontSize
+            };
+          });
 
-    // If a page has almost no extractable text, it's likely scanned → render it.
-    if (rawText.length < 20) {
-      pages.push(rawText);
-      const viewport = page.getViewport({ scale: 2 });
-      const canvas = document.createElement('canvas');
-      canvas.width = viewport.width;
-      canvas.height = viewport.height;
-      const ctx = canvas.getContext('2d');
-      if (ctx) {
-        await page.render({ canvasContext: ctx, viewport, canvas } as any).promise;
-        imagePages.push({ index: p, dataUrl: canvas.toDataURL('image/png') });
+        const rawText = items.map(it => it.text).join(' ').replace(/\s+/g, ' ').trim();
+
+        // If a page has almost no extractable text, it's likely scanned → render it.
+        if (rawText.length < 20) {
+          pages.push(rawText);
+          const viewport = page.getViewport({ scale: 2 });
+          const canvas = document.createElement('canvas');
+          canvas.width = viewport.width;
+          canvas.height = viewport.height;
+          const ctx = canvas.getContext('2d');
+          if (ctx) {
+            await page.render({ canvasContext: ctx, viewport, canvas } as any).promise;
+            imagePages.push({ index: p, dataUrl: canvas.toDataURL('image/png') });
+          }
+          continue;
+        }
+
+        // Reconstruct readable markdown from positioned runs (headings, two-column
+        // handling, citation fixup, cleanup). Pure + shared with tests/harness.
+        const pageWidth = page.getViewport({ scale: 1 }).width;
+        pages.push(buildPageMarkdown(items, pageWidth));
+      } finally {
+        // CRITICAL for large PDFs: free each page's operator list / fonts as we
+        // go. Without this, a 470-page book accumulates every page's resources
+        // in the offscreen doc → memory thrash / OOM → the parse hangs and the
+        // whole import silently times out. Also yield periodically so the
+        // offscreen event loop (and the worker keep-alive) stays responsive.
+        page.cleanup();
+        if (p % 10 === 0 || p === pageLimit) { postProgress(p); await new Promise(r => setTimeout(r, 0)); }
       }
-      continue;
     }
-
-    // Reconstruct readable markdown from positioned runs (headings, two-column
-    // handling, citation fixup, cleanup). Pure + shared with tests/harness.
-    const pageWidth = page.getViewport({ scale: 1 }).width;
-    pages.push(buildPageMarkdown(items, pageWidth));
+    return { pages, imagePages };
+  } finally {
+    await pdf.destroy().catch(() => {});
   }
-  return { pages, imagePages };
 }
 
 // ── Embeddings and Re-ranking helpers ──

@@ -61,9 +61,14 @@ export async function pdfBase64ToBody(
   }
   let res: any;
   try {
-    // Large scanned PDFs can take minutes to parse+render — long deadline,
-    // but finite (a wedged offscreen doc must not hang the import forever).
-    res = await sendToOffscreen({ action: 'OFFSCREEN_PARSE_PDF', base64 }, 8 * 60 * 1000);
+    // A big, page-heavy PDF (a 400+ page book) can genuinely take many minutes
+    // to parse in the offscreen doc. Scale the deadline with the payload size
+    // (~1 min per MB, 8–25 min) so a slow-but-progressing parse finishes instead
+    // of being cut off and failing silently. Still finite — a wedged offscreen
+    // doc must not hang the import forever.
+    const approxMb = base64.length / 1.33 / 1024 / 1024;
+    const timeoutMs = Math.min(25 * 60 * 1000, Math.max(8 * 60 * 1000, Math.round(approxMb) * 60 * 1000));
+    res = await sendToOffscreen({ action: 'OFFSCREEN_PARSE_PDF', base64 }, timeoutMs);
   } catch (e: any) {
     throw new Error(`PDF transfer failed (likely too large, ~${Math.round(base64.length / 1.33 / 1024 / 1024)} MB): ${e.message}`);
   }
