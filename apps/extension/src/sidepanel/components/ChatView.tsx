@@ -243,6 +243,8 @@ interface MessageBodyProps {
   text: string;
   compact?: boolean;
   streaming?: boolean;
+  /** Render markdown even mid-stream (research report). */
+  renderLive?: boolean;
   resolveCitations: (text: string) => Promise<ResolvedCitation[]>;
   onOpenDocument?: (docId: string, anchorId?: string) => void;
   onOpenExternalLink?: (url: string) => void;
@@ -289,8 +291,12 @@ function normalizeLatexDelimiters(text: string): string {
   return parts.join('');
 }
 
-const MessageBody: React.FC<MessageBodyProps> = React.memo(({ text: rawText, compact, streaming, resolveCitations, onOpenDocument, onOpenExternalLink }) => {
+const MessageBody: React.FC<MessageBodyProps> = React.memo(({ text: rawText, compact, streaming, renderLive, resolveCitations, onOpenDocument, onOpenExternalLink }) => {
   const [citations, setCitations] = useState<Map<string, ResolvedCitation>>(new Map());
+  // The raw-markdown plaintext fast-path is for fast token-by-token chat. The
+  // research report streams as coalesced chunks and should arrive FORMATTED, so
+  // renderLive opts it into full markdown mid-stream.
+  const fastPath = !!streaming && !renderLive;
 
   // HOOK-ORDER RULE: every hook below runs on EVERY render, streaming or not.
   // A message flips streaming:true→false when it finalizes; if a hook sat
@@ -299,16 +305,16 @@ const MessageBody: React.FC<MessageBodyProps> = React.memo(({ text: rawText, com
   // So the streaming FAST-PATH lives INSIDE each hook (skip the regex work),
   // and the `streaming` branch gates only the returned JSX — never a hook.
 
-  // F2: while streaming, skip the O(N) regex/markdown passes — they re-run on
-  // every delta. Pass rawText straight through; parse only once it settles.
+  // F2: on the plaintext fast-path, skip the O(N) regex/markdown passes — they
+  // re-run on every delta. Pass rawText straight through; parse once it settles.
   const text = useMemo(
-    () => streaming ? rawText : normalizeLatexDelimiters(normalizeCitations(rawText)),
-    [rawText, streaming]
+    () => fastPath ? rawText : normalizeLatexDelimiters(normalizeCitations(rawText)),
+    [rawText, fastPath]
   );
 
-  // Number the anchors in order of first appearance (skipped while streaming).
+  // Number the anchors in order of first appearance (skipped on the fast-path).
   const anchorOrder = useMemo(() => {
-    if (streaming) return [] as string[];
+    if (fastPath) return [] as string[];
     const order: string[] = [];
     const regex = new RegExp(CITATION_REGEX.source, 'g');
     let m: RegExpExecArray | null;
@@ -316,7 +322,7 @@ const MessageBody: React.FC<MessageBodyProps> = React.memo(({ text: rawText, com
       if (!order.includes(m[1])) order.push(m[1]);
     }
     return order;
-  }, [text, streaming]);
+  }, [text, fastPath]);
 
   useEffect(() => {
     let alive = true;
@@ -332,8 +338,9 @@ const MessageBody: React.FC<MessageBodyProps> = React.memo(({ text: rawText, com
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [text, anchorOrder.length]);
 
-  // Streaming fast-path render — AFTER all hooks, so hook order stays stable.
-  if (streaming) {
+  // Plaintext fast-path render — AFTER all hooks, so hook order stays stable.
+  // (renderLive messages fall through to the markdown renderer below.)
+  if (fastPath) {
     return (
       <div>
         <div className={`whitespace-pre-wrap break-words font-sans ${compact ? 'text-xs' : 'text-sm'} text-foreground`}>
@@ -664,7 +671,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
               <ErrorBoundary compact label="message">
                 {m.role === 'assistant' || m.role === 'system' ? (
                   <CollapsibleMessage text={m.text} streaming={m.streaming}>
-                    <MessageBody text={m.text} compact={m.role === 'system'} streaming={m.streaming} resolveCitations={resolveCitations} onOpenDocument={onOpenDocument} onOpenExternalLink={onOpenExternalLink} />
+                    <MessageBody text={m.text} compact={m.role === 'system'} streaming={m.streaming} renderLive={m.renderLive} resolveCitations={resolveCitations} onOpenDocument={onOpenDocument} onOpenExternalLink={onOpenExternalLink} />
                   </CollapsibleMessage>
                 ) : (
                   <CollapsibleMessage text={m.text}>

@@ -35,6 +35,10 @@ export interface ChatMessage {
   /** True while the assistant message is being streamed. Render as plain
    *  text mid-stream; swap to full markdown when DONE flips this to false. */
   streaming?: boolean;
+  /** Render markdown even WHILE streaming (research report). Its deltas are
+   *  coalesced upstream, so live markdown parsing stays cheap — and the report
+   *  arrives formatted instead of as a wall of raw markdown. */
+  renderLive?: boolean;
   /** Research plan card — rendered instead of the text body when present. */
   plan?: ResearchPlan;
 }

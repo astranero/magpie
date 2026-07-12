@@ -296,6 +296,35 @@ async function scrapePage(): Promise<{
     }
   }
 
+  // Comments + build info: Readability keeps only the main article, dropping
+  // comment threads, asides, and footers — so a question answerable from the
+  // discussion or a colophon ("built with X") comes up empty. Recover them
+  // from the live DOM. (Cross-origin comment iframes like Disqus can't be read
+  // and are silently skipped.)
+  const extras: string[] = [];
+
+  const generator = document.querySelector('meta[name="generator"]')?.getAttribute('content')?.trim();
+  if (generator) extras.push(`**Site generator:** ${generator}`);
+
+  // Top-level comment/discussion containers only — skip nested items so a
+  // container and its children don't both dump the same text.
+  const commentSel = '#comments, .comments, #disqus_thread, [id*="comment-list"], [class*="comment-list"], [class*="responses"], [class*="discussion"]';
+  const containers: HTMLElement[] = [];
+  for (const el of Array.from(document.querySelectorAll<HTMLElement>(commentSel))) {
+    if (containers.some(c => c.contains(el))) continue;
+    containers.push(el);
+  }
+  const commentText = containers
+    .map(el => (el.innerText || '').replace(/\n{3,}/g, '\n\n').trim())
+    .filter(t => t.length > 40)
+    .join('\n\n---\n\n')
+    .slice(0, 3500);
+  if (commentText) extras.push(`### Comments / discussion\n\n${commentText}`);
+
+  if (extras.length > 0) {
+    markdown += `\n\n## Page extras (comments & build info)\n\n${extras.join('\n\n')}`;
+  }
+
   // If the title looks like a generic site name (e.g. "Google Gemini"),
   // try to extract a real content title from the first markdown heading.
   if (isGenericTitle(title)) {

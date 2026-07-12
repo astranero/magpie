@@ -106,7 +106,12 @@ export default function App() {
   // Stop fires DONE from BOTH the force-clear and the live run's finally;
   // dedupe the pair so the user sees one toast, not two.
   const doneGuardRef = useRef<Record<string, number>>({});
-  // Live research synthesis stream (report tokens during [SYNTHESIZING])
+  // Live research synthesis: report tokens stream in during [SYNTHESIZING] and
+  // render as markdown live. Which chat the report belongs to (projectId→chatId,
+  // set at start), a per-project text buffer, and one throttle timer.
+  const researchChatRef = useRef<Record<string, string>>({});
+  const researchDeltaBufferRef = useRef<Record<string, string>>({});
+  const researchDeltaTimerRef = useRef<number | null>(null);
 
 
   // User-defined slash commands (Settings → Custom Commands)
@@ -307,6 +312,40 @@ export default function App() {
     trySilentAuth();
 
     const messageListener = (m: any) => {
+      if (m.action === 'DEEP_RESEARCH_DELTA') {
+        // Stream the report into its chat as ONE renderLive assistant message,
+        // throttled (~150ms) so live markdown parsing stays cheap.
+        const chatId = researchChatRef.current[m.projectId];
+        if (!chatId) return;
+        researchDeltaBufferRef.current[m.projectId] =
+          (researchDeltaBufferRef.current[m.projectId] || '') + (m.delta || '');
+        if (!researchDeltaTimerRef.current) {
+          researchDeltaTimerRef.current = window.setTimeout(() => {
+            researchDeltaTimerRef.current = null;
+            const pending = researchDeltaBufferRef.current;
+            researchDeltaBufferRef.current = {};
+            setMessages(prev => {
+              const next = { ...prev };
+              for (const [pid, chunk] of Object.entries(pending)) {
+                const cid = researchChatRef.current[pid];
+                if (!cid || !chunk) continue;
+                const id = `research-live-${pid}`;
+                const list = next[cid] || [];
+                const idx = list.findIndex(x => x.id === id);
+                if (idx === -1) {
+                  next[cid] = [...list, { id, role: 'assistant' as const, text: chunk, streaming: true, renderLive: true }];
+                } else {
+                  const copy = [...list];
+                  copy[idx] = { ...copy[idx], text: copy[idx].text + chunk };
+                  next[cid] = copy;
+                }
+              }
+              return next;
+            });
+          }, 150);
+        }
+        return;
+      }
       if (m.action === 'DEEP_RESEARCH_LOG') {
         // Batch log lines: buffer in a ref, flush every 300ms. A setState per
         // line re-rendered the entire panel for every scraped page.
@@ -344,7 +383,25 @@ export default function App() {
         if (now - (doneGuardRef.current[m.projectId] || 0) < 4000) return;
         doneGuardRef.current[m.projectId] = now;
 
-        if (m.chatId) loadChatHistory(m.chatId);
+        // Stop routing live report deltas for this run.
+        const liveCid = m.chatId || researchChatRef.current[m.projectId];
+        delete researchChatRef.current[m.projectId];
+        delete researchDeltaBufferRef.current[m.projectId];
+
+        if (m.chatId) {
+          // Persisted report (rendered) replaces the temp live message.
+          loadChatHistory(m.chatId);
+        } else if (liveCid) {
+          // Cancel path has no chat to reload — just settle the partial report.
+          setMessages(prev => {
+            const list = prev[liveCid] || [];
+            const idx = list.findIndex(x => x.id === `research-live-${m.projectId}`);
+            if (idx === -1) return prev;
+            const copy = [...list];
+            copy[idx] = { ...copy[idx], streaming: false };
+            return { ...prev, [liveCid]: copy };
+          });
+        }
         loadDocuments(m.projectId);
         const line = m.cancelled
           ? '[STOPPED] Research cancelled.'
@@ -1385,6 +1442,8 @@ export default function App() {
 
     updateMessage(activeChatId, planMsgId, m => ({ ...m, plan: { ...m.plan!, status: 'started' } }));
     researchStartedAtRef.current[activeProjectId] = Date.now();
+    // Route this run's live report deltas to this chat.
+    researchChatRef.current[activeProjectId] = activeChatId;
     setResearching(prev => ({ ...prev, [activeProjectId]: true }));
     setResearchLogs(prev => ({ ...prev, [activeProjectId]: [] }));
     maybeAutoNameProject(plan.effectiveTopic).catch(() => {});
