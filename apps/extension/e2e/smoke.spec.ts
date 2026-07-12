@@ -27,8 +27,9 @@ test.afterAll(async () => { await context?.close(); });
 test('sidepanel mounts and shows the workspace header', async () => {
   const page = await context.newPage();
   await page.goto(`chrome-extension://${extensionId}/sidepanel.html`);
-  // App defaults to the Lore view — the Workspace header is the mount signal
-  await expect(page.getByText('Workspace', { exact: true }).first()).toBeVisible({ timeout: 10000 });
+  // Mount signal: the workspace selector renders the auto-created default
+  // workspace (the header no longer carries a "Workspace" label).
+  await expect(page.getByText('Default Session').first()).toBeVisible({ timeout: 10000 });
   await page.close();
 });
 

@@ -148,8 +148,8 @@
 }
 
 @layer utilities {
-  /* Signature: the catalog-card red rule. A thin double line, like the
-     printed rule across the top of a library index card. */
+  /* Signature: the iridescent sheen hairline — teal into violet, like light
+     across a magpie's wing. Used once, under the app header. */
   .card-rule {
     position: relative;
   }
@@ -159,9 +159,8 @@
     left: 0;
     right: 0;
     bottom: -1px;
-    height: 3px;
-    border-top: 2px solid hsl(var(--rule) / 0.85);
-    border-bottom: 1px solid hsl(var(--rule) / 0.35);
+    height: 2px;
+    background: linear-gradient(90deg, hsl(var(--primary)), hsl(var(--rule)) 60%, hsl(var(--rule) / 0.4));
     pointer-events: none;
   }
 
@@ -190,10 +189,10 @@
     border-color: hsl(var(--highlight));
   }
 
-  /* Single fine catalog rule — the light sibling of .card-rule, for card
-     headers inside the panel (plan card, sources) rather than the app bar. */
+  /* Quiet hairline for card headers — neutral; the gradient sheen belongs
+     to the app bar alone. */
   .card-rule-thin {
-    border-bottom: 1.5px solid hsl(var(--rule) / 0.55);
+    border-bottom: 1px solid hsl(var(--border));
   }
 
   /* Typeset headings for chat reports: serif display, ink-colored, with the

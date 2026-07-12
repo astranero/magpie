@@ -68,17 +68,17 @@ const PlanCard: React.FC<PlanCardProps> = ({ msgId, plan, onStart, onCancel }) =
     <div className={`w-full rounded-xl border bg-card shadow-card overflow-hidden transition-opacity animate-in fade-in slide-in-from-bottom-2 motion-reduce:animate-none ${
       plan.status === 'cancelled' ? 'border-border opacity-55' : 'border-border'
     }`}>
-      {/* Catalog-card header: mono eyebrow over the red index-card rule */}
+      {/* Card header: quiet label + status pill */}
       <div className="card-rule-thin flex items-center gap-2 px-3.5 pt-2.5 pb-2 bg-card">
         <Icon size={13} className="text-primary shrink-0" aria-hidden="true" />
-        <span className="text-[10px] font-bold font-mono uppercase tracking-widest text-muted-foreground flex-1">
+        <span className="text-xs font-medium text-muted-foreground flex-1">
           {modeName} · Plan
         </span>
-        <span className={`text-[10px] font-bold font-mono uppercase tracking-widest px-1.5 py-0.5 rounded-sm border ${
-          plan.status === 'started' ? 'border-primary/40 text-primary' :
-          plan.status === 'cancelled' ? 'border-border text-muted-foreground' :
-          isBusy ? 'border-primary/40 text-primary animate-pulse motion-reduce:animate-none' :
-          'border-highlight text-amber-700 dark:text-highlight'
+        <span className={`text-[11px] font-medium px-2 py-0.5 rounded-full ${
+          plan.status === 'started' ? 'bg-primary/10 text-primary' :
+          plan.status === 'cancelled' ? 'bg-muted text-muted-foreground' :
+          isBusy ? 'bg-primary/10 text-primary animate-pulse motion-reduce:animate-none' :
+          'bg-highlight/15 text-amber-700 dark:text-highlight'
         }`}>
           {plan.status === 'started' ? 'Running' :
            plan.status === 'cancelled' ? 'Cancelled' :
@@ -104,15 +104,15 @@ const PlanCard: React.FC<PlanCardProps> = ({ msgId, plan, onStart, onCancel }) =
             </div>
 
             {/* Pipeline spec line: what the run will do + what it costs */}
-            <div className="flex items-center gap-2 text-[10px] font-mono uppercase tracking-wider text-muted-foreground">
+            <div className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
               {[`Gather${(plan.stages ?? 1) > 1 ? ` ×${plan.stages}` : ''}`, 'Analyze', 'Report'].map((phase, i) => (
                 <React.Fragment key={phase}>
-                  {i > 0 && <span className="text-border" aria-hidden="true">──</span>}
-                  <span className="rounded-full border border-border bg-background px-2 py-0.5 font-bold text-foreground/75">{phase}</span>
+                  {i > 0 && <span className="text-border" aria-hidden="true">—</span>}
+                  <span className="rounded-full bg-muted px-2 py-0.5 font-medium text-foreground/75">{phase}</span>
                 </React.Fragment>
               ))}
               {plan.estMinutes && (
-                <span className="ml-auto normal-case tracking-normal">~{plan.estMinutes} min</span>
+                <span className="ml-auto">~{plan.estMinutes} min</span>
               )}
             </div>
 
@@ -144,15 +144,15 @@ const PlanCard: React.FC<PlanCardProps> = ({ msgId, plan, onStart, onCancel }) =
                 </div>
                 <div className="flex gap-2">
                   <Button
-                    className="flex-1 h-8 text-[10px] font-bold font-mono uppercase tracking-widest"
+                    className="flex-1 h-8 text-xs font-semibold rounded-lg"
                     disabled={isBusy}
                     onClick={() => onStart?.(msgId, plan)}
                   >
-                    {plan.mode === 'deep' ? 'Start Deep Research' : 'Start Research'}
+                    {plan.mode === 'deep' ? 'Start deep research' : 'Start research'}
                   </Button>
                   <Button
                     variant="ghost"
-                    className="h-8 text-[10px] font-mono border border-border uppercase tracking-widest text-muted-foreground"
+                    className="h-8 text-xs font-medium rounded-lg text-muted-foreground hover:text-foreground"
                     disabled={isBusy}
                     onClick={() => onCancel?.(msgId)}
                   >
@@ -537,9 +537,9 @@ export const ChatView: React.FC<ChatViewProps> = ({
     <div className="flex-1 flex flex-col h-full bg-background overflow-hidden relative">
       {/* Context bar */}
       <div className="flex items-center justify-between gap-2 px-4 py-2 border-b border-border bg-card shrink-0">
-        <div className="flex items-center gap-2 min-w-0 text-[10px] text-muted-foreground font-bold font-mono uppercase tracking-widest">
-          <span className="w-2 h-2 rounded-full bg-emerald-500 shrink-0" aria-hidden="true" />
-          <span className="shrink-0">{documents.filter(d => d.enabled !== false).length} SOURCES</span>
+        <div className="flex items-center gap-2 min-w-0 text-xs text-muted-foreground font-medium">
+          <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 shrink-0" aria-hidden="true" />
+          <span className="shrink-0">{documents.filter(d => d.enabled !== false).length} sources</span>
           {/* Ephemeral page context toggle — chat about the current tab without capturing it */}
           {pageContextTitle && onTogglePageContext && (
             <button
@@ -567,15 +567,15 @@ export const ChatView: React.FC<ChatViewProps> = ({
         <Button
           variant="ghost"
           size="sm"
-          className={`h-6 text-[10px] px-2 rounded-md font-bold font-mono uppercase tracking-widest shrink-0 transition-colors ${
+          className={`h-6 text-xs px-2 rounded-md font-medium shrink-0 transition-colors ${
             confirmClear
-              ? 'text-destructive border-2 border-destructive/40 bg-destructive/10 hover:bg-destructive hover:text-destructive-foreground'
+              ? 'text-destructive bg-destructive/10 hover:bg-destructive hover:text-destructive-foreground'
               : 'text-muted-foreground'
           }`}
           onClick={handleClearClick}
           title={confirmClear ? 'Click again to confirm clear' : 'Clear chat history'}
         >
-          {confirmClear ? 'CONFIRM?' : '[CLEAR]'}
+          {confirmClear ? 'Confirm?' : 'Clear'}
         </Button>
       </div>
 
@@ -596,8 +596,8 @@ export const ChatView: React.FC<ChatViewProps> = ({
           </div>
         )}
         {isEmpty && (
-          <div className="rounded-lg border border-border bg-card shadow-card overflow-hidden text-xs">
-            <div className="card-rule-thin px-4 pt-2.5 pb-2 font-mono font-bold uppercase tracking-widest text-[10px] text-muted-foreground">Start here</div>
+          <div className="rounded-xl border border-border bg-card shadow-card overflow-hidden text-xs">
+            <div className="card-rule-thin px-4 pt-2.5 pb-2 text-xs font-medium text-muted-foreground">Start here</div>
             <div className="p-2.5 space-y-0.5">
               {[
                 { cmd: '/research', desc: 'Search the web, get a cited report' },
@@ -618,9 +618,9 @@ export const ChatView: React.FC<ChatViewProps> = ({
               <button
                 type="button"
                 onClick={() => { setInput('/help'); }}
-                className="text-muted-foreground/60 hover:text-muted-foreground transition-colors mt-1 px-1.5 font-mono text-[10px] uppercase tracking-widest"
+                className="text-muted-foreground/70 hover:text-muted-foreground transition-colors mt-1 px-1.5 text-[11px]"
               >
-                All commands: /help →
+                All commands: <span className="font-mono">/help</span> →
               </button>
             </div>
           </div>
@@ -649,7 +649,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
                 </CollapsibleMessage>
               ) : (
                 <CollapsibleMessage text={m.text}>
-                  <div className="whitespace-pre-wrap font-mono">{m.text}</div>
+                  <div className="whitespace-pre-wrap font-sans">{m.text}</div>
                 </CollapsibleMessage>
               )}
             </div>
@@ -731,8 +731,8 @@ export const ChatView: React.FC<ChatViewProps> = ({
                     onClick={() => { setInput(c.cmd + (c.takesArg ? ' ' : '')); document.getElementById('chat-input')?.focus(); }}
                   >
                     <Sparkles size={14} className="text-primary shrink-0" aria-hidden="true" />
-                    <span className="font-bold font-mono text-foreground uppercase tracking-widest shrink-0">{c.cmd.toUpperCase()}</span>
-                    <span className="text-muted-foreground text-[10px] font-mono uppercase truncate">{c.desc}</span>
+                    <span className="font-semibold font-mono text-foreground shrink-0">{c.cmd}</span>
+                    <span className="text-muted-foreground text-[11px] truncate">{c.desc}</span>
                   </div>
                 ))}
               </div>
@@ -741,7 +741,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
           <textarea
             id="chat-input"
             rows={1}
-            className="flex w-full max-h-40 resize-none bg-transparent px-3 py-2.5 text-sm leading-relaxed placeholder:text-muted-foreground focus:outline-none disabled:cursor-not-allowed disabled:opacity-50 font-mono no-scrollbar"
+            className="flex w-full max-h-40 resize-none bg-transparent px-3 py-2.5 text-sm leading-relaxed placeholder:text-muted-foreground focus:outline-none disabled:cursor-not-allowed disabled:opacity-50 font-sans no-scrollbar"
             placeholder={hasDraftPlan
               ? 'Refine the plan, or type "start"…'
               : 'Ask a question, or / for commands…'}

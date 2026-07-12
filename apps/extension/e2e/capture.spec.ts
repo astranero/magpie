@@ -39,7 +39,8 @@ test.afterAll(async () => { await context?.close(); });
 test('imported document is searchable and opens at the matched passage', async () => {
   const page = await context.newPage();
   await page.goto(`chrome-extension://${extensionId}/sidepanel.html`);
-  await expect(page.getByText('Workspace', { exact: true }).first()).toBeVisible({ timeout: 10000 });
+  // Mount signal: the workspace selector shows the auto-created default
+  await expect(page.getByText('Default Session').first()).toBeVisible({ timeout: 10000 });
 
   // Seed a project + a document with a distinctive phrase
   const proj: any = await sendMessage(page, 'CREATE_PROJECT', { title: 'E2E Project' });
