@@ -1,5 +1,6 @@
 import { create, insert, search as oramaSearch } from '@orama/orama';
 import { Chunk, listDocuments, getChunksForDocs } from './db';
+import { sendToOffscreen } from './offscreen-client';
 
 // ─────────────────────────────────────────────
 // Session Vector Store (Orama BM25)
@@ -121,7 +122,8 @@ export async function searchSessionChunks(
   sessionId: string,
   query: string,
   limit: number = 20,
-  filterDocIds?: string[]
+  filterDocIds?: string[],
+  opts?: { priority?: boolean }
 ): Promise<Chunk[]> {
   // Rehydrate persisted chunks lost to a service worker restart
   await ensureProjectIndexed(sessionId);
@@ -129,7 +131,11 @@ export async function searchSessionChunks(
 
   let queryVector: number[] | null = null;
   try {
-    const res: any = await chrome.runtime.sendMessage({ action: 'OFFSCREEN_GET_EMBEDDINGS', texts: [query] });
+    // Through the offscreen mutex (NOT raw sendMessage): a bare embed here runs
+    // concurrently with a research run's ONNX batch → WASM OOM → renderer crash.
+    // `priority` lets an interactive chat query jump ahead of the run's queue so
+    // the panel answers in seconds instead of freezing until the run finishes.
+    const res: any = await sendToOffscreen({ action: 'OFFSCREEN_GET_EMBEDDINGS', texts: [query] }, undefined, { priority: !!opts?.priority });
     if (res?.ok && res.embeddings && res.embeddings[0]) {
       queryVector = res.embeddings[0];
     }

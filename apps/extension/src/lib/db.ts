@@ -679,11 +679,10 @@ export async function updateDocumentContent(
   const finalChunks: Chunk[] = chunks.map(chunk => ({ ...chunk, id: generateId(), docId: id }));
 
   try {
-    let res: any = await chrome.runtime.sendMessage({ action: 'OFFSCREEN_GET_EMBEDDINGS', texts: finalChunks.map(c => c.text) });
-    if (!res?.ok) {
-      await chrome.runtime.sendMessage({ action: 'ENSURE_OFFSCREEN' });
-      res = await chrome.runtime.sendMessage({ action: 'OFFSCREEN_GET_EMBEDDINGS', texts: finalChunks.map(c => c.text) });
-    }
+    // Through the offscreen mutex (NOT raw sendMessage): a bare call here could
+    // run an ONNX batch concurrently with a research run's batch → WASM heap
+    // OOM → renderer crash. sendToOffscreen serializes + recreates on failure.
+    const res: any = await sendToOffscreen({ action: 'OFFSCREEN_GET_EMBEDDINGS', texts: finalChunks.map(c => c.text) });
     if (res?.ok && Array.isArray(res.embeddings)) {
       res.embeddings.forEach((embedding: number[], idx: number) => {
         if (finalChunks[idx]) finalChunks[idx].embedding = embedding;

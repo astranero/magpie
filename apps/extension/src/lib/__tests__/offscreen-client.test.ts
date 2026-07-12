@@ -59,4 +59,51 @@ describe('sendToOffscreen serialization mutex', () => {
     // The second call ran AFTER the first finished (serialized), not interleaved.
     expect(order).toEqual(['start0', 'start1', 'ok1']);
   });
+
+  it('a priority call jumps ahead of already-queued normal calls', async () => {
+    const order: number[] = [];
+    (globalThis as any).chrome = {
+      runtime: {
+        sendMessage: vi.fn(async (m: any) => {
+          order.push(m.i);
+          await new Promise(r => setTimeout(r, 3));
+          return { ok: true };
+        })
+      }
+    };
+
+    // First call holds the lock. While it runs, enqueue two normals then a
+    // priority one. The priority call must run BEFORE the earlier-queued
+    // normals — this is what keeps a chat query from freezing behind a whole
+    // research run's worth of queued embedding batches.
+    const running = sendToOffscreen({ action: 'X', i: 0 });
+    await Promise.resolve(); // let the first call acquire the lock
+    const n1 = sendToOffscreen({ action: 'X', i: 1 });
+    const n2 = sendToOffscreen({ action: 'X', i: 2 });
+    const hi = sendToOffscreen({ action: 'X', i: 9 }, undefined, { priority: true });
+    await Promise.all([running, n1, n2, hi]);
+
+    expect(order[0]).toBe(0);   // the in-flight call finishes first
+    expect(order[1]).toBe(9);   // priority jumps the two waiting normals
+    expect(order.slice(2)).toEqual([1, 2]); // normals keep FIFO among themselves
+  });
+
+  it('priority calls preserve FIFO among themselves', async () => {
+    const order: number[] = [];
+    (globalThis as any).chrome = {
+      runtime: {
+        sendMessage: vi.fn(async (m: any) => {
+          order.push(m.i);
+          await new Promise(r => setTimeout(r, 3));
+          return { ok: true };
+        })
+      }
+    };
+    const running = sendToOffscreen({ action: 'X', i: 0 });
+    await Promise.resolve();
+    const a = sendToOffscreen({ action: 'X', i: 1 }, undefined, { priority: true });
+    const b = sendToOffscreen({ action: 'X', i: 2 }, undefined, { priority: true });
+    await Promise.all([running, a, b]);
+    expect(order).toEqual([0, 1, 2]);
+  });
 });

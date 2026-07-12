@@ -537,6 +537,15 @@ interface PageChunkEmb { text: string; position: number; embedding: number[] | n
 const pageContextCache = new Map<string, { ctx: PageContext; ts: number; chunks?: PageChunkEmb[] }>();
 const PAGE_CONTEXT_TTL_MS = 5 * 60 * 1000;
 
+// Depth counter set while an interactive chat turn is assembling context.
+// The embedder is one serialized WASM context (see offscreen-client mutex);
+// during a deep-research run the queue fills with the run's batches. Marking a
+// chat turn's embeds `priority` lets them jump ahead so the panel never freezes
+// waiting minutes for the run to release the model. It's a depth (not a bool)
+// because concurrent chat turns (two side panels) can overlap.
+let interactiveDepth = 0;
+const embedOpts = () => ({ priority: interactiveDepth > 0 });
+
 const MAX_PAGE_CHARS = 30000;         // whole-page cutoff before per-question retrieval kicks in
 const PAGE_RETRIEVAL_BUDGET = 22000;  // chars of the most-relevant sections on a long page
 
@@ -558,13 +567,13 @@ async function selectPageMarkdown(ctx: PageContext, question: string): Promise<s
     if (!chunks) {
       const raw = chunkDocument({ docShortId: 'dpage00', content: md });
       const texts = raw.map(c => c.text);
-      const res: any = await sendToOffscreen({ action: 'OFFSCREEN_GET_EMBEDDINGS', texts });
+      const res: any = await sendToOffscreen({ action: 'OFFSCREEN_GET_EMBEDDINGS', texts }, undefined, embedOpts());
       const embeddings: (number[] | null)[] = res?.ok && Array.isArray(res.embeddings) ? res.embeddings : [];
       chunks = raw.map((c, i) => ({ text: c.text, position: c.chunkIndex, embedding: embeddings[i] ?? null }));
       if (entry) entry.chunks = chunks;
     }
 
-    const qRes: any = await sendToOffscreen({ action: 'OFFSCREEN_GET_EMBEDDINGS', texts: [question] });
+    const qRes: any = await sendToOffscreen({ action: 'OFFSCREEN_GET_EMBEDDINGS', texts: [question] }, undefined, embedOpts());
     const qVec: number[] | undefined = qRes?.ok ? qRes.embeddings?.[0] : undefined;
     if (!qVec) throw new Error('no query embedding');
 
@@ -1103,7 +1112,9 @@ async function buildChatRequest(chatId: string, projectId: string, prompt: strin
   // chunks that trip the strict "I cannot answer from the sources" refusal
   // (so "hi" got refused), and its query embedding would queue behind an
   // active research run at the offscreen embedder. Answer conversationally.
-  if (isChitchat(prompt) && !pageContext) {
+  // A greeting stays a greeting even with a web page open — an open tab
+  // doesn't turn "hi" into a question, so don't gate this on pageContext.
+  if (isChitchat(prompt)) {
     onStatus?.('Writing the answer…');
     const systemPrompt = rulesBlock +
       `You are Magpie, a warm, concise research assistant. The user sent a greeting or small talk — NOT a research question. ` +
@@ -1124,7 +1135,7 @@ async function buildChatRequest(chatId: string, projectId: string, prompt: strin
   // 3. Search each variant and merge results
   let relevantChunks: any[] = [];
   if (docIds.length > 0) {
-    relevantChunks = await searchSessionChunks(projectId, effectiveQuery, 40, docIds);
+    relevantChunks = await searchSessionChunks(projectId, effectiveQuery, 40, docIds, embedOpts());
     console.log(`[RAG] Initial search for "${effectiveQuery.slice(0, 50)}..." returned ${relevantChunks.length} chunks`);
 
     // Adaptive multi-query: only expand when initial results are sparse
@@ -1136,7 +1147,7 @@ async function buildChatRequest(chatId: string, projectId: string, prompt: strin
           const existingIds = new Set(relevantChunks.map(c => c.id));
 
           for (const variant of expandedQueries) {
-            const variantChunks = await searchSessionChunks(projectId, variant, 10, docIds);
+            const variantChunks = await searchSessionChunks(projectId, variant, 10, docIds, embedOpts());
             for (const chunk of variantChunks) {
               if (!existingIds.has(chunk.id)) {
                 relevantChunks.push(chunk);
@@ -1155,7 +1166,7 @@ async function buildChatRequest(chatId: string, projectId: string, prompt: strin
     if (relevantChunks.length < 3 && enabledDocs.length > 0) {
       const existingIds = new Set(relevantChunks.map(c => c.id));
       for (const doc of enabledDocs.slice(0, 3)) {
-        const titleChunks = await searchSessionChunks(projectId, doc.title, 5, docIds);
+        const titleChunks = await searchSessionChunks(projectId, doc.title, 5, docIds, embedOpts());
         for (const chunk of titleChunks) {
           if (!existingIds.has(chunk.id)) {
             relevantChunks.push(chunk);
@@ -1526,7 +1537,7 @@ async function expandRelevantLinks(pageCtx: PageContext, question: string): Prom
       action: 'OFFSCREEN_RERANK',
       query: question,
       passages: refs.map(r => r.anchorText!)
-    });
+    }, undefined, embedOpts());
     if (!res?.ok || !Array.isArray(res.scores)) return [];
     ranked = refs
       .map((r, i) => ({ r, score: res.scores[i] ?? 0 }))
@@ -1609,6 +1620,8 @@ async function handleChat(request: Record<string, unknown>): Promise<Record<stri
   abortControllers.set(chatId, controller);
   const signal = controller.signal;
 
+  // Mark this an interactive turn so its embeds jump ahead of any research run.
+  interactiveDepth++;
   try {
     const pageCtx = request.includePageContext ? await getPageContext().catch(() => null) : null;
     const { systemPrompt, formattedHistory, linkedPages } = await buildChatRequest(chatId, projectId, prompt, signal, pageCtx);
@@ -1635,6 +1648,7 @@ async function handleChat(request: Record<string, unknown>): Promise<Record<stri
 
     return { reply };
   } finally {
+    interactiveDepth = Math.max(0, interactiveDepth - 1);
     abortControllers.delete(chatId);
   }
 }
@@ -1683,6 +1697,9 @@ chrome.runtime.onConnect.addListener((port) => {
     // resets the idle timer. (Same guard the research run uses.)
     const keepAlive = setInterval(() => { chrome.runtime.getPlatformInfo?.().catch(() => {}); }, 20000);
 
+    // Mark this an interactive turn so its embeds (page context, retrieval,
+    // rerank) jump ahead of a concurrent research run instead of freezing.
+    interactiveDepth++;
     try {
       const pageCtx = req.includePageContext ? await getPageContext().catch(() => null) : null;
       let { systemPrompt, formattedHistory, linkedPages } = await buildChatRequest(
@@ -1742,6 +1759,7 @@ chrome.runtime.onConnect.addListener((port) => {
         safePost({ type: 'ERROR', error: String(err instanceof Error ? err.message : err) });
       }
     } finally {
+      interactiveDepth = Math.max(0, interactiveDepth - 1);
       clearInterval(keepAlive);
       if (abortControllers.get(chatId) === localController) abortControllers.delete(chatId);
     }

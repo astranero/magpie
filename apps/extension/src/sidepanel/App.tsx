@@ -208,11 +208,19 @@ export default function App() {
     if (typeof chrome !== 'undefined' && chrome.tabs) {
       chrome.tabs.query({ active: true, lastFocusedWindow: true }, (tabs) => {
         const t = tabs?.[0];
-        if (t && t.url && (t.url.startsWith('http://') || t.url.startsWith('https://'))) {
-          setTabInfo({ title: t.title || 'Untitled', url: t.url, favIconUrl: t.favIconUrl });
-        } else {
-          setTabInfo(null);
-        }
+        const next: TabInfo | null =
+          t && t.url && (t.url.startsWith('http://') || t.url.startsWith('https://'))
+            ? { title: t.title || 'Untitled', url: t.url, favIconUrl: t.favIconUrl }
+            : null;
+        // Bail when nothing changed. onUpdated fires many times per page load
+        // (one per sub-resource), and a fresh object each time would re-render
+        // the whole App on every tick — needless churn that shows as a flash /
+        // jank when switching pages. Only setState on a real change.
+        setTabInfo(prev => {
+          if (prev === next) return prev;
+          if (prev && next && prev.url === next.url && prev.title === next.title && prev.favIconUrl === next.favIconUrl) return prev;
+          return next;
+        });
       });
     }
   }, []);
@@ -689,9 +697,13 @@ export default function App() {
         const pendingPlans = (prev[chatId] || []).filter(
           m => m.plan && (m.plan.status === 'draft' || m.plan.status === 'refining' || m.plan.status === 'loading')
         );
+        // Empty history → keep the array empty and let ChatView show its
+        // onboarding card. (A synthetic "welcome" system message used to live
+        // here, but it lingered above real messages after the first send —
+        // optimistic sends append onto whatever's already in the array.)
         const hist = (res.messages as any[]).length > 0
           ? (res.messages as ChatMessage[])
-          : pendingPlans.length > 0 ? [] : [{ id: 'welcome', role: 'system' as const, text: 'Capture some web pages, then ask questions. Answers will cite your sources.' }];
+          : [];
         return { ...prev, [chatId]: [...hist, ...pendingPlans] };
       });
     }
@@ -1365,14 +1377,10 @@ export default function App() {
   const clearChat = async () => {
     if (!activeChatId) return;
     await msg('CLEAR_CHAT_HISTORY', { chatId: activeChatId });
-    setMessages(prev => ({
-      ...prev,
-      [activeChatId]: [{
-        id: 'welcome',
-        role: 'system',
-        text: 'Chat cleared. Ask a new question about your research, or type /research <topic> to start deep research.'
-      }]
-    }));
+    // Empty the array so ChatView shows its onboarding card; a persistent
+    // "chat cleared" system message would linger above the next reply.
+    setMessages(prev => ({ ...prev, [activeChatId]: [] }));
+    showToast('success', 'Chat cleared');
   };
 
   /**

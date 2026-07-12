@@ -555,7 +555,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
     }
   };
 
-  const isEmpty = messages.length === 0 || (messages.length === 1 && messages[0].id === 'welcome');
+  const isEmpty = messages.length === 0;
   const hasDraftPlan = messages.some(m => m.plan && (m.plan.status === 'draft' || m.plan.status === 'refining'));
 
   // The field log is a running status panel, but a message the user QUEUES

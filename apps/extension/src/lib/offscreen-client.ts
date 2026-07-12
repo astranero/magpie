@@ -33,27 +33,52 @@ function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
 // context. Two embedding batches at once (e.g. a deep-research run + a chat
 // query the user typed into the same chat mid-run) each allocate the model's
 // working memory concurrently → the WASM heap OOMs → std::bad_alloc → the
-// offscreen/renderer process crashes ("Chrome unexpectedly quit"). Chaining
-// every call through this tail promise means at most one is in flight, so
-// chat-during-research is safe — it just queues behind the run's current batch.
-let queueTail: Promise<unknown> = Promise.resolve();
+// offscreen/renderer process crashes ("Chrome unexpectedly quit"). At most one
+// call is ever in flight, so chat-during-research can never OOM.
+//
+// PRIORITY — a plain FIFO made chat "freeze" during a deep-research run: the
+// run enqueues dozens of embedding batches, and a chat query the user typed
+// then waited behind ALL of them (minutes). So the queue is priority-ordered:
+// an interactive chat call jumps ahead of not-yet-started research batches and
+// waits at most for the ONE batch currently in flight (seconds). Ordering is
+// stable within a priority tier (FIFO), so research still makes progress.
+type Waiter = { priority: boolean; wake: () => void };
+let running = false;
+const waiters: Waiter[] = [];
+
+function acquire(priority: boolean): Promise<void> {
+  if (!running) { running = true; return Promise.resolve(); }
+  return new Promise<void>(wake => {
+    if (priority) {
+      // Sit after any already-waiting priority calls, ahead of all normals.
+      let i = 0;
+      while (i < waiters.length && waiters[i].priority) i++;
+      waiters.splice(i, 0, { priority, wake });
+    } else {
+      waiters.push({ priority, wake });
+    }
+  });
+}
+
+function releaseNext(): void {
+  const next = waiters.shift();
+  if (next) next.wake();
+  else running = false;
+}
 
 /**
  * Send message to offscreen document. Calls are SERIALIZED (see mutex above)
  * and each has automatic retry + a finite deadline; a dead offscreen doc is
- * recreated and the call retried once.
+ * recreated and the call retried once. Pass `priority` for latency-sensitive
+ * interactive calls (a chat turn) so they don't starve behind a research run.
  */
-export async function sendToOffscreen<T>(message: Record<string, unknown>, timeoutMs = OFFSCREEN_DEFAULT_TIMEOUT_MS): Promise<T> {
-  const prev = queueTail;
-  let release!: () => void;
-  queueTail = new Promise<void>(r => { release = r; });
-  // Wait for the previous call to finish (success OR failure) before starting.
-  await prev.catch(() => {});
+export async function sendToOffscreen<T>(message: Record<string, unknown>, timeoutMs = OFFSCREEN_DEFAULT_TIMEOUT_MS, opts?: { priority?: boolean }): Promise<T> {
+  await acquire(!!opts?.priority);
   try {
     return await sendToOffscreenUnqueued<T>(message, timeoutMs);
   } finally {
-    // Let the next queued call proceed — even if this one threw or timed out.
-    release();
+    // Hand the lock to the next waiter — even if this one threw or timed out.
+    releaseNext();
   }
 }
 
