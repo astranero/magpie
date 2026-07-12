@@ -64,16 +64,7 @@ async function parsePdfUrl(url: string): Promise<{ pages: string[]; imagePages: 
 const MAX_PDF_PAGES = 800;
 
 async function parsePdfData(data: Uint8Array): Promise<{ pages: string[]; imagePages: { index: number; dataUrl: string }[] }> {
-  // Font handling dominates per-page cost. We only need TEXT (scanned pages
-  // render separately), so skip @font-face construction and prefer system
-  // fonts — this cut per-page time by ~an order of magnitude for big PDFs,
-  // which is what let a 470-page book finish instead of hitting the timeout.
-  const pdf = await pdfjsLib.getDocument({
-    data,
-    isEvalSupported: false,
-    disableFontFace: true,
-    useSystemFonts: true,
-  }).promise;
+  const pdf = await pdfjsLib.getDocument({ data, isEvalSupported: false }).promise;
   const pages: string[] = [];
   const imagePages: { index: number; dataUrl: string }[] = [];
 
