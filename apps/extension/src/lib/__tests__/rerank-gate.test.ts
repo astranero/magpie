@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { gateRerankedChunks, RERANK_MIN_SCORE, RERANK_JUNK_SCORE } from '../vector-store';
+import { gateRerankedChunks, isConfidentMatch, RERANK_MIN_SCORE, RERANK_JUNK_SCORE } from '../vector-store';
 
 const mk = (id: string, score: number) => ({ chunk: id, score });
 
@@ -41,5 +41,25 @@ describe('gateRerankedChunks', () => {
     it('gate constants keep their intended ordering', () => {
     expect(RERANK_MIN_SCORE).toBeGreaterThan(RERANK_JUNK_SCORE);
     expect(RERANK_MIN_SCORE).toBeLessThan(0);
+  });
+});
+
+describe('isConfidentMatch (chat: ground on workspace vs go to web)', () => {
+  it('empty retrieval is not confident', () => {
+    expect(isConfidentMatch([])).toBe(false);
+  });
+
+  it('genuinely relevant top chunk (> 0) is confident', () => {
+    expect(isConfidentMatch([{ rerankScore: 3.2 }, { rerankScore: -1 }])).toBe(true);
+  });
+
+  it('only borderline chunks (all ≤ 0) are NOT confident — the weather-tomorrow case', () => {
+    // These clear the display gate (-4) so they render, but "weather tomorrow"
+    // is not genuinely answered by the workspace → should escalate to the web.
+    expect(isConfidentMatch([{ rerankScore: -1.5 }, { rerankScore: -3 }])).toBe(false);
+  });
+
+  it('does not second-guess when the reranker was unavailable (no scores)', () => {
+    expect(isConfidentMatch([{}, {}])).toBe(true);
   });
 });

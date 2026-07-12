@@ -19,7 +19,7 @@ import { harvestReferences } from '../lib/reference-harvest';
 import { needsIntentResolution, formatHistoryForIntent, parseRepoUrl, selectTreePaths, formatTreeBlock, matchFilesInTree, isChitchat, RepoRef } from '../lib/query-intent';
 import { getResearchLimits } from '../lib/research-limits';
 import { looksLikeBuildLog, extractLogHighlights } from '../lib/log-highlights';
-import { addChunksToVectorStore, searchSessionChunks, resetSessionIndex, resetAllSessionIndexes, RERANK_MIN_SCORE } from '../lib/vector-store';
+import { addChunksToVectorStore, searchSessionChunks, resetSessionIndex, resetAllSessionIndexes, isConfidentMatch } from '../lib/vector-store';
 import { replaceChunksForDoc } from '../lib/db';
 import { pdfUrlToBody, pdfOpfsToBody, ensureOffscreen as ensureOffscreenDoc } from '../lib/pdf-parser';
 import { setEnsureOffscreen, sendToOffscreen } from '../lib/offscreen-client';
@@ -1213,16 +1213,10 @@ async function buildChatRequest(chatId: string, projectId: string, prompt: strin
   // Confidence gate: retrieval's keyword fallback almost always returns SOME
   // chunk, so "length > 0" is a poor "we have an answer" signal — a question
   // like "weather tomorrow" pulls borderline noise and then trips the citation
-  // refusal instead of searching the web. Only treat the workspace as having
-  // the answer when the best chunk cleared the rerank relevance gate. When
-  // rerank scores are absent (reranker unavailable) we don't second-guess.
-  const rerankScores = relevantChunks
-    .map(c => (c as any).rerankScore)
-    .filter((s: unknown): s is number => typeof s === 'number');
-  const confidentMatch = relevantChunks.length > 0 &&
-    (rerankScores.length === 0 || Math.max(...rerankScores) > RERANK_MIN_SCORE);
-
-  if (confidentMatch) {
+  // refusal instead of searching the web. Only ground on the workspace when the
+  // best chunk is GENUINELY relevant (see isConfidentMatch); otherwise fall
+  // through to the web-search / general-knowledge branch below.
+  if (isConfidentMatch(relevantChunks as Array<{ rerankScore?: number }>)) {
     // Build citation-anchored context (generous — favor fuller grounding over
     // "I couldn't find it" cutoffs; only fires for library-source questions).
     const context = buildCitationContext(relevantChunks, docTitles, 32000);

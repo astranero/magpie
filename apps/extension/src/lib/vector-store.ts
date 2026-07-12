@@ -175,12 +175,15 @@ export async function searchSessionChunks(
   if (candidateChunks.length === 0) return [];
 
   // Local Cross-Encoder Reranking + relevance gate (see gateRerankedChunks).
+  // Through the offscreen mutex (NOT raw sendMessage): the rerank ONNX pass and
+  // the query embedding above must never run at once, or the WASM heap OOMs and
+  // crashes the renderer. Same interactive priority as the query embed.
   try {
-    const rerankRes: any = await chrome.runtime.sendMessage({
+    const rerankRes: any = await sendToOffscreen({
       action: 'OFFSCREEN_RERANK',
       query,
       passages: candidateChunks.map(c => c.text)
-    });
+    }, undefined, { priority: !!opts?.priority });
 
     if (rerankRes?.ok && rerankRes.scores) {
       const scored = candidateChunks.map((chunk, idx) => ({
@@ -209,6 +212,29 @@ export async function searchSessionChunks(
 // model irrelevant chunks is what produces bogus citations.
 export const RERANK_MIN_SCORE = -4;
 export const RERANK_JUNK_SCORE = -8;
+
+// "Trust the workspace to answer" needs a HIGHER bar than "show this chunk".
+// RERANK_MIN_SCORE (-4) is the display gate — borderline keyword overlap clears
+// it, so a question like "weather tomorrow" pulls chunks that trip the citation
+// refusal instead of escalating to the web. Genuine relevance is ≳ 0, so we
+// only treat the workspace as authoritative when the best chunk clears 0.
+export const CONFIDENT_MATCH_SCORE = 0;
+
+/**
+ * Does the retrieved set genuinely answer the query, or is it borderline
+ * keyword noise? Chat uses this to decide whether to ground on the workspace
+ * or fall through to a web search. Chunks carry a `rerankScore` (attached by
+ * searchSessionChunks). When scores are absent the reranker was unavailable —
+ * we don't second-guess a non-empty result then. Pure + unit-tested.
+ */
+export function isConfidentMatch(chunks: Array<{ rerankScore?: number }>): boolean {
+  if (chunks.length === 0) return false;
+  const scores = chunks
+    .map(c => c.rerankScore)
+    .filter((s): s is number => typeof s === 'number');
+  if (scores.length === 0) return true; // reranker unavailable → keep the match
+  return Math.max(...scores) > CONFIDENT_MATCH_SCORE;
+}
 
 /**
  * Relative "score cliff": when the top hit is confident (>0), candidates
