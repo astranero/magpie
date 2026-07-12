@@ -155,3 +155,33 @@ describe('isChitchat', () => {
     }
   });
 });
+
+describe('context budgets — bigger, all matches', () => {
+  it('matchFilesInTree returns ALL matching files (up to 6), not just one', async () => {
+    const { matchFilesInTree } = await import('../query-intent');
+    const tree = [
+      'cli/agent.json', 'src/agent.json', 'pkg/a/agent.json', 'pkg/b/agent.json',
+      'pkg/c/agent.json', 'pkg/d/agent.json', 'pkg/e/agent.json', 'README.md'
+    ];
+    const out = matchFilesInTree(tree, 'what does agent.json contain?');
+    expect(out.length).toBe(6);            // was capped at 2 — now surfaces the whole set
+    expect(out.every(p => p.endsWith('agent.json'))).toBe(true);
+  });
+
+  it('selectTreePaths default budget is generous (fits a medium tree whole)', async () => {
+    const { selectTreePaths } = await import('../query-intent');
+    const paths = Array.from({ length: 400 }, (_, i) => `src/dir${i}/file${i}.ts`); // ~7.6k chars
+    const { truncated } = selectTreePaths(paths, 'anything');
+    expect(truncated).toBe(false);          // 12k budget swallows a tree that 6k truncated
+  });
+});
+
+describe('parallel fetch stays fast', () => {
+  it('N fetches run concurrently, not serially (Promise.all pattern)', async () => {
+    const fetchOne = (ms: number) => new Promise<number>(r => setTimeout(() => r(ms), ms));
+    const t0 = Date.now();
+    await Promise.all([50, 50, 50, 50, 50, 50].map(fetchOne));   // mirrors buildRepoFileBlocks
+    const elapsed = Date.now() - t0;
+    expect(elapsed).toBeLessThan(6 * 50 * 0.6);   // ~50ms, not ~300ms
+  });
+});

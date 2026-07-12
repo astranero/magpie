@@ -537,8 +537,8 @@ interface PageChunkEmb { text: string; position: number; embedding: number[] | n
 const pageContextCache = new Map<string, { ctx: PageContext; ts: number; chunks?: PageChunkEmb[] }>();
 const PAGE_CONTEXT_TTL_MS = 5 * 60 * 1000;
 
-const MAX_PAGE_CHARS = 16000;
-const PAGE_RETRIEVAL_BUDGET = 12000;
+const MAX_PAGE_CHARS = 30000;         // whole-page cutoff before per-question retrieval kicks in
+const PAGE_RETRIEVAL_BUDGET = 22000;  // chars of the most-relevant sections on a long page
 
 /**
  * Build the page markdown to inline into the chat request. Short pages go in
@@ -1117,7 +1117,7 @@ async function buildChatRequest(chatId: string, projectId: string, prompt: strin
   // 3. Search each variant and merge results
   let relevantChunks: any[] = [];
   if (docIds.length > 0) {
-    relevantChunks = await searchSessionChunks(projectId, effectiveQuery, 25, docIds);
+    relevantChunks = await searchSessionChunks(projectId, effectiveQuery, 40, docIds);
     console.log(`[RAG] Initial search for "${effectiveQuery.slice(0, 50)}..." returned ${relevantChunks.length} chunks`);
 
     // Adaptive multi-query: only expand when initial results are sparse
@@ -1174,8 +1174,9 @@ async function buildChatRequest(chatId: string, projectId: string, prompt: strin
     `The user can always ask a follow-up; do not pre-answer questions they haven't asked.`;
 
   if (relevantChunks.length > 0) {
-    // Build citation-anchored context
-    const context = buildCitationContext(relevantChunks, docTitles, 25000);
+    // Build citation-anchored context (generous — favor fuller grounding over
+    // "I couldn't find it" cutoffs; only fires for library-source questions).
+    const context = buildCitationContext(relevantChunks, docTitles, 32000);
 
     // We add strict anti-hallucination prompts to the system prompt
     systemPrompt = CITATION_SYSTEM_PROMPT +
@@ -1391,7 +1392,8 @@ async function buildRepoTreeBlock(pageUrl: string, question: string): Promise<st
 // ── Repo file contents — read the specific files a question names ──
 
 const repoFileCache = new Map<string, { text: string; ts: number }>();
-const REPO_FILE_MAX_CHARS = 8_000;
+const REPO_FILE_MAX_CHARS = 14_000;       // per file
+const REPO_FILES_TOTAL_BUDGET = 48_000;   // across ALL files named in one question
 
 async function fetchRepoFileRaw(ref: RepoRef, branch: string, path: string): Promise<string | null> {
   const encPath = path.split('/').map(encodeURIComponent).join('/');
@@ -1427,27 +1429,40 @@ async function buildRepoFileBlocks(pageUrl: string, question: string): Promise<s
   const tree = await getRepoTree(ref);
   if (!tree) return null;
 
+  // Ask about "agent.json" that lives in three places → inline ALL of them,
+  // not just one. Fetch every match IN PARALLEL (a sequential loop turned each
+  // extra file into another network round-trip of latency), then inline within
+  // a shared budget so many files can't blow the context window.
   const matches = matchFilesInTree(tree.paths, question);
   if (matches.length === 0) return null;
 
-  let out = '';
-  for (const path of matches) {
+  const fetched = await Promise.all(matches.map(async (path) => {
     const cacheKey = `${ref.provider}:${ref.label}@${tree.branch}:${path}`;
     let entry = repoFileCache.get(cacheKey);
     if (!entry || Date.now() - entry.ts > REPO_TREE_TTL_MS) {
       const text = await fetchRepoFileRaw(ref, tree.branch, path).catch(() => null);
-      if (!text) continue;
+      if (!text) return null;
       entry = { text, ts: Date.now() };
       repoFileCache.set(cacheKey, entry);
     }
-    const truncated = entry.text.length > REPO_FILE_MAX_CHARS;
-    const body = truncated ? entry.text.slice(0, REPO_FILE_MAX_CHARS) : entry.text;
-    const ext = path.split('.').pop() || '';
+    return { path, text: entry.text };
+  }));
+
+  let out = '';
+  let usedTotal = 0;
+  for (const f of fetched) {
+    if (!f) continue;
+    if (usedTotal >= REPO_FILES_TOTAL_BUDGET) break;   // keep the whole set bounded
+    const perFile = Math.min(REPO_FILE_MAX_CHARS, REPO_FILES_TOTAL_BUDGET - usedTotal);
+    const truncated = f.text.length > perFile;
+    const body = truncated ? f.text.slice(0, perFile) : f.text;
+    usedTotal += body.length;
+    const ext = f.path.split('.').pop() || '';
     out +=
-      `\n\n--- REPOSITORY FILE: ${path} (${ref.label}; fetched from the ${ref.provider} API; NOT saved) ---\n` +
+      `\n\n--- REPOSITORY FILE: ${f.path} (${ref.label}; fetched from the ${ref.provider} API; NOT saved) ---\n` +
       '```' + ext + '\n' + body + (truncated ? '\n… (file truncated)' : '') + '\n```\n' +
       `--- END FILE ---`;
-    console.log(`[REPO-FILE] Inlined ${path} (${entry.text.length} chars${truncated ? ', truncated' : ''})`);
+    console.log(`[REPO-FILE] Inlined ${f.path} (${f.text.length} chars${truncated ? ', truncated' : ''})`);
   }
   return out || null;
 }
@@ -1462,14 +1477,14 @@ async function buildRepoFileBlocks(pageUrl: string, question: string): Promise<s
 // TTL cache only, nothing touches IndexedDB or the vector store, and the
 // model must not fake [anchor] citations for it.
 
-const LINK_EXPANSION_MAX = 2;
+const LINK_EXPANSION_MAX = 3;
 const LINK_EXPANSION_MIN_SCORE = 0.5;   // reranker sigmoid — “more likely relevant than not”
 // Hub/TOC pages (docs indexes, link directories) carry almost no answer text
 // of their own — the value is entirely behind the links. Fetch more of them,
 // with a slightly softer gate.
-const HUB_EXPANSION_MAX = 4;
+const HUB_EXPANSION_MAX = 6;
 const HUB_MIN_SCORE = 0.4;
-const LINKED_PAGE_BUDGET = 5_000;       // chars per linked page in the prompt
+const LINKED_PAGE_BUDGET = 8_000;       // chars per linked page in the prompt
 const LINK_FETCH_TIMEOUT_MS = 15_000;
 
 /** Link-dominated page: many links, little prose between them. */

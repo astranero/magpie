@@ -135,7 +135,7 @@ export function parseRepoUrl(url: string): RepoRef | null {
  * Large trees keep every path matching a question keyword plus the head of
  * the tree (top levels first), inside a character budget.
  */
-export function selectTreePaths(paths: string[], question: string, budget = 6_000): { selected: string[]; truncated: boolean } {
+export function selectTreePaths(paths: string[], question: string, budget = 12_000): { selected: string[]; truncated: boolean } {
   const total = paths.length;
   const joined = paths.join('\n');
   if (joined.length <= budget) return { selected: paths, truncated: false };
@@ -180,7 +180,7 @@ const BINARY_EXT_RE = /\.(png|jpe?g|gif|webp|ico|svg|woff2?|ttf|otf|eot|pdf|zip|
  * filenames ("agent.json", "src/index.ts") win; exact basename matches rank
  * above substring hits. Binary files are never candidates.
  */
-export function matchFilesInTree(paths: string[], question: string, max = 2): string[] {
+export function matchFilesInTree(paths: string[], question: string, max = 6): string[] {
   const filePaths = paths.filter(p => !p.endsWith('/') && !BINARY_EXT_RE.test(p));
   // Tokens that look like file names/paths: contain a dot or slash
   const fileTokens = (question.match(/[\w][\w./_-]*\.\w{1,8}/g) || []).map(t => t.toLowerCase());
