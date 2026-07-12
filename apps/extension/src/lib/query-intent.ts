@@ -157,6 +157,40 @@ const PROVIDER_NAMES: Record<RepoProvider, string> = {
   github: 'GitHub', gitlab: 'GitLab', azure: 'Azure DevOps', bitbucket: 'Bitbucket'
 };
 
+const BINARY_EXT_RE = /\.(png|jpe?g|gif|webp|ico|svg|woff2?|ttf|otf|eot|pdf|zip|gz|tar|jar|wasm|onnx|bin|exe|dll|so|dylib|mp[34]|mov|avi|sqlite|db)$/i;
+
+/**
+ * Files in the tree the question is actually asking about. Explicit
+ * filenames ("agent.json", "src/index.ts") win; exact basename matches rank
+ * above substring hits. Binary files are never candidates.
+ */
+export function matchFilesInTree(paths: string[], question: string, max = 2): string[] {
+  const filePaths = paths.filter(p => !p.endsWith('/') && !BINARY_EXT_RE.test(p));
+  // Tokens that look like file names/paths: contain a dot or slash
+  const fileTokens = (question.match(/[\w][\w./_-]*\.\w{1,8}/g) || []).map(t => t.toLowerCase());
+  if (fileTokens.length === 0) return [];
+
+  const scored = filePaths
+    .map(p => {
+      const lower = p.toLowerCase();
+      const base = lower.split('/').pop()!;
+      let score = 0;
+      for (const t of fileTokens) {
+        const tBase = t.split('/').pop()!;
+        // Bonuses stack: a path-qualified token ("cli/…/agent.json") must
+        // outrank a mere basename twin elsewhere in the tree.
+        if (base === tBase) score += 10;           // exact filename
+        if (t.includes('/') && lower.endsWith(t)) score += 8;  // full path named
+        else if (lower.includes(t) && t !== tBase) score += 2;
+      }
+      return { p, score, depth: p.split('/').length };
+    })
+    .filter(x => x.score > 0)
+    .sort((a, b) => (b.score - a.score) || (a.depth - b.depth) || a.p.localeCompare(b.p));
+
+  return scored.slice(0, max).map(x => x.p);
+}
+
 /** Render the tree block injected into the system prompt. */
 export function formatTreeBlock(ref: RepoRef, paths: string[], truncated: boolean): string {
   return (

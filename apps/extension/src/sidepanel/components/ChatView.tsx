@@ -7,6 +7,7 @@ import { LocalDocument, ChatMessage, ResearchPlan, ResolvedCitation } from '../t
 import { Send, StopCircle, Sparkles, ChevronDown, ChevronUp, Loader2, Microscope, Search } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { paletteEntries, SlashCommand } from '../../lib/commands';
+import { ErrorBoundary } from './ErrorBoundary';
 
 const CITATION_REGEX = /\[([a-z]\w{1,8}\.s\d+\.p\d+(?:\.\d+)?)\]/g;
 
@@ -20,6 +21,8 @@ interface ChatViewProps {
   activeChatId: string;
   activeProjectId: string;
   generating: Record<string, boolean>;
+  /** Live phase line for the thinking indicator ("Reading the page…"). */
+  thinkingStatus?: Record<string, string>;
   researching: Record<string, boolean>;
   researchLogs: Record<string, string[]>;
   documents: LocalDocument[];
@@ -63,6 +66,7 @@ const PlanCard: React.FC<PlanCardProps> = ({ msgId, plan, onStart, onCancel }) =
   const modeName = plan.mode === 'deep' ? 'Deep Research' : 'Research';
   const isPending = plan.status === 'draft' || plan.status === 'refining';
   const isBusy = plan.status === 'loading' || plan.status === 'refining';
+  const directives = plan.subQuestions ?? [];
 
   return (
     <div className={`w-full rounded-xl border bg-card shadow-card overflow-hidden transition-opacity animate-in fade-in slide-in-from-bottom-2 motion-reduce:animate-none ${
@@ -118,12 +122,12 @@ const PlanCard: React.FC<PlanCardProps> = ({ msgId, plan, onStart, onCancel }) =
 
             {/* Directive ledger: numbered stops on the expedition, connected
                 by a rail — each row is one thing the agent will go find out. */}
-            {plan.subQuestions.length > 0 && (
+            {directives.length > 0 && (
               <ol className="relative">
-                {plan.subQuestions.map((q, i) => (
+                {directives.map((q, i) => (
                   <li key={i} className="relative flex gap-3 pb-2.5 last:pb-0 group">
                     {/* rail segment */}
-                    {i < plan.subQuestions.length - 1 && (
+                    {i < directives.length - 1 && (
                       <span className="absolute left-[9px] top-5 bottom-0 w-px bg-border" aria-hidden="true" />
                     )}
                     <span className="relative z-10 mt-0.5 w-[19px] h-[19px] shrink-0 rounded-full border border-primary/40 bg-card text-primary
@@ -458,6 +462,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
   activeChatId,
   activeProjectId,
   generating,
+  thinkingStatus = {},
   researching,
   researchLogs,
   documents,
@@ -629,7 +634,9 @@ export const ChatView: React.FC<ChatViewProps> = ({
         {messages.map(m => m.plan ? (
           <div key={m.id} className="flex justify-start">
             <div className="w-full max-w-[95%]">
-              <PlanCard msgId={m.id} plan={m.plan} onStart={onStartPlan} onCancel={onCancelPlan} />
+              <ErrorBoundary compact label="plan card">
+                <PlanCard msgId={m.id} plan={m.plan} onStart={onStartPlan} onCancel={onCancelPlan} />
+              </ErrorBoundary>
             </div>
           </div>
         ) : (
@@ -643,15 +650,19 @@ export const ChatView: React.FC<ChatViewProps> = ({
                   : 'bg-card border-border/80 text-card-foreground rounded-bl-md'
               }`}
             >
-              {m.role === 'assistant' || m.role === 'system' ? (
-                <CollapsibleMessage text={m.text} streaming={m.streaming}>
-                  <MessageBody text={m.text} compact={m.role === 'system'} streaming={m.streaming} resolveCitations={resolveCitations} onOpenDocument={onOpenDocument} onOpenExternalLink={onOpenExternalLink} />
-                </CollapsibleMessage>
-              ) : (
-                <CollapsibleMessage text={m.text}>
-                  <div className="whitespace-pre-wrap font-sans">{m.text}</div>
-                </CollapsibleMessage>
-              )}
+              {/* One malformed message (broken markdown/KaTeX) must not white-
+                  screen the whole panel — quarantine it per message. */}
+              <ErrorBoundary compact label="message">
+                {m.role === 'assistant' || m.role === 'system' ? (
+                  <CollapsibleMessage text={m.text} streaming={m.streaming}>
+                    <MessageBody text={m.text} compact={m.role === 'system'} streaming={m.streaming} resolveCitations={resolveCitations} onOpenDocument={onOpenDocument} onOpenExternalLink={onOpenExternalLink} />
+                  </CollapsibleMessage>
+                ) : (
+                  <CollapsibleMessage text={m.text}>
+                    <div className="whitespace-pre-wrap font-sans">{m.text}</div>
+                  </CollapsibleMessage>
+                )}
+              </ErrorBoundary>
             </div>
           </div>
         ))}
@@ -664,7 +675,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
                 <div className="w-1.5 h-1.5 rounded-full bg-primary animate-pulse" style={{ animationDelay: '300ms' }} />
               </div>
               <span className="text-xs text-muted-foreground font-medium" aria-live="polite">
-                THINKING...
+                {thinkingStatus[activeChatId] || 'Thinking…'}
               </span>
             </div>
           </div>

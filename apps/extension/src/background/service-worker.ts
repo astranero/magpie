@@ -16,7 +16,7 @@ import { buildFrontmatter, hasFrontmatter } from '../lib/frontmatter';
 import { get as idbGet } from 'idb-keyval';
 import { runDeepResearch, generateSubQuestions, scrapeUrl, isJunkUrl } from './deep-researcher';
 import { harvestReferences } from '../lib/reference-harvest';
-import { needsIntentResolution, formatHistoryForIntent, parseRepoUrl, selectTreePaths, formatTreeBlock, RepoRef } from '../lib/query-intent';
+import { needsIntentResolution, formatHistoryForIntent, parseRepoUrl, selectTreePaths, formatTreeBlock, matchFilesInTree, RepoRef } from '../lib/query-intent';
 import { getResearchLimits } from '../lib/research-limits';
 import { looksLikeBuildLog, extractLogHighlights } from '../lib/log-highlights';
 import { addChunksToVectorStore, searchSessionChunks, resetSessionIndex, resetAllSessionIndexes } from '../lib/vector-store';
@@ -1063,7 +1063,7 @@ async function resolveQuestionIntent(
 }
 
 /** Build the RAG system prompt + formatted history for a chat turn. */
-async function buildChatRequest(chatId: string, projectId: string, prompt: string, signal: AbortSignal, pageContext?: PageContext | null): Promise<{ systemPrompt: string; formattedHistory: Array<{ role: string; content: string }>; linkedPages: Array<{ title: string; url: string }> }> {
+async function buildChatRequest(chatId: string, projectId: string, prompt: string, signal: AbortSignal, pageContext?: PageContext | null, onStatus?: (s: string) => void): Promise<{ systemPrompt: string; formattedHistory: Array<{ role: string; content: string }>; linkedPages: Array<{ title: string; url: string }> }> {
   // Get all documents for this project
   const allDocs = await listDocuments(projectId);
   const enabledDocs = allDocs.filter(d => d.enabled !== false);
@@ -1081,7 +1081,9 @@ async function buildChatRequest(chatId: string, projectId: string, prompt: strin
 
   // Follow-up questions get rewritten into standalone ones so retrieval,
   // page-section selection, and link scoring all see real signal.
+  if (needsIntentResolution(prompt, formattedHistory.length)) onStatus?.('Understanding the question…');
   const effectiveQuery = await resolveQuestionIntent(prompt, formattedHistory, pageContext?.title, signal);
+  onStatus?.('Searching your sources…');
 
   // ── Multi-Query Adaptive RAG ──
   // 1. Initial search with the (intent-resolved) query
@@ -1168,6 +1170,7 @@ async function buildChatRequest(chatId: string, projectId: string, prompt: strin
   // anchors and is never persisted.
   const linkedPages: Array<{ title: string; url: string }> = [];
   if (pageContext) {
+    onStatus?.('Reading the page…');
     // Long pages switch to per-question retrieval (see selectPageMarkdown)
     const md = await selectPageMarkdown(pageContext, effectiveQuery);
     systemPrompt +=
@@ -1177,15 +1180,18 @@ async function buildChatRequest(chatId: string, projectId: string, prompt: strin
       `You may answer from the current page. Attribute such claims in plain text, e.g. "according to the page you're viewing". ` +
       `NEVER use [anchor] citations for current-page content — anchors are only for library sources.`;
 
-    // Repo pages (GitHub/GitLab/Azure DevOps/Bitbucket): the scrape only
-    // sees the README — inline the repo's file tree so "where is X?"
-    // questions have real structure to answer from.
-    try {
-      const treeBlock = await buildRepoTreeBlock(pageContext.url, effectiveQuery);
-      if (treeBlock) systemPrompt += treeBlock;
-    } catch (e) {
-      console.warn('[REPO-TREE] skipped:', e);
-    }
+    // Independent enrichments run in PARALLEL — they were sequential, and
+    // their summed latency was most of the silent "Thinking…" gap:
+    //   repo tree, repo file contents, second-hop link expansion.
+    onStatus?.('Following relevant links…');
+    const [treeBlock, fileBlocks, linked] = await Promise.all([
+      buildRepoTreeBlock(pageContext.url, effectiveQuery).catch(e => { console.warn('[REPO-TREE] skipped:', e); return null; }),
+      buildRepoFileBlocks(pageContext.url, effectiveQuery).catch(e => { console.warn('[REPO-FILE] skipped:', e); return null; }),
+      expandRelevantLinks(pageContext, effectiveQuery).catch(e => { console.warn('[LINK-EXPAND] skipped:', e); return [] as PageContext[]; })
+    ]);
+
+    if (treeBlock) systemPrompt += treeBlock;
+    if (fileBlocks) systemPrompt += fileBlocks;
 
     // Build/pipeline logs: guarantee the error/failure lines reach the model
     // even when the page is huge — retrieval selection can miss them.
@@ -1200,27 +1206,21 @@ async function buildChatRequest(chatId: string, projectId: string, prompt: strin
       }
     }
 
-    // Second hop: the page's own links, scored against the question and
-    // fetched ephemerally. Best-effort — a failure never blocks the turn.
-    try {
-      const linked = await expandRelevantLinks(pageContext, effectiveQuery);
-      for (const l of linked) {
-        const lmd = (await selectPageMarkdown(l, effectiveQuery)).slice(0, LINKED_PAGE_BUDGET);
-        systemPrompt +=
-          `\n\n--- LINKED PAGE (followed from the current page because it looked relevant to the question; NOT saved) ---\n` +
-          `Title: ${l.title}\nURL: ${l.url}\n\n${lmd}\n` +
-          `--- END LINKED PAGE ---\n` +
-          `Attribute claims from it in plain text — you may link it inline as [${l.title}](${l.url}). No [anchor] citations.`;
-        linkedPages.push({ title: l.title, url: l.url });
-      }
-      if (linked.length > 0) {
-        console.log(`[LINK-EXPAND] Inlined ${linked.length} linked page(s): ${linked.map(l => l.url).join(', ')}`);
-      }
-    } catch (e) {
-      console.warn('[LINK-EXPAND] skipped:', e);
+    for (const l of linked) {
+      const lmd = (await selectPageMarkdown(l, effectiveQuery)).slice(0, LINKED_PAGE_BUDGET);
+      systemPrompt +=
+        `\n\n--- LINKED PAGE (followed from the current page because it looked relevant to the question; NOT saved) ---\n` +
+        `Title: ${l.title}\nURL: ${l.url}\n\n${lmd}\n` +
+        `--- END LINKED PAGE ---\n` +
+        `Attribute claims from it in plain text — you may link it inline as [${l.title}](${l.url}). No [anchor] citations.`;
+      linkedPages.push({ title: l.title, url: l.url });
+    }
+    if (linked.length > 0) {
+      console.log(`[LINK-EXPAND] Inlined ${linked.length} linked page(s): ${linked.map(l => l.url).join(', ')}`);
     }
   }
 
+  onStatus?.('Writing the answer…');
   return { systemPrompt, formattedHistory, linkedPages };
 }
 
@@ -1246,11 +1246,12 @@ function linkedPagesFooter(pages: Array<{ title: string; url: string }>): string
 // host's public API (keyless — private repos silently skip) and inline it
 // ephemerally next to the page context.
 
-const repoTreeCache = new Map<string, { paths: string[]; ts: number }>();
+interface RepoTree { paths: string[]; branch: string }
+const repoTreeCache = new Map<string, { tree: RepoTree; ts: number }>();
 const REPO_TREE_TTL_MS = 10 * 60 * 1000;
 const REPO_TREE_MAX_ENTRIES = 8_000; // give up on monorepos — a truncated random slice misleads
 
-async function fetchGitHubTreePaths(ref: RepoRef): Promise<string[] | null> {
+async function fetchGitHubTree(ref: RepoRef): Promise<RepoTree | null> {
   let branch = ref.branch;
   const headers = { 'Accept': 'application/vnd.github+json' };
   if (!branch) {
@@ -1264,27 +1265,34 @@ async function fetchGitHubTreePaths(ref: RepoRef): Promise<string[] | null> {
   );
   if (!treeRes.ok) return null;
   const tree = await treeRes.json();
-  return (tree.tree || []).map((t: any) => t.type === 'tree' ? `${t.path}/` : t.path).filter(Boolean);
+  const paths = (tree.tree || []).map((t: any) => t.type === 'tree' ? `${t.path}/` : t.path).filter(Boolean);
+  return { paths, branch: branch! };
 }
 
-async function fetchGitLabTreePaths(ref: RepoRef): Promise<string[] | null> {
+async function fetchGitLabTree(ref: RepoRef): Promise<RepoTree | null> {
   const projectId = encodeURIComponent(`${ref.owner}/${ref.repo}`);
+  let branch = ref.branch;
+  if (!branch) {
+    const projRes = await fetch(`https://gitlab.com/api/v4/projects/${projectId}`, { headers: { 'Accept': 'application/json' } });
+    if (!projRes.ok) return null;
+    branch = (await projRes.json()).default_branch as string;
+    if (!branch) return null;
+  }
   const paths: string[] = [];
   for (let page = 1; page <= 30; page++) {
     const res = await fetch(
-      `https://gitlab.com/api/v4/projects/${projectId}/repository/tree?recursive=true&per_page=100&page=${page}` +
-      (ref.branch ? `&ref=${encodeURIComponent(ref.branch)}` : ''),
+      `https://gitlab.com/api/v4/projects/${projectId}/repository/tree?recursive=true&per_page=100&page=${page}&ref=${encodeURIComponent(branch)}`,
       { headers: { 'Accept': 'application/json' } }
     );
-    if (!res.ok) return page === 1 ? null : paths;
+    if (!res.ok) return page === 1 ? null : { paths, branch };
     const items: any[] = await res.json();
     paths.push(...items.map(t => t.type === 'tree' ? `${t.path}/` : t.path));
     if (items.length < 100 || paths.length > REPO_TREE_MAX_ENTRIES) break;
   }
-  return paths;
+  return { paths, branch };
 }
 
-async function fetchAzureTreePaths(ref: RepoRef): Promise<string[] | null> {
+async function fetchAzureTree(ref: RepoRef): Promise<RepoTree | null> {
   // Works for PUBLIC Azure DevOps projects; private ones answer with a
   // sign-in redirect / non-JSON, which the parse guard turns into a skip.
   const res = await fetch(
@@ -1294,15 +1302,16 @@ async function fetchAzureTreePaths(ref: RepoRef): Promise<string[] | null> {
   );
   if (!res.ok || !(res.headers.get('content-type') || '').includes('json')) return null;
   const data = await res.json();
-  return (data.value || [])
+  const paths = (data.value || [])
     .map((t: any) => {
       const p = String(t.path || '').replace(/^\//, '');
       return p ? (t.isFolder ? `${p}/` : p) : '';
     })
     .filter(Boolean);
+  return { paths, branch: ref.branch ?? '' }; // '' = server default on raw fetch
 }
 
-async function fetchBitbucketTreePaths(ref: RepoRef): Promise<string[] | null> {
+async function fetchBitbucketTree(ref: RepoRef): Promise<RepoTree | null> {
   let branch = ref.branch;
   if (!branch) {
     const repoRes = await fetch(`https://api.bitbucket.org/2.0/repositories/${ref.owner}/${ref.repo}`);
@@ -1316,38 +1325,105 @@ async function fetchBitbucketTreePaths(ref: RepoRef): Promise<string[] | null> {
     `?max_depth=8&pagelen=100&fields=values.path,values.type,next`;
   for (let page = 0; next && page < 20; page++) {
     const res: Response = await fetch(next);
-    if (!res.ok) return paths.length > 0 ? paths : null;
+    if (!res.ok) return paths.length > 0 ? { paths, branch } : null;
     const data: any = await res.json();
     paths.push(...(data.values || []).map((v: any) => v.type === 'commit_directory' ? `${v.path}/` : v.path));
     next = data.next || null;
     if (paths.length > REPO_TREE_MAX_ENTRIES) break;
   }
-  return paths;
+  return { paths, branch };
 }
 
-const TREE_FETCHERS: Record<RepoRef['provider'], (ref: RepoRef) => Promise<string[] | null>> = {
-  github: fetchGitHubTreePaths,
-  gitlab: fetchGitLabTreePaths,
-  azure: fetchAzureTreePaths,
-  bitbucket: fetchBitbucketTreePaths
+const TREE_FETCHERS: Record<RepoRef['provider'], (ref: RepoRef) => Promise<RepoTree | null>> = {
+  github: fetchGitHubTree,
+  gitlab: fetchGitLabTree,
+  azure: fetchAzureTree,
+  bitbucket: fetchBitbucketTree
 };
+
+async function getRepoTree(ref: RepoRef): Promise<RepoTree | null> {
+  const cacheKey = `${ref.provider}:${ref.label}@${ref.branch ?? ''}`;
+  const entry = repoTreeCache.get(cacheKey);
+  if (entry && Date.now() - entry.ts < REPO_TREE_TTL_MS) return entry.tree;
+  const tree = await TREE_FETCHERS[ref.provider](ref);
+  if (!tree || tree.paths.length === 0 || tree.paths.length > REPO_TREE_MAX_ENTRIES) return null;
+  repoTreeCache.set(cacheKey, { tree, ts: Date.now() });
+  return tree;
+}
 
 async function buildRepoTreeBlock(pageUrl: string, question: string): Promise<string | null> {
   const ref = parseRepoUrl(pageUrl);
   if (!ref) return null;
+  const tree = await getRepoTree(ref);
+  if (!tree) return null;
 
-  const cacheKey = `${ref.provider}:${ref.label}@${ref.branch ?? ''}`;
-  let entry = repoTreeCache.get(cacheKey);
-  if (!entry || Date.now() - entry.ts > REPO_TREE_TTL_MS) {
-    const paths = await TREE_FETCHERS[ref.provider](ref);
-    if (!paths || paths.length === 0 || paths.length > REPO_TREE_MAX_ENTRIES) return null;
-    entry = { paths, ts: Date.now() };
-    repoTreeCache.set(cacheKey, entry);
-  }
-
-  const { selected, truncated } = selectTreePaths(entry.paths, question);
-  console.log(`[REPO-TREE] ${cacheKey}: ${entry.paths.length} paths, inlined ${selected.length}${truncated ? ' (truncated)' : ''}`);
+  const { selected, truncated } = selectTreePaths(tree.paths, question);
+  console.log(`[REPO-TREE] ${ref.provider}:${ref.label}: ${tree.paths.length} paths, inlined ${selected.length}${truncated ? ' (truncated)' : ''}`);
   return formatTreeBlock(ref, selected, truncated);
+}
+
+// ── Repo file contents — read the specific files a question names ──
+
+const repoFileCache = new Map<string, { text: string; ts: number }>();
+const REPO_FILE_MAX_CHARS = 8_000;
+
+async function fetchRepoFileRaw(ref: RepoRef, branch: string, path: string): Promise<string | null> {
+  const encPath = path.split('/').map(encodeURIComponent).join('/');
+  let url: string;
+  switch (ref.provider) {
+    case 'github':
+      url = `https://raw.githubusercontent.com/${ref.owner}/${ref.repo}/${encodeURIComponent(branch)}/${encPath}`;
+      break;
+    case 'gitlab':
+      url = `https://gitlab.com/api/v4/projects/${encodeURIComponent(`${ref.owner}/${ref.repo}`)}/repository/files/${encodeURIComponent(path)}/raw?ref=${encodeURIComponent(branch)}`;
+      break;
+    case 'azure':
+      url = `https://dev.azure.com/${ref.owner}/${encodeURIComponent(ref.project!)}/_apis/git/repositories/${encodeURIComponent(ref.repo)}/items?path=/${encPath}&api-version=7.1-preview.1` +
+        (branch ? `&versionDescriptor.version=${encodeURIComponent(branch)}&versionDescriptor.versionType=branch` : '');
+      break;
+    case 'bitbucket':
+      url = `https://api.bitbucket.org/2.0/repositories/${ref.owner}/${ref.repo}/src/${encodeURIComponent(branch)}/${encPath}`;
+      break;
+  }
+  const res = await fetch(url, { signal: AbortSignal.timeout(15_000) });
+  if (!res.ok) return null;
+  return res.text();
+}
+
+/**
+ * When the question names files that exist in the repo tree ("what does
+ * agent.json contain?"), fetch their raw contents and inline them — the tree
+ * alone can locate a file but never describe it.
+ */
+async function buildRepoFileBlocks(pageUrl: string, question: string): Promise<string | null> {
+  const ref = parseRepoUrl(pageUrl);
+  if (!ref) return null;
+  const tree = await getRepoTree(ref);
+  if (!tree) return null;
+
+  const matches = matchFilesInTree(tree.paths, question);
+  if (matches.length === 0) return null;
+
+  let out = '';
+  for (const path of matches) {
+    const cacheKey = `${ref.provider}:${ref.label}@${tree.branch}:${path}`;
+    let entry = repoFileCache.get(cacheKey);
+    if (!entry || Date.now() - entry.ts > REPO_TREE_TTL_MS) {
+      const text = await fetchRepoFileRaw(ref, tree.branch, path).catch(() => null);
+      if (!text) continue;
+      entry = { text, ts: Date.now() };
+      repoFileCache.set(cacheKey, entry);
+    }
+    const truncated = entry.text.length > REPO_FILE_MAX_CHARS;
+    const body = truncated ? entry.text.slice(0, REPO_FILE_MAX_CHARS) : entry.text;
+    const ext = path.split('.').pop() || '';
+    out +=
+      `\n\n--- REPOSITORY FILE: ${path} (${ref.label}; fetched from the ${ref.provider} API; NOT saved) ---\n` +
+      '```' + ext + '\n' + body + (truncated ? '\n… (file truncated)' : '') + '\n```\n' +
+      `--- END FILE ---`;
+    console.log(`[REPO-FILE] Inlined ${path} (${entry.text.length} chars${truncated ? ', truncated' : ''})`);
+  }
+  return out || null;
 }
 
 // ─────────────────────────────────────────────
@@ -1550,7 +1626,10 @@ chrome.runtime.onConnect.addListener((port) => {
 
     try {
       const pageCtx = req.includePageContext ? await getPageContext().catch(() => null) : null;
-      let { systemPrompt, formattedHistory, linkedPages } = await buildChatRequest(chatId, projectId, prompt, localController.signal, pageCtx);
+      let { systemPrompt, formattedHistory, linkedPages } = await buildChatRequest(
+        chatId, projectId, prompt, localController.signal, pageCtx,
+        (text) => safePost({ type: 'STATUS', text })
+      );
 
       if (systemPromptOverride) {
         systemPrompt = systemPromptOverride + '\n\n' + systemPrompt;

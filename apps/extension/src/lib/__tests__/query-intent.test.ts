@@ -97,3 +97,31 @@ describe('formatTreeBlock', () => {
     expect(block).toContain('does not exist in the repo');
   });
 });
+
+describe('matchFilesInTree', () => {
+  const tree = [
+    'README.md', 'src/', 'src/index.ts', 'src/agent.json',
+    'cli/assets/templates/platforms/agent.json',
+    'docs/setup.md', 'logo.png', 'dist/bundle.js.map'
+  ];
+
+  it('finds files named in the question, exact basename first', async () => {
+    const { matchFilesInTree } = await import('../query-intent');
+    const out = matchFilesInTree(tree, 'what does agent.json contain?');
+    expect(out.length).toBe(2);
+    expect(out[0]).toBe('src/agent.json'); // shallower of the two exact matches
+    expect(out[1]).toBe('cli/assets/templates/platforms/agent.json');
+  });
+
+  it('matches path-qualified names to the specific file', async () => {
+    const { matchFilesInTree } = await import('../query-intent');
+    const out = matchFilesInTree(tree, 'open cli/assets/templates/platforms/agent.json');
+    expect(out[0]).toBe('cli/assets/templates/platforms/agent.json');
+  });
+
+  it('never returns binaries and returns nothing without a file token', async () => {
+    const { matchFilesInTree } = await import('../query-intent');
+    expect(matchFilesInTree(tree, 'show me logo.png')).toEqual([]);
+    expect(matchFilesInTree(tree, 'how does the build work?')).toEqual([]);
+  });
+});

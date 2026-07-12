@@ -132,6 +132,8 @@ export default function App() {
   const [messages, setMessages] = useState<Record<string, ChatMessage[]>>({});
   const [input, setInput] = useState('');
   const [generating, setGenerating] = useState<Record<string, boolean>>({});
+  // Live phase line for the thinking indicator ("Reading the page…")
+  const [thinkingStatus, setThinkingStatus] = useState<Record<string, string>>({});
   const [researching, setResearching] = useState<Record<string, boolean>>({});
   const [researchLogs, setResearchLogs] = useState<Record<string, string[]>>({});
   const msgEnd = useRef<HTMLDivElement>(null);
@@ -1131,7 +1133,10 @@ export default function App() {
     };
 
     port.onMessage.addListener((m: any) => {
-      if (m.type === 'DELTA') {
+      if (m.type === 'STATUS') {
+        setThinkingStatus(prev => ({ ...prev, [currentChatId]: m.text || '' }));
+      } else if (m.type === 'DELTA') {
+        setThinkingStatus(prev => prev[currentChatId] ? { ...prev, [currentChatId]: '' } : prev);
         pushDelta(currentChatId, assistantId, m.text);
       } else if (m.type === 'DONE' || m.type === 'ERROR') {
         finalizeStreamingMessage(currentChatId, assistantId);
@@ -1350,11 +1355,15 @@ export default function App() {
       if (finished) return;
       finished = true;
       setGenerating(prev => ({ ...prev, [currentChatId]: false }));
+      setThinkingStatus(prev => ({ ...prev, [currentChatId]: '' }));
       if (chatPortRef.current === port) chatPortRef.current = null;
     };
 
     port.onMessage.addListener((m: any) => {
-      if (m?.type === 'DELTA') {
+      if (m?.type === 'STATUS') {
+        setThinkingStatus(prev => ({ ...prev, [currentChatId]: m.text || '' }));
+      } else if (m?.type === 'DELTA') {
+        setThinkingStatus(prev => prev[currentChatId] ? { ...prev, [currentChatId]: '' } : prev);
         pushDelta(currentChatId, assistantId, m.text);
       } else if (m?.type === 'DONE') {
         finalizeStreamingMessage(currentChatId, assistantId);
@@ -1703,6 +1712,7 @@ export default function App() {
               activeChatId={activeChatId}
               activeProjectId={activeProjectId}
               generating={generating}
+              thinkingStatus={thinkingStatus}
               researching={researching}
               isActive={view === 'chat'}
               
