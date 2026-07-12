@@ -358,6 +358,9 @@ const messageHandlers: Record<string, MessageHandler> = {
   IMPORT_LOCAL_PDF: handleImportLocalPdf,
   IMPORT_LOCAL_IMAGES: handleImportLocalImages,
 
+  // ── Disk mirror (never-expiring, via chrome.downloads) ──
+  MIRROR_FILES: handleMirrorFiles,
+
   // ── Citations ──
   RESOLVE_CITATIONS: async (request) => {
     const parsed = await parseResponseCitations(request.text as string);
@@ -849,6 +852,76 @@ async function saveProcessedDoc(projectId: string, title: string, content: strin
  * Import local PDFs: extract text by CODE first (pdf.js in the offscreen doc).
  * Scanned pages with no extractable text fall back to the vision model (OCR).
  */
+// ── Disk mirror via chrome.downloads ──────────────────────────────────
+// The File System Access folder picker was the wrong tool: Chrome revokes its
+// readwrite permission every session, so the user got a recurring "permission
+// expired — nothing is saving" nag with no way to make it stick. The downloads
+// permission never expires and needs no gesture, so files reach disk reliably.
+// Trade-off: the target is always Downloads/<folder>/… rather than an
+// arbitrary picked path — the price of it never breaking again.
+
+/** Sanitize one path segment for a cross-platform-safe filename. */
+function safeSegment(name: string, fallback: string): string {
+  const s = (name || '')
+    .normalize('NFC')
+    .replace(/[‎‏​‌‍﻿]/g, '')
+    .replace(/[<>:"/\\|?* -]/g, '')  // illegal on Windows/macOS
+    .replace(/\s+/g, ' ')
+    .replace(/^\.+/, '').replace(/\.+$/, '')
+    .trim()
+    .slice(0, 100);
+  return s || fallback;
+}
+
+// Download ids we created — erased from history on completion so the mirror
+// doesn't spam the download shelf / history. The FILE stays; only the record
+// is removed.
+const mirrorDownloadIds = new Set<number>();
+let mirrorListenerAttached = false;
+function ensureMirrorCleanup() {
+  if (mirrorListenerAttached || !chrome.downloads?.onChanged) return;
+  mirrorListenerAttached = true;
+  chrome.downloads.onChanged.addListener((delta) => {
+    if (!mirrorDownloadIds.has(delta.id)) return;
+    if (delta.state?.current === 'complete' || delta.state?.current === 'interrupted') {
+      mirrorDownloadIds.delete(delta.id);
+      chrome.downloads.erase({ id: delta.id }).catch(() => {});
+    }
+  });
+}
+
+async function handleMirrorFiles(request: Record<string, unknown>): Promise<Record<string, unknown>> {
+  if (!chrome.downloads?.download) throw new Error('downloads API unavailable');
+  ensureMirrorCleanup();
+
+  const folder = safeSegment(request.folder as string, 'AI_AW');
+  const workspace = safeSegment(request.workspace as string, 'workspace');
+  const files = (request.files as Array<{ name: string; content: string }>) || [];
+  if (files.length === 0) return { written: 0 };
+
+  let written = 0;
+  for (const f of files) {
+    if (!f?.content) continue;
+    const fileName = safeSegment((f.name || '').replace(/\.md$/i, ''), 'untitled') + '.md';
+    // data: URL — service workers have no URL.createObjectURL, and data URLs
+    // download fine. UTF-8 safe via encodeURIComponent.
+    const url = `data:text/markdown;charset=utf-8,${encodeURIComponent(f.content)}`;
+    try {
+      const id = await chrome.downloads.download({
+        url,
+        filename: `${folder}/${workspace}/${fileName}`,
+        conflictAction: 'overwrite',   // true mirror: replace the prior copy
+        saveAs: false
+      });
+      if (typeof id === 'number') { mirrorDownloadIds.add(id); written++; }
+    } catch (e) {
+      console.warn(`[mirror] failed to write ${fileName}:`, e);
+    }
+  }
+  console.log(`[mirror] wrote ${written}/${files.length} file(s) to Downloads/${folder}/${workspace}`);
+  return { written };
+}
+
 async function handleImportLocalPdf(request: Record<string, unknown>): Promise<Record<string, unknown>> {
   const projectId = request.projectId as string;
   const files = request.files as Array<{ name: string; base64: string }>;

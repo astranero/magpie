@@ -29,8 +29,8 @@ interface SettingsViewProps {
   folderName: string;
   setFolderName: (val: string) => void;
   localFolderName: string | null;
-  folderPermission?: 'granted' | 'expired' | null;
-  pickLocalFolder: () => void;
+  diskMirrorEnabled: boolean;
+  setDiskMirrorEnabled: (val: boolean) => void;
   autoLinkCaptures: boolean;
   setAutoLinkCaptures: (val: boolean) => void;
   saveSettings: () => void;
@@ -38,7 +38,7 @@ interface SettingsViewProps {
 
 export const SettingsView: React.FC<SettingsViewProps> = ({
   customUrl, setCustomUrl, customKey, setCustomKey, customModel, setCustomModel, visionModel, setVisionModel, customModels, fetchCustomModels,
-  docCount, globalDocCount, onCleanupOrphans, authed, profile, login, logout, folderName, setFolderName, localFolderName, folderPermission, pickLocalFolder,
+  docCount, globalDocCount, onCleanupOrphans, authed, profile, login, logout, folderName, setFolderName, localFolderName, diskMirrorEnabled, setDiskMirrorEnabled,
   autoLinkCaptures, setAutoLinkCaptures, saveSettings
 }) => {
 
@@ -487,39 +487,27 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
             </Button>
           </div>
           <div className="flex items-center justify-between">
-            <span className="text-xs font-medium">Local Storage</span>
-            {localFolderName ? (
-              folderPermission === 'expired' ? (
-                <span className="inline-flex items-center rounded-md border border-highlight px-2.5 py-0.5 text-[10px] font-bold text-amber-700 dark:text-highlight">
-                  <span className="w-1.5 h-1.5 rounded-full bg-current mr-1.5" /> {localFolderName} — permission expired
-                </span>
-              ) : (
-                <span className="inline-flex items-center rounded-md px-2.5 py-0.5 text-[10px] font-bold bg-primary text-primary-foreground">
-                  <span className="w-1.5 h-1.5 rounded-full bg-background mr-1.5" /> {localFolderName}
-                </span>
-              )
-            ) : (
-              <span className="inline-flex items-center rounded-md border border-muted px-2.5 py-0.5 text-[10px] font-bold text-muted-foreground">
-                NONE SELECTED
-              </span>
-            )}
+            <div>
+              <span className="text-xs font-medium">Save to disk</span>
+              <p className="text-[10px] text-muted-foreground mt-0.5 leading-normal">
+                Mirrors your workspace to <span className="font-mono">Downloads/{localFolderName}/</span> as .md
+                files. Always on — no permission to grant, never expires.
+              </p>
+            </div>
+            <button
+              type="button"
+              role="switch"
+              aria-checked={diskMirrorEnabled}
+              onClick={() => setDiskMirrorEnabled(!diskMirrorEnabled)}
+              className={`relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors ${diskMirrorEnabled ? 'bg-primary' : 'bg-muted'}`}
+            >
+              <span className={`inline-block h-3.5 w-3.5 rounded-full bg-background transition-transform ${diskMirrorEnabled ? 'translate-x-5' : 'translate-x-1'}`} />
+            </button>
           </div>
-          {folderPermission === 'expired' && (
-            <p className="text-[10px] font-mono text-amber-700 dark:text-highlight leading-normal">
-              Chrome expired write access to this folder — nothing is being saved to disk.
-              Click the button below to re-grant it.
-            </p>
-          )}
-          
-          <Button variant="outline" size="sm" className="w-full mt-2 rounded-lg font-medium text-xs" onClick={pickLocalFolder}>
-            {localFolderName ? 'Change Save Folder' : 'Choose Local Save Folder'}
-          </Button>
-
-          {localFolderName && (
-            <p className="text-[10px] text-muted-foreground mt-1 leading-normal">
-              * Note: Chrome security prevents opening the OS file explorer directly. You can find and open files manually inside your "{localFolderName}" folder.
-            </p>
-          )}
+          <p className="text-[10px] text-muted-foreground leading-normal">
+            Open <span className="font-mono">Downloads/{localFolderName}/</span> in Finder or Explorer to read the
+            files directly. Chrome can't open the folder for you — browse to it manually.
+          </p>
 
           <div className="flex items-center justify-between mt-4">
             <div>

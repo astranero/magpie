@@ -1,5 +1,9 @@
 import { useState, useEffect, useRef, useCallback, Fragment } from 'react';
-import { get, set } from 'idb-keyval';
+import { set } from 'idb-keyval';
+
+// Disk mirror lands under the user's Downloads folder. chrome.downloads can't
+// target an arbitrary path, but it never expires — the trade we're making.
+const LOCAL_FOLDER_NAME = 'AI_AW';
 import { Edit2, Trash2, FileText, Library, MessageSquare, SlidersHorizontal } from 'lucide-react';
 import { LocalDocument, Project, Chat, ChatMessage, ResearchPlan, ResolvedCitation, TabInfo, View } from './types';
 import { LoreView } from './components/LoreView';
@@ -120,13 +124,8 @@ export default function App() {
   const [syncing, setSyncing] = useState(false);
   const [profile, setProfile] = useState<{ name: string; email: string; picture: string } | null>(null);
 
-  // Local File System
-  const [localFolderName, setLocalFolderName] = useState<string | null>(null);
-  const [folderPermission, setFolderPermission] = useState<'granted' | 'expired' | null>(null);
-  // Live handle kept in a ref so the re-grant click can call
-  // requestPermission IMMEDIATELY — any await before it (like an IDB read)
-  // risks Chrome discarding the user activation and refusing the prompt.
-  const folderHandleRef = useRef<any>(null);
+  // Disk mirror — always Downloads/AI_AW via chrome.downloads (never expires).
+  const [diskMirrorEnabled, setDiskMirrorEnabled] = useState(true);
 
   // Chat
   const [messages, setMessages] = useState<Record<string, ChatMessage[]>>({});
@@ -300,21 +299,11 @@ export default function App() {
     loadSettings();
     trySilentAuth();
 
-    get('ara-local-directory-handle').then(async handle => {
-      if (handle && handle.name) {
-        folderHandleRef.current = handle;
-        setLocalFolderName(handle.name);
-        // Chrome silently expires File System Access permissions between
-        // sessions — surface it, or "my folder stopped saving" is invisible.
-        try {
-          // @ts-ignore
-          const perm = await handle.queryPermission({ mode: 'readwrite' });
-          setFolderPermission(perm === 'granted' ? 'granted' : 'expired');
-        } catch {
-          setFolderPermission('expired');
-        }
-      }
-    }).catch(console.error);
+    // Disk-mirror preference (default on). No permission handle to restore —
+    // chrome.downloads needs none, which is the whole point of the switch.
+    chrome.storage.local.get('diskMirrorEnabled').then(({ diskMirrorEnabled }) => {
+      if (typeof diskMirrorEnabled === 'boolean') setDiskMirrorEnabled(diskMirrorEnabled);
+    }).catch(() => {});
 
     const messageListener = (m: any) => {
       if (m.action === 'DEEP_RESEARCH_LOG') {
@@ -406,72 +395,32 @@ export default function App() {
     return () => channel.close();
   }, [activeProjectId, activeChatId]);
 
-  // ──────── Write documents to local folder when they change ────────
+  // ──────── Mirror documents to disk when they change ────────
+  // Writes via chrome.downloads (Downloads/AI_AW/<workspace>/*.md). Unlike the
+  // old File System Access folder this NEVER expires and needs no re-grant —
+  // the whole reason for the switch. The service worker owns the write.
   const mirrorWorkspaceToFolder = useCallback(async () => {
-    if (!activeProjectId || documents.length === 0) return;
-    {
-      try {
-        const handle = await get('ara-local-directory-handle');
-        if (!handle) return;
-
-        // @ts-ignore
-        const perm = await handle.queryPermission({ mode: 'readwrite' });
-        if (perm !== 'granted') {
-          setFolderPermission('expired');
-          if (!permissionWarnedRef.current) {
-            permissionWarnedRef.current = true;
-            showToast('error', 'Folder write access expired — restore it in Config → Local Storage');
-          }
-          return;
-        }
-
-        const project = projects.find(p => p.id === activeProjectId);
-        const rawTitle = project?.title || 'workspace';
-        const dirName = rawTitle.trim()
-          .normalize('NFC')
-          .replace(/[\u200E\u200F\u200B\u200C\u200D\uFEFF]/g, '')
-          .replace(/[^\w\s\-().,'!&+#@\[\]{}]/g, '')
-          .replace(/\s+/g, ' ')
-          .replace(/^\.+/, '')
-          .replace(/\.+$/, '')
-          .trim()
-          .slice(0, 100) || 'workspace';
-
-        // @ts-ignore
-        const workspaceDir = await handle.getDirectoryHandle(dirName, { create: true });
-
-        for (const doc of documents) {
-          if (!doc.content) continue;
-          // Machine-gathered research sources stay in the extension library
-          // (citations resolve against them) but do NOT flood the user's .md
-          // folder — a deep run captures 30-150 of them. The report and the
-          // consolidated Research Sources list ARE mirrored.
-          if (contentHasTag(doc.content, 'research-source')) continue;
-          const cleanTitle = doc.title.trim()
-            .normalize('NFC')
-            .replace(/[\u200E\u200F\u200B\u200C\u200D\uFEFF]/g, '')
-            .replace(/[^\w\s\-().,'!&+#@\[\]{}]/g, '')
-            .replace(/\s+/g, ' ')
-            .replace(/^\.+/, '')
-            .replace(/\.+$/, '')
-            .trim();
-          const fileName = `${cleanTitle.slice(0, 100) || 'untitled'}.md`;
-          try {
-            // @ts-ignore
-            const fileHandle = await workspaceDir.getFileHandle(fileName, { create: true });
-            const writable = await fileHandle.createWritable();
-            await writable.write(doc.content);
-            await writable.close();
-          } catch (fileErr) {
-            console.warn(`[local-folder] Failed to write ${fileName}:`, fileErr);
-          }
-        }
-      } catch (err) {
-        console.error('[local-folder] Write pass failed:', err);
-      }
+    if (!diskMirrorEnabled || !activeProjectId || documents.length === 0) return;
+    const project = projects.find(p => p.id === activeProjectId);
+    const files = documents
+      // Machine-gathered research sources stay in the library (citations
+      // resolve against them) but do NOT flood the folder — a deep run
+      // captures 30-150. The report + consolidated list ARE mirrored.
+      .filter(doc => doc.content && !contentHasTag(doc.content, 'research-source'))
+      .map(doc => ({ name: doc.title, content: doc.content }));
+    if (files.length === 0) return;
+    try {
+      await chrome.runtime.sendMessage({
+        action: 'MIRROR_FILES',
+        folder: LOCAL_FOLDER_NAME,
+        workspace: project?.title || 'workspace',
+        files
+      });
+    } catch (err) {
+      console.warn('[mirror] send failed:', err);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [documents, activeProjectId, projects]);
+  }, [documents, activeProjectId, projects, diskMirrorEnabled]);
 
   // Auto-mirror whenever the workspace's documents change; also invoked
   // directly after a folder (re-)grant so the backfill doesn't wait for the
@@ -741,111 +690,30 @@ export default function App() {
     setTimeout(() => setToast(null), 4000);
   };
 
-  const pickLocalFolder = async () => {
-    try {
-      // Expired permission on an existing handle: re-request on the SAME
-      // folder first. The handle comes from a ref, NOT an awaited IDB read —
-      // requestPermission must be the first await in the click handler or
-      // Chrome may treat the user activation as spent and refuse the prompt.
-      const existing = folderHandleRef.current;
-      if (existing && folderPermission === 'expired') {
-        try {
-          // @ts-ignore
-          const perm = await existing.requestPermission({ mode: 'readwrite' });
-          if (perm === 'granted') {
-            setFolderPermission('granted');
-            permissionWarnedRef.current = false;
-            showToast('success', `Access to "${existing.name}" restored — mirroring your documents`);
-            mirrorWorkspaceToFolder().catch(() => {});
-            return;
-          }
-          // 'prompt'/'denied' without a dialog: Chrome refused the request in
-          // this context — fall through to the picker (fresh activation path).
-          console.warn(`[local-folder] requestPermission returned "${perm}" — falling back to picker`);
-        } catch (e: any) {
-          console.warn('[local-folder] requestPermission failed — falling back to picker:', e?.message || e);
-        }
-      }
-
-      // Request readwrite HERE, inside the user gesture — later auto-saves
-      // may not call requestPermission (Chrome requires user activation).
-      // @ts-ignore
-      const handle = await window.showDirectoryPicker({ mode: 'readwrite' });
-      await set('ara-local-directory-handle', handle);
-      folderHandleRef.current = handle;
-      setLocalFolderName(handle.name);
-      setFolderPermission('granted');
-      permissionWarnedRef.current = false;
-      showToast('success', 'Local folder selected — mirroring your documents');
-      mirrorWorkspaceToFolder().catch(() => {});
-    } catch (err: any) {
-      // AbortError = user dismissed the picker — not an error
-      if (err?.name !== 'AbortError') {
-        console.error('Failed to pick local folder:', err);
-        showToast('error', `Could not access folder — ${err?.message || 'check browser permissions'}`);
-      }
-    }
+  // Toggle the disk mirror on/off (persisted). When turned on, backfill now.
+  const toggleDiskMirror = (on: boolean) => {
+    setDiskMirrorEnabled(on);
+    chrome.storage.local.set({ diskMirrorEnabled: on });
+    if (on) mirrorWorkspaceToFolder().catch(() => {});
   };
 
-  // Warn only once per session when write permission has lapsed
-  const permissionWarnedRef = useRef(false);
-
+  // Single-doc mirror (used right after a capture/import) — same never-expiring
+  // chrome.downloads path as the bulk mirror.
   const writeDocToLocalFolder = async (doc: LocalDocument) => {
+    if (!diskMirrorEnabled) return;
+    // Scraped research sources never land on disk (report + list still do).
+    if (doc.content && contentHasTag(doc.content, 'research-source')) return;
+    if (!doc.content) return;
+    const project = projects.find(p => p.id === activeProjectId);
     try {
-      // Same exclusion as the bulk mirror: scraped research sources never
-      // land in the user's folder (report + sources list still do).
-      if (doc.content && contentHasTag(doc.content, 'research-source')) return;
-      const handle = await get('ara-local-directory-handle');
-      if (handle) {
-        // NOTE: never call requestPermission here — this runs after async
-        // message roundtrips, so there is no user activation and Chrome
-        // throws "User activation is required to request permissions".
-        // @ts-ignore
-        const hasPermission = await handle.queryPermission({ mode: 'readwrite' });
-        if (hasPermission !== 'granted') {
-          if (!permissionWarnedRef.current) {
-            permissionWarnedRef.current = true;
-            showToast('error', 'Folder write access expired — re-pick the save folder in Config');
-          }
-          return;
-        }
-        
-        // Get the current project's title for the workspace subdirectory
-        const project = projects.find(p => p.id === activeProjectId);
-        const projectTitle = project?.title || 'Unnamed Workspace';
-        const cleanProjectTitle = projectTitle.trim()
-          .normalize('NFC')
-          .replace(/[\u200E\u200F\u200B\u200C\u200D\uFEFF]/g, '')
-          .replace(/[^\w\s\-().,'!&+#@\[\]{}]/g, '')
-          .replace(/\s+/g, ' ')
-          .replace(/^\.+/, '')
-          .replace(/\.+$/, '')
-          .trim()
-          .slice(0, 100) || 'Unnamed Workspace';
-        
-        // Get or create the workspace subdirectory
-        // @ts-ignore
-        const workspaceDir = await handle.getDirectoryHandle(cleanProjectTitle, { create: true });
-        
-        // File System Access API is very strict about filenames.
-        // Use an allowlist approach: keep only safe chars.
-        const cleanTitle = doc.title.trim()
-          .normalize('NFC')
-          .replace(/[\u200E\u200F\u200B\u200C\u200D\uFEFF]/g, '')  // invisible unicode
-          .replace(/[^\w\s\-().,'!&+#@\[\]{}]/g, '')                 // keep only safe chars
-          .replace(/\s+/g, ' ')                                       // collapse whitespace
-          .replace(/^\.+/, '')                                         // no leading dots
-          .replace(/\.+$/, '')                                         // no trailing dots
-          .trim();
-        const fileName = `${cleanTitle.slice(0, 100) || 'untitled'}.md`;
-        // @ts-ignore
-        const fileHandle = await workspaceDir.getFileHandle(fileName, { create: true });
-        const writable = await fileHandle.createWritable();
-        await writable.write(doc.content);
-        await writable.close();
-      }
+      await chrome.runtime.sendMessage({
+        action: 'MIRROR_FILES',
+        folder: LOCAL_FOLDER_NAME,
+        workspace: project?.title || 'workspace',
+        files: [{ name: doc.title, content: doc.content }]
+      });
     } catch (err) {
-      console.error('Failed to write doc to local folder', err);
+      console.warn('[mirror] single-doc send failed:', err);
     }
   };
 
@@ -1780,9 +1648,9 @@ export default function App() {
               logout={logout}
               folderName={folderName}
               setFolderName={setFolderName}
-              localFolderName={localFolderName}
-              folderPermission={folderPermission}
-              pickLocalFolder={pickLocalFolder}
+              diskMirrorEnabled={diskMirrorEnabled}
+              setDiskMirrorEnabled={toggleDiskMirror}
+              localFolderName={LOCAL_FOLDER_NAME}
               autoLinkCaptures={autoLinkCaptures}
               setAutoLinkCaptures={(v) => {
                 setAutoLinkCaptures(v);
