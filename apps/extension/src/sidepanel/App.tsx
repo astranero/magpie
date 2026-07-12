@@ -156,20 +156,29 @@ export default function App() {
   // Prevents per-token setMessages storms during long responses.
   const deltaBufferRef = useRef<{ chatId: string; assistantId: string; text: string } | null>(null);
   const rafPendingRef = useRef<number | null>(null);
+  // Assistant messages that have been finalized. A delta flush scheduled via
+  // requestAnimationFrame can fire AFTER a DONE handler already cleared the
+  // streaming flag (rAF is throttled when the panel is occluded, so the flush
+  // lands late) — and would re-set streaming:true, leaving the blinking caret
+  // and the raw-markdown fast-path stuck forever. Any flush for an id in this
+  // set forces streaming:false, so finalization can never be undone.
+  const finalizedIdsRef = useRef<Set<string>>(new Set());
   const flushDeltaBuffer = useCallback(() => {
     rafPendingRef.current = null;
     const buf = deltaBufferRef.current;
     if (!buf || !buf.text) return;
     const { chatId, assistantId, text } = buf;
     deltaBufferRef.current = { chatId, assistantId, text: '' };
+    // Never re-open a message the DONE handler already finalized (late rAF).
+    const stillStreaming = !finalizedIdsRef.current.has(`${chatId}::${assistantId}`);
     setMessages(prev => {
       const list = prev[chatId] || [];
       const idx = list.findIndex(x => x.id === assistantId);
       if (idx === -1) {
-        return { ...prev, [chatId]: [...list, { id: assistantId, role: 'assistant', text, streaming: true }] };
+        return { ...prev, [chatId]: [...list, { id: assistantId, role: 'assistant', text, streaming: stillStreaming }] };
       }
       const copy = [...list];
-      copy[idx] = { ...copy[idx], text: copy[idx].text + text, streaming: true };
+      copy[idx] = { ...copy[idx], text: copy[idx].text + text, streaming: stillStreaming };
       return { ...prev, [chatId]: copy };
     });
   }, []);
@@ -192,6 +201,11 @@ export default function App() {
   }, [flushDeltaBuffer]);
   /** Mark the streaming assistant message as done — flush + swap render mode. */
   const finalizeStreamingMessage = useCallback((chatId: string, assistantId: string) => {
+    // Record BEFORE flushing so the flush itself (which may create or extend
+    // the message) already writes streaming:false, and any later stray flush
+    // stays false too. Bounded cleanup — ids accrete one per turn.
+    if (finalizedIdsRef.current.size > 200) finalizedIdsRef.current.clear();
+    finalizedIdsRef.current.add(`${chatId}::${assistantId}`);
     flushDeltasNow();
     setMessages(prev => {
       const list = prev[chatId] || [];

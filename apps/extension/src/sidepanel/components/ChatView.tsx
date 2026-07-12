@@ -465,7 +465,17 @@ const MessageBody: React.FC<MessageBodyProps> = React.memo(({ text: rawText, com
       })()}
     </div>
   );
-}, (prev, next) => prev.text === next.text && prev.compact === next.compact);
+}, (prev, next) =>
+  prev.text === next.text &&
+  prev.compact === next.compact &&
+  // MUST compare streaming/renderLive: when a message finalizes (streaming
+  // true→false) its text is often UNCHANGED (the last delta already delivered
+  // the full answer; DONE adds nothing). Omitting these left the memo thinking
+  // props were equal, so MessageBody never re-rendered off the plaintext
+  // fast-path — the blinking caret and raw *markdown* stuck forever (worst on
+  // general-knowledge answers, which have no citations to change the text).
+  prev.streaming === next.streaming &&
+  prev.renderLive === next.renderLive);
 
 // ─────────────────────────────────────────────
 // Chat view
