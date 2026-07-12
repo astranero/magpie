@@ -381,6 +381,76 @@ export async function scrapeUrl(url: string, signal?: AbortSignal): Promise<Pars
   return parsed;
 }
 
+/**
+ * One-shot web gather for an INTERACTIVE CHAT turn — a lightweight cousin of
+ * the research pipeline. When a chat question has no workspace match and the
+ * open page doesn't answer it, this runs a single web search (plus any enabled
+ * search MCPs), scrapes a few top results, and returns numbered [W#] excerpts
+ * the model can answer from and cite — instead of conceding to stale "general
+ * knowledge". Tightly capped so chat stays responsive; every fetch honors the
+ * abort `signal` (Stop / port disconnect). Failures degrade to fewer/no
+ * snippets rather than throwing (except a real abort).
+ */
+export async function gatherWebSnippets(
+  query: string,
+  opts: { signal?: AbortSignal; onStatus?: (s: string) => void } = {}
+): Promise<{ context: string; sources: { title: string; url: string }[] }> {
+  const { signal, onStatus } = opts;
+  const MAX_FETCH = 3;        // top results to actually scrape
+  const PER_DOC_CHARS = 1500; // excerpt cap per source — enough to answer, cheap to send
+  const blocks: string[] = [];
+  const sources: { title: string; url: string }[] = [];
+
+  // 1) Web search → scrape the top few results in parallel.
+  try {
+    const urls = (await performWebSearch(query, signal)).slice(0, MAX_FETCH);
+    if (urls.length > 0) {
+      onStatus?.('Reading web results…');
+      const parsed = await Promise.all(urls.map(u => scrapeUrl(u, signal).catch(() => null)));
+      urls.forEach((url, i) => {
+        const p = parsed[i];
+        if (!p || !p.markdown.trim()) return;
+        const n = sources.length + 1;
+        sources.push({ title: p.title || url, url });
+        blocks.push(`[W${n}] ${p.title || url}\nURL: ${url}\n${p.markdown.trim().slice(0, PER_DOC_CHARS)}`);
+      });
+    }
+  } catch (e) {
+    if (signal?.aborted) throw e;
+    console.warn('[chat web] search/scrape failed', e);
+  }
+
+  // 2) Enabled search MCPs — same discovery the research pipeline uses, one
+  //    search-like tool each so a chat turn stays quick.
+  try {
+    const servers = (await getMcpServers()).filter(s => s.enabled);
+    for (const server of servers) {
+      if (signal?.aborted) break;
+      try {
+        const conn = new McpConnection(server);
+        const tools = (await conn.listTools()).filter(isSearchLikeTool).slice(0, 1);
+        for (const tool of tools) {
+          if (signal?.aborted) break;
+          onStatus?.(`Querying ${server.name}…`);
+          const args = topicArgFor(tool);
+          args[Object.keys(args)[0]] = query;
+          const text = (await conn.callTool(tool.name, args)).trim();
+          if (text.length < 40) continue;
+          const n = sources.length + 1;
+          sources.push({ title: `${server.name} · ${tool.name}`, url: server.url });
+          blocks.push(`[W${n}] ${server.name} — ${tool.name}\n${text.slice(0, PER_DOC_CHARS)}`);
+        }
+      } catch (e) {
+        console.warn(`[chat web] MCP ${server.name} failed`, e);
+      }
+    }
+  } catch (e) {
+    console.warn('[chat web] MCP search failed', e);
+  }
+
+  return { context: blocks.join('\n\n---\n\n'), sources };
+}
+
 // ── LLM planning ──
 
 /** Today, spelled out — models otherwise guess a date from their training era. */

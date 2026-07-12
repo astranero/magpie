@@ -14,7 +14,7 @@ import { chunkDocument, makeDocShortId } from '../lib/chunker';
 import { buildCitationContext, CITATION_SYSTEM_PROMPT, parseResponseCitations } from '../lib/citations';
 import { buildFrontmatter, hasFrontmatter } from '../lib/frontmatter';
 import { get as idbGet } from 'idb-keyval';
-import { runDeepResearch, generateSubQuestions, scrapeUrl, isJunkUrl } from './deep-researcher';
+import { runDeepResearch, generateSubQuestions, scrapeUrl, isJunkUrl, gatherWebSnippets } from './deep-researcher';
 import { harvestReferences } from '../lib/reference-harvest';
 import { needsIntentResolution, formatHistoryForIntent, parseRepoUrl, selectTreePaths, formatTreeBlock, matchFilesInTree, isChitchat, RepoRef } from '../lib/query-intent';
 import { getResearchLimits } from '../lib/research-limits';
@@ -1084,6 +1084,18 @@ async function resolveQuestionIntent(
   return prompt;
 }
 
+/** Whether chat may escalate to a live web search when the workspace has no
+ *  match. Default ON — absent/undefined counts as enabled; only an explicit
+ *  false (user toggled it off in Config) disables it. */
+async function isChatWebFallbackEnabled(): Promise<boolean> {
+  try {
+    const s = await chrome.storage.local.get(['chatWebFallback']);
+    return s.chatWebFallback !== false;
+  } catch {
+    return true;
+  }
+}
+
 /** Build the RAG system prompt + formatted history for a chat turn. */
 async function buildChatRequest(chatId: string, projectId: string, prompt: string, signal: AbortSignal, pageContext?: PageContext | null, onStatus?: (s: string) => void): Promise<{ systemPrompt: string; formattedHistory: Array<{ role: string; content: string }>; linkedPages: Array<{ title: string; url: string }> }> {
   // Get all documents for this project
@@ -1195,6 +1207,9 @@ async function buildChatRequest(chatId: string, projectId: string, prompt: strin
     `• If a complex request is underspecified, state the key assumptions you're making in one line, then proceed.\n` +
     `• When fixing an error, name the ROOT CAUSE (why it failed) before the corrected version.`;
 
+  // Web-search fallback sources (below) surface as clickable footer links.
+  let webSources: Array<{ title: string; url: string }> = [];
+
   if (relevantChunks.length > 0) {
     // Build citation-anchored context (generous — favor fuller grounding over
     // "I couldn't find it" cutoffs; only fires for library-source questions).
@@ -1206,18 +1221,47 @@ async function buildChatRequest(chatId: string, projectId: string, prompt: strin
       RESPONSE_STYLE +
       `\n--- SOURCES ---\n${context}\n--- END SOURCES ---`;
   } else {
-    console.warn(`[RAG] No chunks found for project ${projectId} — falling back to general knowledge`);
-    // General conversation fallback
-    systemPrompt = `You are a helpful AI assistant. No relevant documents were found in the user's research workspace for this question. ` +
-      `Begin your answer with this exact italic line: *No matching sources in this workspace — answering from general knowledge.* ` +
-      `Then answer using your general knowledge. Do not fabricate citations.` +
-      RESPONSE_STYLE;
+    // No workspace match. Before conceding to stale "general knowledge",
+    // escalate to a quick live web search (+ any enabled search MCPs) unless
+    // the user turned it off. The open page is still appended below, so the
+    // model sees the web excerpts AND the current page.
+    let web: { context: string; sources: Array<{ title: string; url: string }> } = { context: '', sources: [] };
+    if (await isChatWebFallbackEnabled()) {
+      onStatus?.('Searching the web…');
+      try {
+        web = await gatherWebSnippets(effectiveQuery, { signal, onStatus });
+      } catch (e) {
+        if (signal.aborted) throw e;
+        console.warn('[chat web] fallback failed', e);
+      }
+    }
+
+    if (web.context) {
+      console.log(`[RAG] No workspace match — answered from ${web.sources.length} live web source(s)`);
+      webSources = web.sources;
+      systemPrompt =
+        `You are a helpful research assistant. The user's saved workspace had no match, so the excerpts below were pulled from a LIVE WEB SEARCH run just now. ` +
+        `Begin your answer with this exact italic line: *Searched the web — sources below.* ` +
+        `Answer from the excerpts and attribute claims in plain text to the numbered sources, e.g. "per [W2]". Do NOT invent citation anchors or facts beyond the excerpts; if they don't answer the question, say so plainly.` +
+        RESPONSE_STYLE +
+        `\n--- WEB RESULTS ---\n${web.context}\n--- END WEB RESULTS ---`;
+    } else {
+      console.warn(`[RAG] No chunks found for project ${projectId} — falling back to general knowledge`);
+      // General conversation fallback
+      systemPrompt = `You are a helpful AI assistant. No relevant documents were found in the user's research workspace for this question. ` +
+        `Begin your answer with this exact italic line: *No matching sources in this workspace — answering from general knowledge.* ` +
+        `Then answer using your general knowledge. Do not fabricate citations.` +
+        RESPONSE_STYLE;
+    }
   }
 
   // Ephemeral page context: the tab the user is looking at right now.
   // Deliberately fenced off from library sources — it has no citation
   // anchors and is never persisted.
   const linkedPages: Array<{ title: string; url: string }> = [];
+  // Web-fallback sources render as the same clickable footer as auto-followed
+  // links (streamed as a final delta + saved with the message).
+  if (webSources.length) linkedPages.push(...webSources);
   if (pageContext) {
     onStatus?.('Reading the page…');
     // Long pages switch to per-question retrieval (see selectPageMarkdown)

@@ -52,14 +52,17 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   const [academicDepth, setAcademicDepth] = useState<'abstract' | 'full'>('full');
   const [contextTokens, setContextTokens] = useState('32768');
   const [s2ApiKey, setS2ApiKey] = useState('');
+  // Chat web-search fallback — default ON; only an explicit false disables it.
+  const [webFallback, setWebFallback] = useState(true);
   useEffect(() => {
     if (typeof chrome === 'undefined' || !chrome.storage) return;
-    chrome.storage.local.get(['researchDepth', 'contextTokens', 's2ApiKey', 'sourceQuality', 'academicDepth']).then(r => {
+    chrome.storage.local.get(['researchDepth', 'contextTokens', 's2ApiKey', 'sourceQuality', 'academicDepth', 'chatWebFallback']).then(r => {
       if (r.researchDepth === 'deep' || r.researchDepth === 'exhaustive') setResearchDepth(r.researchDepth);
       if (r.sourceQuality === 'high') setSourceQuality('high');
       if (r.academicDepth === 'abstract') setAcademicDepth('abstract');
       if (r.contextTokens) setContextTokens(String(r.contextTokens));
       if (r.s2ApiKey) setS2ApiKey(r.s2ApiKey);
+      setWebFallback(r.chatWebFallback !== false);
     });
   }, []);
   const saveResearchSetting = (patch: Record<string, unknown>) => {
@@ -277,6 +280,28 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
             title="Toggle auto-add captures"
           >
             <span className={`absolute top-0.5 w-4 h-4 bg-background transition-all ${autoLinkCaptures ? 'right-0.5' : 'left-0.5'}`} />
+          </button>
+        </div>
+      </Section>
+
+      {/* ── Answering behavior ── */}
+      <Section id="answering" title="Answering" subtitle="When your library has no match.">
+        <div className="flex items-center justify-between gap-3">
+          <div className="min-w-0">
+            <span className="text-xs font-medium">Search the web when nothing matches</span>
+            <p className="text-[10px] text-muted-foreground font-mono mt-1 leading-normal">
+              ON: if your workspace and the open page can't answer, chat runs a quick web search (and any enabled search MCPs) and cites what it finds. OFF: it answers from the model's general knowledge instead. Sends the question to a search provider only when it fires.
+            </p>
+          </div>
+          <button
+            type="button"
+            role="switch"
+            aria-checked={webFallback}
+            onClick={() => { const next = !webFallback; setWebFallback(next); saveResearchSetting({ chatWebFallback: next }); }}
+            className={`shrink-0 w-12 h-6 border transition-colors relative ${webFallback ? 'bg-primary border-primary' : 'bg-muted border-border'}`}
+            title="Toggle web-search fallback"
+          >
+            <span className={`absolute top-0.5 w-4 h-4 bg-background transition-all ${webFallback ? 'right-0.5' : 'left-0.5'}`} />
           </button>
         </div>
       </Section>
