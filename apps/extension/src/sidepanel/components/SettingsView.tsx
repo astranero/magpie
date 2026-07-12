@@ -534,31 +534,33 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           <div className="flex items-center justify-between">
             <span className="text-xs font-medium">Google Drive</span>
             {authed ? (
-              <span className="inline-flex items-center border px-2.5 py-0.5 text-[10px] font-bold bg-primary text-primary-foreground">
-                <span className="w-1.5 h-1.5 bg-background mr-1.5" /> CONNECTED
+              <span className="inline-flex items-center rounded-full px-2.5 py-0.5 text-[10px] font-medium bg-primary text-primary-foreground">
+                <span className="w-1.5 h-1.5 rounded-full bg-background mr-1.5" /> Connected
               </span>
             ) : (
-              <span className="inline-flex items-center border border-muted px-2.5 py-0.5 text-[10px] font-bold text-muted-foreground">
-                OPTIONAL
+              <span className="inline-flex items-center rounded-full border border-muted px-2.5 py-0.5 text-[10px] font-medium text-muted-foreground">
+                Optional
               </span>
             )}
           </div>
 
           {authed && profile ? (
-            <div className="flex items-center justify-between bg-muted/30 p-2 border border-border">
+            <div className="flex items-center justify-between bg-muted/30 p-2 rounded-lg border border-border">
               <div className="flex items-center gap-2">
-                {profile.picture && <img className="w-6 h-6 border border-primary grayscale" src={profile.picture} alt="" />}
-                <span className="text-xs font-bold font-mono">{profile.email}</span>
+                {profile.picture && <img className="w-6 h-6 rounded-full border border-border" src={profile.picture} alt="" />}
+                <span className="text-xs font-medium">{profile.email}</span>
               </div>
               <Button variant="ghost" size="sm" onClick={logout} className="rounded-md font-medium text-xs">Sign out</Button>
             </div>
           ) : (
             <>
               <Button variant="outline" size="sm" className="w-full mt-2 rounded-lg font-medium text-xs" onClick={login}>
-                Sign in to Sync
+                Sign in with Google
               </Button>
-              <p className="text-[10px] text-muted-foreground font-mono mt-1 leading-normal">
-                Drive sync requires OAuth configuration. See the extension README for setup instructions.
+              <p className="text-[10px] text-muted-foreground mt-1 leading-normal">
+                One click, then work across devices — no keys to enter. On sign-in, Magpie syncs to a
+                <span className="font-mono"> Magpie</span> folder in your Drive. (First-time publisher setup:
+                <span className="font-mono"> docs/DRIVE-SETUP.md</span>.)
               </p>
             </>
           )}

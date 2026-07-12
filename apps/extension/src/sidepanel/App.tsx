@@ -898,6 +898,17 @@ export default function App() {
     if (res.success && res.token) {
       setAuthed(true);
       loadProfile(res.token as string);
+      // "Login and it just works": pull the user's Drive folder in, then push
+      // anything local that isn't there yet — no separate Sync click needed.
+      importFromDrive().then(() => syncToDrive()).catch(() => {});
+    } else {
+      const err = String(res.error || '');
+      // A missing/placeholder oauth2.client_id surfaces as "bad client id" /
+      // "OAuth2 not granted". Point the publisher at the one-time setup.
+      const needsSetup = /client id|oauth2|not granted|invalid|configured/i.test(err);
+      showToast('error', needsSetup
+        ? 'Google sign-in isn’t configured yet — see docs/DRIVE-SETUP.md (one-time).'
+        : `Sign-in failed — ${err || 'try again'}`);
     }
   };
 

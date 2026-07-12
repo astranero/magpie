@@ -6,6 +6,7 @@
 
 import { BRAND } from './brand';
 import { sendToOffscreen } from './offscreen-client';
+import { contentHasTag } from './frontmatter';
 
 const DB_NAME = BRAND.dbNameMain;
 const DB_VERSION = 3;
@@ -872,7 +873,10 @@ export async function clearChatHistory(chatId: string): Promise<void> {
 
 export async function getUnsyncedDocuments(): Promise<StoredDocument[]> {
   const docs = await listDocuments();
-  return docs.filter(d => !d.syncedToDrive);
+  // Machine-gathered research sources (30-150 per deep run) stay in the local
+  // library where citations resolve against them; they'd only clutter Drive.
+  // The report + consolidated sources list still sync.
+  return docs.filter(d => !d.syncedToDrive && !contentHasTag(d.content || '', 'research-source'));
 }
 
 export async function getDocumentWithChunks(docId: string): Promise<{
