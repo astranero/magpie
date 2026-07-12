@@ -1042,7 +1042,9 @@ async function handleCancelTask(request: Record<string, unknown>): Promise<Recor
     // zombie promise ever settles, its own cleanup is a no-op.
     await markJobFinished().catch(() => {});
     await clearResearchJob().catch(() => {});
-    chrome.runtime.sendMessage({ action: 'DEEP_RESEARCH_DONE', projectId }).catch(() => {});
+    // User pressed Stop — neutral cancel, not a failure or a success. (A live
+    // run's own finally also broadcasts; the panel dedupes the pair.)
+    chrome.runtime.sendMessage({ action: 'DEEP_RESEARCH_DONE', projectId, cancelled: true }).catch(() => {});
   }
   return {};
 }
@@ -2098,6 +2100,11 @@ async function executeResearch({ projectId, chatId, topic, effectiveTopic, mode 
     }
   }, 20000);
 
+  // The panel doesn't await START_DEEP_RESEARCH's response (Chrome drops
+  // sendResponse after ~5 min), so the DEEP_RESEARCH_DONE broadcast in the
+  // finally is the ONLY completion signal the UI sees — it must carry the
+  // failure reason, or a failed run renders as "✓ complete".
+  let doneError: string | undefined;
   try {
     const result = await runDeepResearch(projectId, effectiveTopic, chatFn, onProgress, signal, mode, synthesisFn);
 
@@ -2123,6 +2130,7 @@ async function executeResearch({ projectId, chatId, topic, effectiveTopic, mode 
     return { success: true, synthesis: result.synthesis, sources: result.sources };
   } catch (err: any) {
     const message = err.message === 'AbortError' ? 'Cancelled' : err.message;
+    doneError = message;
     if (chatId) {
       await saveChatMessage({
         chatId,
@@ -2142,7 +2150,13 @@ async function executeResearch({ projectId, chatId, topic, effectiveTopic, mode 
     // Evict the in-memory Orama index for this session; persisted documents
     // (source pages + synthesis report) rehydrate from IDB on the next search.
     resetSessionIndex(projectId);
-    chrome.runtime.sendMessage({ action: 'DEEP_RESEARCH_DONE', projectId, chatId }).catch(() => {});
+    chrome.runtime.sendMessage({
+      action: 'DEEP_RESEARCH_DONE', projectId, chatId,
+      // A user Stop surfaces as an AbortError → 'Cancelled': report it as a
+      // neutral cancel, not a failure.
+      error: doneError === 'Cancelled' ? undefined : doneError,
+      cancelled: doneError === 'Cancelled'
+    }).catch(() => {});
     notifySidepanelSync();
   }
 }

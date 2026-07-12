@@ -63,7 +63,7 @@ export default function App() {
 
   // Capture
   const [capturing, setCapturing] = useState(false);
-  const [toast, setToast] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+  const [toast, setToast] = useState<{ type: 'success' | 'error' | 'info'; text: string } | null>(null);
 
   // Projects & Chats
   const [projects, setProjects] = useState<Project[]>([]);
@@ -103,6 +103,9 @@ export default function App() {
   const chatScrollToBottomRef = useRef<(() => void) | null>(null);
   const logBufferRef = useRef<Record<string, string[]>>({});
   const logFlushTimerRef = useRef<number | null>(null);
+  // Stop fires DONE from BOTH the force-clear and the live run's finally;
+  // dedupe the pair so the user sees one toast, not two.
+  const doneGuardRef = useRef<Record<string, number>>({});
   // Live research synthesis stream (report tokens during [SYNTHESIZING])
 
 
@@ -334,18 +337,23 @@ export default function App() {
       }
 
       if (m.action === 'DEEP_RESEARCH_DONE') {
+        // Clearing the flag is idempotent — always do it, even for a duplicate.
         setResearching(prev => ({ ...prev, [m.projectId]: false }));
+        // But show the toast / log line only once per finish (Stop double-fires).
+        const now = Date.now();
+        if (now - (doneGuardRef.current[m.projectId] || 0) < 4000) return;
+        doneGuardRef.current[m.projectId] = now;
+
         if (m.chatId) loadChatHistory(m.chatId);
         loadDocuments(m.projectId);
-        setResearchLogs(prev => ({
-          ...prev,
-          [m.projectId]: [...(prev[m.projectId] || []),
-            m.error
-              ? `[ERROR] Research failed: ${m.error}`
-              : '[SUCCESS] Deep research complete — results added to chat.'
-          ]
-        }));
-        showToast(m.error ? 'error' : 'success', m.error ? `Research failed: ${m.error}` : 'Deep research complete!');
+        const line = m.cancelled
+          ? '[STOPPED] Research cancelled.'
+          : m.error
+            ? `[ERROR] Research failed: ${m.error}`
+            : '[SUCCESS] Deep research complete — results added to chat.';
+        setResearchLogs(prev => ({ ...prev, [m.projectId]: [...(prev[m.projectId] || []), line] }));
+        if (m.cancelled) showToast('info', 'Research cancelled');
+        else showToast(m.error ? 'error' : 'success', m.error ? `Research failed: ${m.error}` : 'Deep research complete!');
       }
     };
 
@@ -704,7 +712,7 @@ export default function App() {
   };
 
   // ──────── Actions ────────
-  const showToast = (type: 'success' | 'error', text: string) => {
+  const showToast = (type: 'success' | 'error' | 'info', text: string) => {
     setToast({ type, text });
     setTimeout(() => setToast(null), 4000);
   };
@@ -1471,7 +1479,11 @@ export default function App() {
       {/* ── Main Content Area ── */}
       <main className="flex-1 flex flex-col overflow-hidden relative bg-background border-b border-border">
         {toast && (
-          <div className="absolute top-4 left-1/2 -translate-x-1/2 z-50 px-4 py-2 bg-primary text-primary-foreground text-xs font-medium rounded-lg animate-in slide-in-from-top-2 shadow-card">
+          <div className={`absolute top-4 left-1/2 -translate-x-1/2 z-50 px-4 py-2 text-xs font-medium rounded-lg animate-in slide-in-from-top-2 shadow-card ${
+            toast.type === 'error' ? 'bg-destructive text-destructive-foreground'
+              : toast.type === 'info' ? 'ink-panel'
+              : 'bg-primary text-primary-foreground'
+          }`}>
             {toast.text}
           </div>
         )}
