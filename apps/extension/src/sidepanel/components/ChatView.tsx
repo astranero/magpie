@@ -733,13 +733,14 @@ export const ChatView: React.FC<ChatViewProps> = ({
             onKeyDown={e => {
               if (e.key === 'Enter' && !e.shiftKey) {
                 e.preventDefault();
+                // While a reply streams, send() no-ops — typing stays possible
+                // (the textarea is never disabled, so focus is never ejected).
                 send();
                 // Reset height after sending
                 const el = e.currentTarget;
                 requestAnimationFrame(() => { el.style.height = 'auto'; });
               }
             }}
-            disabled={generating[activeChatId]}
             autoComplete="off"
             aria-label="Chat input"
           />

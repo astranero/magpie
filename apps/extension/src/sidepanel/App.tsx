@@ -515,10 +515,15 @@ export default function App() {
   // Self-healing "researching" flag: DEEP_RESEARCH_DONE broadcasts can be
   // missed (panel closed, other window asleep), which left the field-log
   // card up forever. While ANY project shows researching, poll the worker
-  // every 5s and clear flags for projects with no live run.
+  // every 5s and clear flags for projects with no live run. Startup grace:
+  // the worker spends seconds on topic resolution BEFORE the run is
+  // registered — clearing during that window flickers the field-log card
+  // (mount/unmount loop) and eats the logs, so young flags are left alone.
+  const researchStartedAtRef = useRef<Record<string, number>>({});
   useEffect(() => {
     const anyResearching = Object.values(researching).some(Boolean);
     if (!anyResearching) return;
+    const GRACE_MS = 90_000;
     const check = () => {
       msg('GET_RESEARCH_STATUS').then((res: any) => {
         if (!res?.success) return;
@@ -527,13 +532,16 @@ export default function App() {
           let changed = false;
           const next = { ...prev };
           for (const pid of Object.keys(next)) {
-            if (next[pid] && pid !== liveProject) { next[pid] = false; changed = true; }
+            if (!next[pid] || pid === liveProject) continue;
+            const startedAt = researchStartedAtRef.current[pid] ?? 0;
+            if (Date.now() - startedAt < GRACE_MS) continue; // still starting up
+            next[pid] = false;
+            changed = true;
           }
           return changed ? next : prev;
         });
       }).catch(() => {});
     };
-    check();
     const interval = window.setInterval(check, 5000);
     return () => window.clearInterval(interval);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1430,6 +1438,7 @@ export default function App() {
     if (!activeProjectId || !activeChatId) return;
 
     updateMessage(activeChatId, planMsgId, m => ({ ...m, plan: { ...m.plan!, status: 'started' } }));
+    researchStartedAtRef.current[activeProjectId] = Date.now();
     setResearching(prev => ({ ...prev, [activeProjectId]: true }));
     setResearchLogs(prev => ({ ...prev, [activeProjectId]: [] }));
     maybeAutoNameProject(plan.effectiveTopic).catch(() => {});

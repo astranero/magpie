@@ -343,8 +343,12 @@ const messageHandlers: Record<string, MessageHandler> = {
   FETCH_URL_PREVIEW: handleFetchUrlPreview,
   CAPTURE_URL: handleCaptureUrl,
   GET_RESEARCH_STATUS: async () => {
-    const job = await getResearchJob().catch(() => null);
-    const running = job ? abortControllers.has(job.projectId) : false;
+    const job = await getResearchJob().catch(() => null) as any;
+    // Running = an in-flight controller in THIS worker, OR an active job with
+    // a fresh heartbeat (a run in another worker instance, or one still in
+    // its startup window before the controller is registered).
+    const fresh = !!job?.lastHeartbeatAt && Date.now() - job.lastHeartbeatAt < HEARTBEAT_STALE_MS;
+    const running = !!job && (abortControllers.has(job.projectId) || (job.active && fresh));
     return { job, running };
   },
 
