@@ -539,6 +539,11 @@ const PAGE_CONTEXT_TTL_MS = 5 * 60 * 1000;
 
 const MAX_PAGE_CHARS = 16000;
 const PAGE_RETRIEVAL_BUDGET = 12000;
+// Conservative cap: PDFs larger than this can OOM-crash the offscreen renderer
+// (the whole browser tab) during pdf.js's full-document load. Small PDFs
+// (~2 MB) import fine; a 10 MB, 470-page book crashes. Refuse above this until
+// the parse streams pages from OPFS instead of loading the whole doc at once.
+const MAX_PDF_IMPORT_MB = 6;
 
 /**
  * Build the page markdown to inline into the chat request. Short pages go in
@@ -879,6 +884,19 @@ async function handleImportLocalPdf(request: Record<string, unknown>): Promise<R
             approxBytes < 16_384
               ? `not a PDF (${approxBytes} bytes — this looks like a shortcut/alias to the real file; open its location and pick the original)`
               : 'not a PDF (missing %PDF header)'
+          );
+        }
+
+        // Large PDFs (hundreds of pages / many MB) overwhelm the offscreen
+        // renderer's memory during pdf.js's initial full-document load and can
+        // CRASH the whole browser tab before any page is processed. Until the
+        // parse is reworked to stream page-by-page from OPFS, refuse oversized
+        // files with a clear message instead of taking Chrome down.
+        const approxMb = (file.base64.length * 0.75) / 1024 / 1024;
+        if (approxMb > MAX_PDF_IMPORT_MB) {
+          throw new Error(
+            `PDF is ${approxMb.toFixed(1)} MB — too large to import safely right now (limit ${MAX_PDF_IMPORT_MB} MB; large books can crash the browser). ` +
+            `Split it into smaller PDFs, or import the specific chapters you need.`
           );
         }
 
