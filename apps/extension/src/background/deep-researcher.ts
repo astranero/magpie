@@ -414,7 +414,9 @@ Return ONLY a JSON array of strings, nothing else. Example: ["query 1", "query 2
 }
 
 export async function generateSubQuestions(topic: string, llmChatFn: (sys: string, user: string) => Promise<string>): Promise<string[]> {
-  const sysPrompt = `${todayLine()} You are a research strategist. Decompose the given topic into 5-7 distinct research sub-questions that together give comprehensive coverage: core mechanisms, current state of the art, applications, limitations, open debates, and recent developments. Return ONLY a JSON array of strings, nothing else.`;
+  const sysPrompt = `${todayLine()} You are a research strategist. Decompose the given topic into 5-7 research directives that together give comprehensive coverage: core mechanisms, current state of the art, applications, limitations, open debates, and recent developments.
+Each directive is ONE sentence that starts with an action verb (Analyze / Investigate / Compare / Evaluate / Survey / Trace / Synthesize), names WHAT to examine, and ends with a purpose clause ("… to determine/extract/identify …"). Directives must be concrete enough to search on — name the specific systems, methods, or populations involved.
+Return ONLY a JSON array of strings, nothing else.`;
   const res = await llmChatFn(sysPrompt, topic);
   try {
     const start = res.indexOf('[');

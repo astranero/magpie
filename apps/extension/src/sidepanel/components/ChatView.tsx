@@ -91,7 +91,7 @@ const PlanCard: React.FC<PlanCardProps> = ({ msgId, plan, onStart, onCancel }) =
         {plan.status === 'loading' ? (
           <div className="flex items-center gap-2 text-xs text-muted-foreground py-2">
             <Sparkles size={12} className="animate-pulse motion-reduce:animate-none text-primary" aria-hidden="true" />
-            Resolving topic &amp; drafting sub-questions…
+            Resolving topic &amp; drafting the research plan…
           </div>
         ) : (
           <>
@@ -103,11 +103,23 @@ const PlanCard: React.FC<PlanCardProps> = ({ msgId, plan, onStart, onCancel }) =
               )}
             </div>
 
+            {/* Pipeline spec line: what the run will do + what it costs */}
+            <div className="flex items-center gap-1.5 text-[10px] font-mono uppercase tracking-widest text-muted-foreground border-y border-border/60 py-1.5">
+              <span className="text-foreground/80 font-bold">Gather{(plan.stages ?? 1) > 1 ? ` ×${plan.stages}` : ''}</span>
+              <span aria-hidden="true">→</span>
+              <span className="text-foreground/80 font-bold">Analyze</span>
+              <span aria-hidden="true">→</span>
+              <span className="text-foreground/80 font-bold">Report</span>
+              {plan.estMinutes && (
+                <span className="ml-auto normal-case tracking-normal">~{plan.estMinutes} min · chat stays open</span>
+              )}
+            </div>
+
             {plan.subQuestions.length > 0 && (
-              <ol className="space-y-1.5">
+              <ol className="space-y-2">
                 {plan.subQuestions.map((q, i) => (
-                  <li key={i} className="text-xs text-foreground flex gap-2.5 leading-snug">
-                    <span className="font-mono text-muted-foreground shrink-0 w-4 text-right tabular-nums">{i + 1}.</span>
+                  <li key={i} className="text-xs text-foreground flex gap-2.5 leading-relaxed">
+                    <span className="font-mono text-primary/70 font-bold shrink-0 w-4 text-right tabular-nums">{i + 1}</span>
                     <span>{q}</span>
                   </li>
                 ))}
@@ -689,7 +701,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
 
       {/* Input */}
       <div className="p-3 bg-background border-t border-border shrink-0">
-        <div className="relative flex items-end w-full rounded-lg border-2 border-input bg-card shadow-card focus-within:border-primary transition-colors">
+        <div className="relative flex items-end w-full rounded-xl border border-input bg-card shadow-card focus-within:border-primary/70 focus-within:ring-2 focus-within:ring-primary/15 transition-all">
           {input.startsWith('/') && !input.includes(' ') && (() => {
             const matches = paletteEntries(input, customCommands);
             if (matches.length === 0) return null;

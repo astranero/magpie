@@ -51,6 +51,10 @@ export interface ResearchPlan {
   subQuestions: string[];
   mode: 'quick' | 'deep';
   status: 'loading' | 'draft' | 'refining' | 'started' | 'cancelled';
+  /** Gather rounds this run will make (1 = quick single pass). */
+  stages?: number;
+  /** Rough end-to-end expectation shown on the card. */
+  estMinutes?: number;
 }
 
 export interface ResolvedCitation {

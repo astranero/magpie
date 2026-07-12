@@ -17,6 +17,7 @@ import { get as idbGet } from 'idb-keyval';
 import { runDeepResearch, generateSubQuestions, scrapeUrl, isJunkUrl } from './deep-researcher';
 import { harvestReferences } from '../lib/reference-harvest';
 import { needsIntentResolution, formatHistoryForIntent, parseRepoUrl, selectTreePaths, formatTreeBlock, RepoRef } from '../lib/query-intent';
+import { getResearchLimits } from '../lib/research-limits';
 import { looksLikeBuildLog, extractLogHighlights } from '../lib/log-highlights';
 import { addChunksToVectorStore, searchSessionChunks, resetSessionIndex, resetAllSessionIndexes } from '../lib/vector-store';
 import { replaceChunksForDoc } from '../lib/db';
@@ -1673,10 +1674,17 @@ async function handlePreviewDeepResearch(request: Record<string, unknown>): Prom
     // fallback to raw topic
   }
 
-  // Generate sub-questions for user review
+  // Generate research directives for user review
   const subQuestions = await generateSubQuestions(effectiveTopic, chatFn).catch(() => [] as string[]);
 
-  return { effectiveTopic, subQuestions };
+  // Shape of the run, so the plan card can show the pipeline + a time
+  // expectation: quick = one gather pass; deep = N staged rounds by depth.
+  const limits = await getResearchLimits();
+  const mode = (request.mode as string) === 'deep' ? 'deep' : 'quick';
+  const stages = mode === 'deep' ? limits.rounds : 1;
+  const estMinutes = mode === 'deep' ? Math.max(8, stages * 6) : 4;
+
+  return { effectiveTopic, subQuestions, stages, estMinutes };
 }
 
 /**

@@ -1379,6 +1379,8 @@ export default function App() {
           ...m.plan!,
           effectiveTopic: (preview.effectiveTopic as string) || topic,
           subQuestions: (preview.subQuestions as string[]) || [],
+          stages: (preview.stages as number) || undefined,
+          estMinutes: (preview.estMinutes as number) || undefined,
           status: 'draft'
         }
       }));
@@ -1518,7 +1520,7 @@ export default function App() {
               }}
             />
           ) : (
-            <div className="flex items-center flex-1 min-w-0 gap-1 bg-background border-2 border-border hover:border-primary transition-colors focus-within:border-primary">
+            <div className="flex items-center flex-1 min-w-0 gap-1 bg-background rounded-lg border border-border hover:border-primary/60 transition-colors focus-within:border-primary/60">
               <Select
                 value={activeProjectId || ''}
                 onValueChange={(val) => {
