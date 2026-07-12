@@ -1662,7 +1662,7 @@ export default function App() {
               thinkingStatus={thinkingStatus}
               researching={researching}
               isActive={view === 'chat'}
-              
+              llmEndpointLocal={/^https?:\/\/(localhost|127\.0\.0\.1|0\.0\.0\.0|\[?::1\]?)(:|\/|$)/i.test(customUrl.trim())}
               researchLogs={researchLogs}
               documents={documents}
               resolveCitations={resolveCitations}
@@ -1736,6 +1736,14 @@ export default function App() {
                 }
               }}
               saveSettings={saveSettings}
+              workspaceName={projects.find(p => p.id === activeProjectId)?.title || 'this workspace'}
+              workspaceRules={projects.find(p => p.id === activeProjectId)?.rules || ''}
+              saveWorkspaceRules={async (rules: string) => {
+                if (!activeProjectId) return;
+                await msg('UPDATE_PROJECT', { id: activeProjectId, rules });
+                loadProjects();
+                showToast('success', 'Workspace instructions saved');
+              }}
             />
           )}
         </div>

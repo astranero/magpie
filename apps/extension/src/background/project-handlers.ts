@@ -5,7 +5,7 @@
 // state. CREATE_PROJECT exercised by e2e/capture.spec.ts.
 
 import {
-  createProject, listProjects, getProject, updateProjectTitle, deleteProject,
+  createProject, listProjects, getProject, updateProjectTitle, updateProjectRules, deleteProject,
   createChat, listChats, updateChatTitle, deleteChat
 } from '../lib/db';
 
@@ -26,7 +26,8 @@ export async function handleGetProject(request: Record<string, unknown>): Promis
 }
 
 export async function handleUpdateProject(request: Record<string, unknown>): Promise<Record<string, unknown>> {
-  await updateProjectTitle(request.id as string, request.title as string);
+  if (typeof request.title === 'string') await updateProjectTitle(request.id as string, request.title);
+  if (typeof request.rules === 'string') await updateProjectRules(request.id as string, request.rules as string);
   return {};
 }
 

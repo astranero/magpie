@@ -15,6 +15,8 @@ export interface Project {
   id: string;
   title: string;
   documentIds?: string[];
+  /** Persistent per-workspace instructions injected into every chat/research. */
+  rules?: string;
   createdAt: string;
   updatedAt: string;
 }

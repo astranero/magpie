@@ -7,7 +7,7 @@
 import {
   saveDocument, listDocuments, updateDocumentSync,
   getUnsyncedDocuments, getChatHistory, clearChatHistory, saveChatMessage,
-  linkDocumentToProject,
+  linkDocumentToProject, getProject,
   getChunkByAnchor, deleteOrphanDocuments
 } from '../lib/db';
 import { chunkDocument, makeDocShortId } from '../lib/chunker';
@@ -1085,6 +1085,13 @@ async function buildChatRequest(chatId: string, projectId: string, prompt: strin
 
   console.log(`[RAG] Project ${projectId}: ${enabledDocs.length} enabled docs, ${docIds.length} IDs`);
 
+  // Persistent per-workspace instructions — prepended to EVERY prompt for this
+  // workspace so the user never re-explains their stack/conventions/tone.
+  const project = await getProject(projectId).catch(() => null);
+  const rulesBlock = project?.rules?.trim()
+    ? `--- WORKSPACE INSTRUCTIONS (always follow these for this workspace) ---\n${project.rules.trim()}\n--- END WORKSPACE INSTRUCTIONS ---\n\n`
+    : '';
+
   // History first: intent resolution needs it (retrieved BEFORE the new user
   // message is saved, so it holds only prior turns).
   const history = await getChatHistory(chatId);
@@ -1098,7 +1105,7 @@ async function buildChatRequest(chatId: string, projectId: string, prompt: strin
   // active research run at the offscreen embedder. Answer conversationally.
   if (isChitchat(prompt) && !pageContext) {
     onStatus?.('Writing the answer…');
-    const systemPrompt =
+    const systemPrompt = rulesBlock +
       `You are Magpie, a warm, concise research assistant. The user sent a greeting or small talk — NOT a research question. ` +
       `Reply in ONE friendly sentence, then briefly invite them to ask about their captured sources or to run /research <topic>. ` +
       `Do NOT mention "sources" as though they asked a question, and do NOT say you can't answer.`;
@@ -1168,10 +1175,14 @@ async function buildChatRequest(chatId: string, projectId: string, prompt: strin
   // Answers render in a ~400px side panel; a 500-word tutorial for a
   // definition question is scroll punishment. Calibrate length to the ask.
   const RESPONSE_STYLE =
-    `\nRESPONSE STYLE: Match length to the question. A definition or factual question gets 2-4 sentences; ` +
-    `a how-to gets a compact step list; use section headings ONLY when the user asked several distinct things. ` +
-    `No filler introductions, no closing summaries, no "Important Note" essays — one short caveat sentence at most. ` +
-    `The user can always ask a follow-up; do not pre-answer questions they haven't asked.`;
+    `\nRESPONSE STYLE — write like an expert collaborator, not a chatbot:\n` +
+    `• Lead with the answer or artifact. NO preamble, no "Certainly!/Great question!", no sycophancy, no closing summary.\n` +
+    `• Match length to the question: a definition gets 2-4 sentences, a how-to gets a compact step list. Don't pre-answer things not asked.\n` +
+    `• Calibrate to the user's demonstrated expertise — use precise terms, don't over-explain standard basics.\n` +
+    `• Prefer scannable structure — bold key terms, short lists, a comparison table — over dense paragraphs. Section headings only when several distinct things were asked.\n` +
+    `• FAIL FAST: if the sources/page/inputs don't contain what's needed, or the request is ambiguous, SAY SO in one line — never guess persuasively to sound helpful.\n` +
+    `• If a complex request is underspecified, state the key assumptions you're making in one line, then proceed.\n` +
+    `• When fixing an error, name the ROOT CAUSE (why it failed) before the corrected version.`;
 
   if (relevantChunks.length > 0) {
     // Build citation-anchored context (generous — favor fuller grounding over
@@ -1248,7 +1259,7 @@ async function buildChatRequest(chatId: string, projectId: string, prompt: strin
   }
 
   onStatus?.('Writing the answer…');
-  return { systemPrompt, formattedHistory, linkedPages };
+  return { systemPrompt: rulesBlock + systemPrompt, formattedHistory, linkedPages };
 }
 
 /**
@@ -2055,12 +2066,19 @@ async function executeResearch({ projectId, chatId, topic, effectiveTopic, mode 
   abortControllers.set(projectId, controller);
   const signal = controller.signal;
 
+  // Workspace instructions apply to research too — prepended to every research
+  // LLM call's system prompt so the report follows the workspace's conventions.
+  const rp = await getProject(projectId).catch(() => null);
+  const researchRules = rp?.rules?.trim()
+    ? `--- WORKSPACE INSTRUCTIONS (always follow these) ---\n${rp.rules.trim()}\n--- END WORKSPACE INSTRUCTIONS ---\n\n`
+    : '';
+
   // Every planning/analysis LLM call carries its own deadline; timing out
   // fails THAT call (callers all have fallbacks) instead of the whole run.
   const chatFn = async (s: string, u: string) => {
     const d = deadlineSignal(signal, LLM_CALL_TIMEOUT_MS);
     try {
-      return await chatWithCustom(s, [], u, d.signal);
+      return await chatWithCustom(researchRules + s, [], u, d.signal);
     } finally {
       d.done();
     }
@@ -2077,7 +2095,7 @@ async function executeResearch({ projectId, chatId, topic, effectiveTopic, mode 
     signal.addEventListener('abort', onAbort, { once: true });
     let idleTimer = setTimeout(() => ctl.abort(new Error('stream idle timeout')), LLM_STREAM_IDLE_MS);
     try {
-      await chatWithCustomStream(sys, [], user, ctl.signal, (delta) => {
+      await chatWithCustomStream(researchRules + sys, [], user, ctl.signal, (delta) => {
         full += delta;
         clearTimeout(idleTimer);
         idleTimer = setTimeout(() => ctl.abort(new Error('stream idle timeout')), LLM_STREAM_IDLE_MS);

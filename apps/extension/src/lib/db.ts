@@ -17,6 +17,10 @@ export interface Project {
   id: string;
   title: string;
   documentIds?: string[];
+  /** Persistent per-workspace instructions (stack, conventions, tone) injected
+   *  into every chat + research prompt for this workspace — so the baseline
+   *  never has to be re-explained. */
+  rules?: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -279,6 +283,21 @@ export async function updateProjectTitle(id: string, title: string): Promise<voi
   const project = await reqToPromise<Project | undefined>(store.get(id));
   if (project) {
     project.title = title;
+    project.updatedAt = new Date().toISOString();
+    store.put(project);
+  }
+  await txComplete(transaction);
+  notifySync();
+}
+
+/** Set the persistent instructions/context for a workspace. */
+export async function updateProjectRules(id: string, rules: string): Promise<void> {
+  const db = await openDB();
+  const transaction = tx(db, 'projects', 'readwrite');
+  const store = transaction.objectStore('projects');
+  const project = await reqToPromise<Project | undefined>(store.get(id));
+  if (project) {
+    project.rules = rules;
     project.updatedAt = new Date().toISOString();
     store.put(project);
   }

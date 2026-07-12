@@ -32,13 +32,19 @@ interface SettingsViewProps {
   autoLinkCaptures: boolean;
   setAutoLinkCaptures: (val: boolean) => void;
   saveSettings: () => void;
+  workspaceName: string;
+  workspaceRules: string;
+  saveWorkspaceRules: (rules: string) => void | Promise<void>;
 }
 
 export const SettingsView: React.FC<SettingsViewProps> = ({
   customUrl, setCustomUrl, customKey, setCustomKey, customModel, setCustomModel, visionModel, setVisionModel, customModels, fetchCustomModels,
   docCount, globalDocCount, onCleanupOrphans, authed, profile, login, logout, folderName, setFolderName, exportWorkspace,
-  autoLinkCaptures, setAutoLinkCaptures, saveSettings
+  autoLinkCaptures, setAutoLinkCaptures, saveSettings, workspaceName, workspaceRules, saveWorkspaceRules
 }) => {
+  // Local draft of the workspace instructions; persisted on blur.
+  const [rulesDraft, setRulesDraft] = useState(workspaceRules);
+  useEffect(() => { setRulesDraft(workspaceRules); }, [workspaceRules]);
 
   // Research settings are self-contained: read/write chrome.storage directly.
   const [researchDepth, setResearchDepth] = useState<'standard' | 'deep' | 'exhaustive'>('standard');
@@ -155,6 +161,21 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
 
   return (
     <div className="flex-1 overflow-y-auto no-scrollbar p-4 space-y-6">
+      {/* ── Workspace instructions ── */}
+      <Section id="workspace-rules" title="Workspace Instructions" subtitle={`Persistent context for "${workspaceName}" — added to every conversation & research prompt.`}>
+          <textarea
+            value={rulesDraft}
+            onChange={e => setRulesDraft(e.target.value)}
+            onBlur={() => { if (rulesDraft !== workspaceRules) saveWorkspaceRules(rulesDraft); }}
+            placeholder={"Tell Magpie your baseline so you never repeat it, e.g.:\n• Stack: Next.js 14, TypeScript strict, Tailwind\n• Answer terse, code-first, no preamble\n• Prefer pnpm; deploy on Vercel"}
+            rows={5}
+            className="w-full rounded-lg border border-border bg-background px-3 py-2 text-xs leading-relaxed resize-y focus:outline-none focus:ring-2 focus:ring-ring"
+          />
+          <p className="text-[10px] text-muted-foreground leading-normal">
+            Applies only to this workspace — kept separate from your other workspaces. Saved when you click away.
+          </p>
+      </Section>
+
       {/* ── Custom Provider ── */}
       <Section id="provider" title="AI Provider Configuration" subtitle="Connect to any OpenAI-compatible API.">
           <div className="space-y-1.5">
