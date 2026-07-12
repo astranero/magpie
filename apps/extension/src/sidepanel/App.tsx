@@ -400,10 +400,9 @@ export default function App() {
   }, [activeProjectId, activeChatId]);
 
   // ──────── Write documents to local folder when they change ────────
-  useEffect(() => {
+  const mirrorWorkspaceToFolder = useCallback(async () => {
     if (!activeProjectId || documents.length === 0) return;
-
-    (async () => {
+    {
       try {
         const handle = await get('ara-local-directory-handle');
         if (!handle) return;
@@ -411,9 +410,10 @@ export default function App() {
         // @ts-ignore
         const perm = await handle.queryPermission({ mode: 'readwrite' });
         if (perm !== 'granted') {
+          setFolderPermission('expired');
           if (!permissionWarnedRef.current) {
             permissionWarnedRef.current = true;
-            showToast('error', 'Folder write access expired — re-pick the save folder in Config');
+            showToast('error', 'Folder write access expired — restore it in Config → Local Storage');
           }
           return;
         }
@@ -462,8 +462,16 @@ export default function App() {
       } catch (err) {
         console.error('[local-folder] Write pass failed:', err);
       }
-    })();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [documents, activeProjectId, projects]);
+
+  // Auto-mirror whenever the workspace's documents change; also invoked
+  // directly after a folder (re-)grant so the backfill doesn't wait for the
+  // next document change.
+  useEffect(() => {
+    mirrorWorkspaceToFolder().catch(() => {});
+  }, [mirrorWorkspaceToFolder]);
 
   // ──────── Async Import Progress (PDF + Images) ────────
   useEffect(() => {
@@ -728,6 +736,24 @@ export default function App() {
 
   const pickLocalFolder = async () => {
     try {
+      // Expired permission on an existing handle: re-request on the SAME
+      // folder first (the button click provides the required user gesture) —
+      // no need to re-pick AI_AW in the picker every time Chrome forgets.
+      const existing = await get('ara-local-directory-handle').catch(() => null);
+      if (existing && folderPermission === 'expired') {
+        try {
+          // @ts-ignore
+          const perm = await existing.requestPermission({ mode: 'readwrite' });
+          if (perm === 'granted') {
+            setFolderPermission('granted');
+            permissionWarnedRef.current = false;
+            showToast('success', `Access to "${existing.name}" restored — mirroring your documents`);
+            mirrorWorkspaceToFolder().catch(() => {});
+            return;
+          }
+        } catch { /* fall through to the picker */ }
+      }
+
       // Request readwrite HERE, inside the user gesture — later auto-saves
       // may not call requestPermission (Chrome requires user activation).
       // @ts-ignore
@@ -735,7 +761,9 @@ export default function App() {
       await set('ara-local-directory-handle', handle);
       setLocalFolderName(handle.name);
       setFolderPermission('granted');
-      showToast('success', 'Local folder selected');
+      permissionWarnedRef.current = false;
+      showToast('success', 'Local folder selected — mirroring your documents');
+      mirrorWorkspaceToFolder().catch(() => {});
     } catch (err: any) {
       // AbortError = user dismissed the picker — not an error
       if (err?.name !== 'AbortError') {
