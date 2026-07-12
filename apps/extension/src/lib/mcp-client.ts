@@ -144,10 +144,34 @@ export class McpConnection {
 
 // ── Server registry (chrome.storage.local under `mcpServers`) ──
 
+/**
+ * Recommended remote MCPs seeded once into a fresh install. Kept minimal and
+ * deterministic (the "standard library" principle) — only remote HTTP servers
+ * work in a browser extension. Seeded DISABLED: present with one-click enable,
+ * so we never call a third party without the user opting in (local-first).
+ */
+export const DEFAULT_MCP_SERVERS: McpServerConfig[] = [
+  {
+    id: 'default-context7',
+    name: 'Context7 · live library docs',
+    url: 'https://mcp.context7.com/mcp',
+    enabled: false,   // opt-in: flip on in Config → MCP Servers
+  },
+];
+
 export async function getMcpServers(): Promise<McpServerConfig[]> {
   try {
-    const s = await chrome.storage.local.get(['mcpServers']);
-    return Array.isArray(s.mcpServers) ? s.mcpServers : [];
+    const s = await chrome.storage.local.get(['mcpServers', 'mcpSeeded']);
+    const existing: McpServerConfig[] = Array.isArray(s.mcpServers) ? s.mcpServers : [];
+    // Seed recommended defaults exactly once. After that the user's list is
+    // authoritative — if they remove a default, it stays removed.
+    if (!s.mcpSeeded) {
+      const haveUrls = new Set(existing.map(x => x.url));
+      const merged = [...existing, ...DEFAULT_MCP_SERVERS.filter(d => !haveUrls.has(d.url))];
+      await chrome.storage.local.set({ mcpServers: merged, mcpSeeded: true });
+      return merged;
+    }
+    return existing;
   } catch {
     return [];
   }
