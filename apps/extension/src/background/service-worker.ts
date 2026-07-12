@@ -21,7 +21,7 @@ import { getResearchLimits } from '../lib/research-limits';
 import { looksLikeBuildLog, extractLogHighlights } from '../lib/log-highlights';
 import { addChunksToVectorStore, searchSessionChunks, resetSessionIndex, resetAllSessionIndexes } from '../lib/vector-store';
 import { replaceChunksForDoc } from '../lib/db';
-import { pdfBase64ToBody, pdfUrlToBody, ensureOffscreen as ensureOffscreenDoc } from '../lib/pdf-parser';
+import { pdfUrlToBody, pdfOpfsToBody, ensureOffscreen as ensureOffscreenDoc } from '../lib/pdf-parser';
 import { setEnsureOffscreen, sendToOffscreen } from '../lib/offscreen-client';
 import { getProviderSettings, chatWithCustom, chatWithCustomStream, handleFetchCustomModels } from './llm-client';
 import { handleSearchLibrary, handleRecallDocs } from './library-handlers';
@@ -539,11 +539,6 @@ const PAGE_CONTEXT_TTL_MS = 5 * 60 * 1000;
 
 const MAX_PAGE_CHARS = 16000;
 const PAGE_RETRIEVAL_BUDGET = 12000;
-// Conservative cap: PDFs larger than this can OOM-crash the offscreen renderer
-// (the whole browser tab) during pdf.js's full-document load. Small PDFs
-// (~2 MB) import fine; a 10 MB, 470-page book crashes. Refuse above this until
-// the parse streams pages from OPFS instead of loading the whole doc at once.
-const MAX_PDF_IMPORT_MB = 6;
 
 /**
  * Build the page markdown to inline into the chat request. Short pages go in
@@ -857,7 +852,10 @@ async function saveProcessedDoc(projectId: string, title: string, content: strin
  */
 async function handleImportLocalPdf(request: Record<string, unknown>): Promise<Record<string, unknown>> {
   const projectId = request.projectId as string;
-  const files = request.files as Array<{ name: string; base64: string }>;
+  // The sidepanel streams each PDF into OPFS and sends only its temp name +
+  // byte size — the bytes never cross this message (no base64), which is what
+  // let large books crash the renderer.
+  const files = request.files as Array<{ name: string; opfsName: string; size: number }>;
   if (!projectId) throw new Error('projectId is required');
   if (!Array.isArray(files) || files.length === 0) throw new Error('No PDF files provided');
 
@@ -873,34 +871,13 @@ async function handleImportLocalPdf(request: Record<string, unknown>): Promise<R
         // Notify UI that we're starting this file
         notifyImportProgress({ type: 'pdf-progress', file: file.name, status: 'parsing', imported, total: files.length });
 
-        // Real PDFs start with "%PDF-". A few hundred bytes without that
-        // header is almost always a macOS Finder alias / Windows shortcut
-        // picked instead of the document it points to — say so, instead of
-        // letting pdf.js fail with "Invalid PDF structure".
-        const head = atob(file.base64.slice(0, 8));
-        if (!head.startsWith('%PDF')) {
-          const approxBytes = Math.round(file.base64.length * 0.75);
-          throw new Error(
-            approxBytes < 16_384
-              ? `not a PDF (${approxBytes} bytes — this looks like a shortcut/alias to the real file; open its location and pick the original)`
-              : 'not a PDF (missing %PDF header)'
-          );
+        // A few hundred bytes is almost always a macOS Finder alias / Windows
+        // shortcut picked instead of the real document — say so plainly.
+        if (file.size > 0 && file.size < 16_384) {
+          throw new Error(`only ${file.size} bytes — this looks like a shortcut/alias to the real file; open its location and pick the original`);
         }
 
-        // Large PDFs (hundreds of pages / many MB) overwhelm the offscreen
-        // renderer's memory during pdf.js's initial full-document load and can
-        // CRASH the whole browser tab before any page is processed. Until the
-        // parse is reworked to stream page-by-page from OPFS, refuse oversized
-        // files with a clear message instead of taking Chrome down.
-        const approxMb = (file.base64.length * 0.75) / 1024 / 1024;
-        if (approxMb > MAX_PDF_IMPORT_MB) {
-          throw new Error(
-            `PDF is ${approxMb.toFixed(1)} MB — too large to import safely right now (limit ${MAX_PDF_IMPORT_MB} MB; large books can crash the browser). ` +
-            `Split it into smaller PDFs, or import the specific chapters you need.`
-          );
-        }
-
-        const body = await pdfBase64ToBody(file.base64, imageToText);
+        const body = await pdfOpfsToBody(file.opfsName, file.size, imageToText);
         const content = buildFrontmatter({
           title, type: 'pdf', source: 'local-pdf',
           wordCount: body.split(/\s+/).filter(Boolean).length

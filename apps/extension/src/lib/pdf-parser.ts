@@ -77,6 +77,24 @@ export async function pdfBase64ToBody(
 }
 
 /**
+ * Parse a PDF the sidepanel streamed into OPFS. The bytes never cross a message
+ * boundary (no base64, no 14 MB string copies), so this is the safe path for
+ * LOCAL PDFs of any size — the base64 read is what OOM-crashed the renderer.
+ * Deadline scales with the file size (~1 min/MB, 8–25 min).
+ */
+export async function pdfOpfsToBody(
+  opfsName: string,
+  sizeBytes: number,
+  ocrFn?: (dataUrl: string, instruction: string) => Promise<string>
+): Promise<string> {
+  const approxMb = sizeBytes / 1024 / 1024;
+  const timeoutMs = Math.min(25 * 60 * 1000, Math.max(8 * 60 * 1000, Math.round(approxMb) * 60 * 1000));
+  const res: any = await sendToOffscreen({ action: 'OFFSCREEN_PARSE_PDF_OPFS', opfsName }, timeoutMs);
+  if (!res?.ok) throw new Error(res?.error || 'PDF parse failed');
+  return assemblePdfBody(res, ocrFn);
+}
+
+/**
  * Parse a PDF by URL — the offscreen document fetches and parses it itself,
  * so multi-MB PDFs never cross the message boundary. Preferred for any
  * URL-sourced PDF (captures, arXiv full-text, page context).

@@ -823,12 +823,6 @@ export default function App() {
     loadDocuments(activeProjectId);
   };
 
-  const fileToBase64 = (file: File): Promise<string> => new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve((reader.result as string).split(',')[1] || '');
-    reader.onerror = () => reject(reader.error);
-    reader.readAsDataURL(file);
-  });
 
   /** Import local PDFs — parsed by code first, vision model only for scanned pages. */
   const importPdfFiles = async () => {
@@ -839,33 +833,29 @@ export default function App() {
         types: [{ description: 'PDF', accept: { 'application/pdf': ['.pdf'] } }]
       });
       if (!activeProjectId) { showToast('error', 'No active session'); return; }
-      
-      // Guard on file.size BEFORE reading. A large PDF (10 MB+, hundreds of
-      // pages) OOM-crashes the panel/offscreen renderer the moment we read it
-      // to base64 — so reject by size here and never touch the bytes. (Uses
-      // file.size, which is instant metadata, not a read.)
-      const MAX_PDF_MB = 6;
-      const files: Array<{ name: string; base64: string }> = [];
-      const skipped: string[] = [];
+
+      // STREAM each PDF into OPFS instead of reading it to base64. Reading a
+      // 10 MB file to base64 held several 14 MB string copies in the small
+      // panel renderer and OOM-crashed it the moment a big PDF was selected.
+      // OPFS write() streams the bytes to disk (no full in-memory copy) and the
+      // offscreen doc reads them back directly — nothing large crosses a
+      // message. Works for large books.
+      const root = await navigator.storage.getDirectory();
+      const files: Array<{ name: string; opfsName: string; size: number }> = [];
       for (const h of handles) {
         const file: File = await h.getFile();
-        if (file.size > MAX_PDF_MB * 1024 * 1024) {
-          skipped.push(`${file.name} (${(file.size / 1024 / 1024).toFixed(1)} MB)`);
-          continue;
-        }
-        const base64 = await fileToBase64(file);
-        files.push({ name: file.name, base64 });
-      }
-
-      if (skipped.length > 0) {
-        showToast('error', `Too large to import (limit ${MAX_PDF_MB} MB — bigger PDFs can crash the browser): ${skipped.join(', ')}. Split it into smaller PDFs.`);
+        const opfsName = `import-${crypto.randomUUID?.() ?? Date.now()}.pdf`;
+        const fh = await root.getFileHandle(opfsName, { create: true });
+        const w = await fh.createWritable();
+        await w.write(file);        // streamed, not buffered as base64
+        await w.close();
+        files.push({ name: file.name, opfsName, size: file.size });
       }
       if (files.length === 0) return;
 
       showToast('success', `📄 Sending ${files.length} PDF(s) for background parsing...`);
-      
-      // Send all PDFs to the service worker — it processes them async and
-      // notifies via BroadcastChannel. No await blocking the UI.
+
+      // Send only the OPFS names — the bytes never cross this message.
       msg('IMPORT_LOCAL_PDF', {
         projectId: activeProjectId,
         files

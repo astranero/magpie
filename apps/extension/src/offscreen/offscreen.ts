@@ -40,6 +40,24 @@ async function parsePdf(base64: string): Promise<{ pages: string[]; imagePages: 
 }
 
 /**
+ * Parse a PDF the sidepanel streamed into OPFS (shared same-origin storage).
+ * No base64, no giant sendMessage payload — the bytes never cross a message
+ * boundary, which is what let large books crash the renderer. Deletes the
+ * OPFS temp file when done (success or failure).
+ */
+async function parsePdfOpfs(opfsName: string): Promise<{ pages: string[]; imagePages: { index: number; dataUrl: string }[] }> {
+  const root = await navigator.storage.getDirectory();
+  try {
+    const fh = await root.getFileHandle(opfsName);
+    const file = await fh.getFile();
+    const buf = await file.arrayBuffer();
+    return await parsePdfData(new Uint8Array(buf));
+  } finally {
+    await root.removeEntry(opfsName).catch(() => {});
+  }
+}
+
+/**
  * Fetch a PDF URL and parse it — entirely inside the offscreen document so
  * multi-MB PDFs never travel through chrome.runtime.sendMessage (which has a
  * ~64 MB cap and OOMs the worker when base64-encoding large buffers). The
@@ -64,20 +82,26 @@ async function parsePdfUrl(url: string): Promise<{ pages: string[]; imagePages: 
 const MAX_PDF_PAGES = 800;
 
 async function parsePdfData(data: Uint8Array): Promise<{ pages: string[]; imagePages: { index: number; dataUrl: string }[] }> {
+  // Per-page progress so a long parse is observably alive (not a dead
+  // "parsing…"), and so a stall pinpoints where it hangs.
+  const postProgress = (pg: number, totalPages: number) => {
+    try {
+      const ch = new BroadcastChannel('ai_research_assistant_import');
+      ch.postMessage({ type: 'pdf-page', page: pg, totalPages });
+      ch.close();
+    } catch { /* ignore */ }
+  };
   const pdf = await pdfjsLib.getDocument({ data, isEvalSupported: false }).promise;
   const pages: string[] = [];
   const imagePages: { index: number; dataUrl: string }[] = [];
 
   const pageLimit = Math.min(pdf.numPages, MAX_PDF_PAGES);
-  // Per-page progress so a long parse is observably alive (not a dead
-  // "parsing…"), and so a stall pinpoints the offending page.
-  const postProgress = (pg: number) => {
-    try {
-      const ch = new BroadcastChannel('ai_research_assistant_import');
-      ch.postMessage({ type: 'pdf-page', page: pg, totalPages: pageLimit });
-      ch.close();
-    } catch { /* ignore */ }
-  };
+  // Rendering scanned pages for OCR only makes sense for small PDFs — a big
+  // book's image-heavy pages are what stalled the parse, and OCR-ing hundreds
+  // of pages is infeasible. Big docs extract text only.
+  const renderScanned = pageLimit <= 40;
+  const MAX_SCANNED_RENDERS = 12;
+  postProgress(0, pageLimit);   // document opened — parse begins
   try {
     for (let p = 1; p <= pageLimit; p++) {
       const page = await pdf.getPage(p);
@@ -100,17 +124,33 @@ async function parsePdfData(data: Uint8Array): Promise<{ pages: string[]; imageP
 
         const rawText = items.map(it => it.text).join(' ').replace(/\s+/g, ' ').trim();
 
-        // If a page has almost no extractable text, it's likely scanned → render it.
+        // A page with almost no extractable text is likely scanned/image →
+        // render it to a canvas for the vision model. But this is EXPENSIVE
+        // (full-page raster + PNG), and doing it for the image-heavy early
+        // pages of a big book (cover, TOC, screenshots) is what stalled the
+        // whole parse. So: only render for reasonably small PDFs (OCR-ing
+        // hundreds of pages is infeasible anyway), cap the number of renders,
+        // and time-guard each one so a slow render can't hang the parse.
         if (rawText.length < 20) {
-          pages.push(rawText);
-          const viewport = page.getViewport({ scale: 2 });
-          const canvas = document.createElement('canvas');
-          canvas.width = viewport.width;
-          canvas.height = viewport.height;
-          const ctx = canvas.getContext('2d');
-          if (ctx) {
-            await page.render({ canvasContext: ctx, viewport, canvas } as any).promise;
-            imagePages.push({ index: p, dataUrl: canvas.toDataURL('image/png') });
+          pages.push(rawText || `*(page ${p}: image / scanned)*`);
+          if (renderScanned && imagePages.length < MAX_SCANNED_RENDERS) {
+            const viewport = page.getViewport({ scale: 2 });
+            const canvas = document.createElement('canvas');
+            canvas.width = viewport.width;
+            canvas.height = viewport.height;
+            const ctx = canvas.getContext('2d');
+            if (ctx) {
+              const task = page.render({ canvasContext: ctx, viewport, canvas } as any);
+              try {
+                await Promise.race([
+                  task.promise,
+                  new Promise((_, rej) => setTimeout(() => rej(new Error('render timeout')), 15000)),
+                ]);
+                imagePages.push({ index: p, dataUrl: canvas.toDataURL('image/png') });
+              } catch {
+                try { task.cancel(); } catch { /* ignore */ }
+              }
+            }
           }
           continue;
         }
@@ -126,7 +166,7 @@ async function parsePdfData(data: Uint8Array): Promise<{ pages: string[]; imageP
         // whole import silently times out. Also yield periodically so the
         // offscreen event loop (and the worker keep-alive) stays responsive.
         page.cleanup();
-        if (p % 10 === 0 || p === pageLimit) { postProgress(p); await new Promise(r => setTimeout(r, 0)); }
+        if (p % 10 === 0 || p === pageLimit) { postProgress(p, pageLimit); await new Promise(r => setTimeout(r, 0)); }
       }
     }
     return { pages, imagePages };
@@ -264,6 +304,13 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
 
   if (request?.action === 'OFFSCREEN_PARSE_PDF_URL') {
     parsePdfUrl(request.url as string)
+      .then(result => sendResponse({ ok: true, ...result }))
+      .catch(err => sendResponse({ ok: false, error: err instanceof Error ? err.message : String(err) }));
+    return true;
+  }
+
+  if (request?.action === 'OFFSCREEN_PARSE_PDF_OPFS') {
+    parsePdfOpfs(request.opfsName as string)
       .then(result => sendResponse({ ok: true, ...result }))
       .catch(err => sendResponse({ ok: false, error: err instanceof Error ? err.message : String(err) }));
     return true;
