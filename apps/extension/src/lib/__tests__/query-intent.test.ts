@@ -140,3 +140,18 @@ describe('matchFilesInTree — identifier tokens', () => {
     expect(matchFilesInTree(tree, 'where is the database code?')).toEqual([]);
   });
 });
+
+describe('isChitchat', () => {
+  it('matches greetings, thanks, acks (incl. Finnish)', async () => {
+    const { isChitchat } = await import('../query-intent');
+    for (const s of ['hi', 'Hello!', 'hey there'.slice(0,3), 'thanks', 'thank you', 'how are you?', 'moi', 'hei', 'kiitos', 'ok', 'cool', 'bye']) {
+      expect(isChitchat(s)).toBe(true);
+    }
+  });
+  it('does NOT match real questions or commands', async () => {
+    const { isChitchat } = await import('../query-intent');
+    for (const s of ['what is TLS', 'how do I migrate to tls 1.2', 'summarize the paper', '/research batteries', 'hi, what is the revenue for Q3']) {
+      expect(isChitchat(s)).toBe(false);
+    }
+  });
+});

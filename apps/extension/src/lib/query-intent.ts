@@ -30,6 +30,22 @@ export function needsIntentResolution(prompt: string, historyLength: number): bo
   return false;
 }
 
+/**
+ * True for greetings / acknowledgements / small talk — messages that should be
+ * answered conversationally, NOT run through source retrieval (which returns
+ * weak chunks and trips the strict "cannot answer from sources" refusal).
+ * Conservative: only short messages made ENTIRELY of chit-chat tokens match, so
+ * real short questions ("what is TLS") are never misclassified. Includes a few
+ * Finnish greetings (moi/hei/terve/kiitos).
+ */
+const CHITCHAT_RE = /^(hi+|hey+|hello+|yo|sup|hiya|howdy|heya|moi+|hei+|terve|moro|morning|good\s*(morning|afternoon|evening|day|night)|thank\s*you|thanks?|thx|ty|cheers|kiitos|kiitti|how\s*(are|r)\s*(you|u|ya)|how'?s\s*it\s*going|how\s*are\s*things|what'?s\s*up|wassup|whats\s*up|bye+|goodbye|see\s*ya|good\s*bye|ok(ay)?|k|cool|nice|great|awesome|sweet|perfect|lol|haha+|hah|hmm+|yay)[\s!.,?]*$/i;
+
+export function isChitchat(prompt: string): boolean {
+  const p = (prompt || '').trim();
+  if (p.length === 0 || p.length > 40 || p.startsWith('/')) return false;
+  return CHITCHAT_RE.test(p);
+}
+
 /** Compact history block for the rewrite prompt. */
 export function formatHistoryForIntent(history: Array<{ role: string; content: string }>, maxTurns = 6, maxChars = 350): string {
   return history

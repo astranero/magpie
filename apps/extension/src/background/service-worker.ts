@@ -16,7 +16,7 @@ import { buildFrontmatter, hasFrontmatter } from '../lib/frontmatter';
 import { get as idbGet } from 'idb-keyval';
 import { runDeepResearch, generateSubQuestions, scrapeUrl, isJunkUrl } from './deep-researcher';
 import { harvestReferences } from '../lib/reference-harvest';
-import { needsIntentResolution, formatHistoryForIntent, parseRepoUrl, selectTreePaths, formatTreeBlock, matchFilesInTree, RepoRef } from '../lib/query-intent';
+import { needsIntentResolution, formatHistoryForIntent, parseRepoUrl, selectTreePaths, formatTreeBlock, matchFilesInTree, isChitchat, RepoRef } from '../lib/query-intent';
 import { getResearchLimits } from '../lib/research-limits';
 import { looksLikeBuildLog, extractLogHighlights } from '../lib/log-highlights';
 import { addChunksToVectorStore, searchSessionChunks, resetSessionIndex, resetAllSessionIndexes } from '../lib/vector-store';
@@ -1096,6 +1096,19 @@ async function buildChatRequest(chatId: string, projectId: string, prompt: strin
   const formattedHistory = history
     .filter((msg: any) => msg.role === 'user' || msg.role === 'assistant')
     .map((msg: any) => ({ role: msg.role, content: msg.text }));
+
+  // Greetings / small talk must NOT run retrieval: it returns weak top-k
+  // chunks that trip the strict "I cannot answer from the sources" refusal
+  // (so "hi" got refused), and its query embedding would queue behind an
+  // active research run at the offscreen embedder. Answer conversationally.
+  if (isChitchat(prompt) && !pageContext) {
+    onStatus?.('Writing the answer…');
+    const systemPrompt =
+      `You are Magpie, a warm, concise research assistant. The user sent a greeting or small talk — NOT a research question. ` +
+      `Reply in ONE friendly sentence, then briefly invite them to ask about their captured sources or to run /research <topic>. ` +
+      `Do NOT mention "sources" as though they asked a question, and do NOT say you can't answer.`;
+    return { systemPrompt, formattedHistory, linkedPages: [] };
+  }
 
   // Follow-up questions get rewritten into standalone ones so retrieval,
   // page-section selection, and link scoring all see real signal.

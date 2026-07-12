@@ -554,6 +554,50 @@ export const ChatView: React.FC<ChatViewProps> = ({
   const isEmpty = messages.length === 0 || (messages.length === 1 && messages[0].id === 'welcome');
   const hasDraftPlan = messages.some(m => m.plan && (m.plan.status === 'draft' || m.plan.status === 'refining'));
 
+  // The field log is a running status panel, but a message the user QUEUES
+  // during the run is newer than it — so the log must sit ABOVE the queued
+  // messages, not pinned to the very bottom. Render it just before the first
+  // queued message; if none, it stays at the end.
+  const firstQueuedIdx = researching[activeProjectId] ? messages.findIndex(m => m.queued) : -1;
+  const fieldLog = researching[activeProjectId] ? (
+    <div className="flex justify-start" key="field-log">
+      {/* The field log: night-ledger ink panel — the one dark surface in
+          the app, reserved for the agent working through the stacks. */}
+      <div className="w-full max-w-[95%] rounded-xl ink-panel shadow-card overflow-hidden animate-in fade-in motion-reduce:animate-none">
+        <div className="flex items-center gap-2 px-3.5 py-2 border-b border-white/10">
+          <Loader2 size={12} className="animate-spin motion-reduce:animate-none text-highlight shrink-0" aria-hidden="true" />
+          <span className="text-xs font-medium opacity-80 flex-1">
+            Field log — chat stays open
+          </span>
+          <span className="text-[10px] font-mono opacity-50 tabular-nums">
+            {(researchLogs[activeProjectId] || []).length} steps
+          </span>
+          <button
+            type="button"
+            onClick={cancelTask}
+            className="text-[11px] font-medium opacity-70 border border-current rounded-md px-1.5 py-0.5 hover:opacity-100 hover:text-red-300 transition-opacity"
+            aria-label="Stop research"
+          >
+            Stop
+          </button>
+        </div>
+        <div className="px-3.5 py-2.5 space-y-1" aria-live="polite">
+          {(researchLogs[activeProjectId] || []).slice(-3).map((line, i, arr) => (
+            <div
+              key={`${line}-${i}`}
+              className={`text-[10px] font-mono truncate leading-relaxed ${i === arr.length - 1 ? 'text-highlight' : 'opacity-45'}`}
+            >
+              {line}
+            </div>
+          ))}
+          {(researchLogs[activeProjectId] || []).length === 0 && (
+            <div className="text-[10px] font-mono opacity-60">Warming up…</div>
+          )}
+        </div>
+      </div>
+    </div>
+  ) : null;
+
   return (
     <div className="flex-1 flex flex-col h-full bg-background overflow-hidden relative">
       {/* Context bar */}
@@ -647,8 +691,12 @@ export const ChatView: React.FC<ChatViewProps> = ({
           </div>
         )}
 
-        {messages.map(m => m.plan ? (
-          <div key={m.id} className="flex justify-start">
+        {messages.map((m, mi) => (
+          <React.Fragment key={m.id}>
+          {/* Field log sits just before the first message queued during the run. */}
+          {mi === firstQueuedIdx && fieldLog}
+          {m.plan ? (
+          <div className="flex justify-start">
             <div className="w-full max-w-[95%]">
               <ErrorBoundary compact label="plan card">
                 <PlanCard msgId={m.id} plan={m.plan} onStart={onStartPlan} onCancel={onCancelPlan} />
@@ -687,7 +735,11 @@ export const ChatView: React.FC<ChatViewProps> = ({
               </ErrorBoundary>
             </div>
           </div>
+          )}
+          </React.Fragment>
         ))}
+        {/* No message was queued during the run → field log stays at the end. */}
+        {firstQueuedIdx === -1 && fieldLog}
         {generating[activeChatId] && !researching[activeProjectId] && messages[messages.length - 1]?.role !== 'assistant' && (
           <div className="flex justify-start">
             <div className="max-w-[85%] rounded-lg rounded-bl-sm border bg-card border-border text-card-foreground px-4 py-3 text-sm flex items-center gap-2 shadow-card">
@@ -699,44 +751,6 @@ export const ChatView: React.FC<ChatViewProps> = ({
               <span className="text-xs text-muted-foreground font-medium" aria-live="polite">
                 {thinkingStatus[activeChatId] || 'Thinking…'}
               </span>
-            </div>
-          </div>
-        )}
-        {researching[activeProjectId] && (
-          <div className="flex justify-start">
-            {/* The field log: night-ledger ink panel — the one dark surface in
-                the app, reserved for the agent working through the stacks. */}
-            <div className="w-full max-w-[95%] rounded-xl ink-panel shadow-card overflow-hidden animate-in fade-in motion-reduce:animate-none">
-              <div className="flex items-center gap-2 px-3.5 py-2 border-b border-white/10">
-                <Loader2 size={12} className="animate-spin motion-reduce:animate-none text-highlight shrink-0" aria-hidden="true" />
-                <span className="text-xs font-medium opacity-80 flex-1">
-                  Field log — chat stays open
-                </span>
-                <span className="text-[10px] font-mono opacity-50 tabular-nums">
-                  {(researchLogs[activeProjectId] || []).length} steps
-                </span>
-                <button
-                  type="button"
-                  onClick={cancelTask}
-                  className="text-[11px] font-medium opacity-70 border border-current rounded-md px-1.5 py-0.5 hover:opacity-100 hover:text-red-300 transition-opacity"
-                  aria-label="Stop research"
-                >
-                  Stop
-                </button>
-              </div>
-              <div className="px-3.5 py-2.5 space-y-1" aria-live="polite">
-                {(researchLogs[activeProjectId] || []).slice(-3).map((line, i, arr) => (
-                  <div
-                    key={`${line}-${i}`}
-                    className={`text-[10px] font-mono truncate leading-relaxed ${i === arr.length - 1 ? 'text-highlight' : 'opacity-45'}`}
-                  >
-                    {line}
-                  </div>
-                ))}
-                {(researchLogs[activeProjectId] || []).length === 0 && (
-                  <div className="text-[10px] font-mono opacity-60">Warming up…</div>
-                )}
-              </div>
             </div>
           </div>
         )}
