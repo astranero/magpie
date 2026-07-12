@@ -11,7 +11,7 @@ import * as pdfjsLib from 'pdfjs-dist';
 // Vite resolves this to a bundled worker file URL.
 import pdfWorkerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
 import { env, pipeline, AutoTokenizer, AutoModelForSequenceClassification } from '@huggingface/transformers';
-import { cleanPdfPageMarkdown } from '../lib/pdf-text-cleaner';
+import { buildPageMarkdown, TextBlock } from '../lib/pdf-layout';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
 
@@ -73,14 +73,6 @@ async function parsePdfData(data: Uint8Array): Promise<{ pages: string[]; imageP
     const page = await pdf.getPage(p);
     const content = await page.getTextContent();
     
-    interface TextBlock {
-      text: string;
-      x: number;
-      y: number;
-      width: number;
-      fontSize: number;
-    }
-
     const items: TextBlock[] = content.items
       .filter((it: any) => 'str' in it && 'transform' in it)
       .map((it: any) => {
@@ -112,130 +104,10 @@ async function parsePdfData(data: Uint8Array): Promise<{ pages: string[]; imageP
       continue;
     }
 
-    // Heuristic layout reconstruction
-    const fontSizes = items.map(it => it.fontSize).sort((a, b) => a - b);
-    const medianFontSize = fontSizes.length > 0 ? fontSizes[Math.floor(fontSizes.length / 2)] : 10;
-
-    interface Line {
-      y: number;
-      x: number;
-      text: string;
-      fontSize: number;
-    }
-
-    const buildLines = (bucket: TextBlock[]): Line[] => {
-      const out: Line[] = [];
-      let current: TextBlock[] = [];
-      const flush = () => {
-        if (current.length === 0) return;
-        current.sort((a, b) => a.x - b.x);
-        const lineText = current.map(it => it.text).join(' ').replace(/\s+/g, ' ').trim();
-        if (lineText) {
-          out.push({
-            y: current[0].y,
-            x: current[0].x,
-            text: lineText,
-            fontSize: Math.max(...current.map(it => it.fontSize))
-          });
-        }
-        current = [];
-      };
-      for (const item of [...bucket].sort((a, b) => b.y - a.y)) {
-        if (current.length > 0 && Math.abs(item.y - current[current.length - 1].y) >= 3) flush();
-        current.push(item);
-      }
-      flush();
-      return out;
-    };
-
-    // Two-column detection: academic PDFs put a second column starting past
-    // the page midline. Building lines across the whole page braids the
-    // columns ("same Y" pulls text from both) — detect and process each
-    // column separately, left then right, with full-width lines (title,
-    // abstract banner) kept ahead of the columns.
+    // Reconstruct readable markdown from positioned runs (headings, two-column
+    // handling, citation fixup, cleanup). Pure + shared with tests/harness.
     const pageWidth = page.getViewport({ scale: 1 }).width;
-    const mid = pageWidth / 2;
-    const rightStarters = items.filter(it => it.x > mid + 5).length;
-    const leftStarters = items.filter(it => it.x < mid - 5 && it.x + it.width < mid + 15).length;
-    const twoColumn = items.length > 30 &&
-      rightStarters > items.length * 0.25 &&
-      leftStarters > items.length * 0.25;
-
-    let lines: Line[];
-    if (twoColumn) {
-      const full: TextBlock[] = [];
-      const left: TextBlock[] = [];
-      const right: TextBlock[] = [];
-      for (const it of items) {
-        if (it.x < mid - 5 && it.x + it.width > mid + 30) full.push(it);      // spans the midline
-        else if (it.x > mid + 5) right.push(it);
-        else left.push(it);
-      }
-      lines = [...buildLines(full), ...buildLines(left), ...buildLines(right)];
-    } else {
-      lines = buildLines(items);
-    }
-
-    // Format lines to Markdown
-    let pageMarkdown = '';
-    let lastLine: Line | null = null;
-
-    for (let i = 0; i < lines.length; i++) {
-      const line = lines[i];
-      let lineText = line.text;
-
-      // Header Detection (short text + larger font size)
-      let isHeader = false;
-      if (lineText.length < 120) {
-        if (line.fontSize >= medianFontSize * 1.5) {
-          lineText = `# ${lineText}`;
-          isHeader = true;
-        } else if (line.fontSize >= medianFontSize * 1.25) {
-          lineText = `## ${lineText}`;
-          isHeader = true;
-        } else if (line.fontSize >= medianFontSize * 1.12) {
-          lineText = `### ${lineText}`;
-          isHeader = true;
-        }
-      }
-
-      const isList = /^(?:[•\-\*]|\d+\.)\s+/.test(lineText);
-
-      if (i > 0 && lastLine) {
-        const verticalGap = lastLine.y - line.y;
-        const expectedSpacing = lastLine.fontSize * 1.6;
-
-        if (isHeader || isList || verticalGap > expectedSpacing || verticalGap < 0) {
-          pageMarkdown += '\n\n' + lineText;
-        } else {
-          // Paragraph continuation
-          if (pageMarkdown.endsWith('-')) {
-            // Strip hyphen and join
-            pageMarkdown = pageMarkdown.slice(0, -1) + lineText;
-          } else {
-            pageMarkdown += ' ' + lineText;
-          }
-        }
-      } else {
-        pageMarkdown += lineText;
-      }
-      lastLine = line;
-    }
-
-    // PDF extraction splits citation brackets into separate positioned items
-    // ("[ 87", "]"): re-join them so references read as [87] instead of
-    // scattering bracket fragments through the text.
-    pageMarkdown = pageMarkdown
-      .replace(/\[\s+(\d)/g, '[$1')
-      .replace(/(\d)\s+\]/g, '$1]')
-      .replace(/\[(\d+(?:\s*,\s*\d+)+)\]/g, (_m, g) => `[${g.replace(/\s+/g, '')}]`)
-      .replace(/[ \t]{2,}/g, ' ');
-
-    // Deterministic cleanup: letter-spaced small-caps headings, braided
-    // figure/diagram label debris (see lib/pdf-text-cleaner.ts).
-    pageMarkdown = cleanPdfPageMarkdown(pageMarkdown);
-
-    pages.push(pageMarkdown.trim());
+    pages.push(buildPageMarkdown(items, pageWidth));
   }
   return { pages, imagePages };
 }
