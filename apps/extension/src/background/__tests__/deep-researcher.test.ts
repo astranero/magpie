@@ -150,6 +150,15 @@ describe('extractSearchUrls', () => {
     expect(urls.has('https://example.org/page')).toBe(true);
   });
 
+  it('drops asset/schema junk like a doctype DTD URL', () => {
+    // DDG's own "<!DOCTYPE html PUBLIC ... http://www.w3.org/TR/html4/loose.dtd>"
+    // leaked into results and got scraped. It must be filtered out.
+    const markdown = 'Blah http://www.w3.org/TR/html4/loose.dtd and a real one https://example.com/article';
+    const urls = extractSearchUrls(markdown);
+    expect([...urls].some(u => u.includes('w3.org') || u.endsWith('.dtd'))).toBe(false);
+    expect(urls.has('https://example.com/article')).toBe(true);
+  });
+
   it('caps the result set at 12 URLs even when more are present', () => {
     const params = Array.from({ length: 20 }, (_, i) =>
       `uddg=https%3A%2F%2Fsite${i}.example.com%2F`

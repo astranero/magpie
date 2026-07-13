@@ -200,16 +200,17 @@ export function extractSearchUrls(text: string): Set<string> {
   while ((m = uddgRegex.exec(text)) !== null && urls.size < 12) {
     try {
       const decoded = decodeURIComponent(m[1]);
-      if (decoded.startsWith('http') && !BLOCKED_DOMAINS.test(decoded)) urls.add(decoded);
+      if (decoded.startsWith('http') && !BLOCKED_DOMAINS.test(decoded) && !isJunkUrl(decoded)) urls.add(decoded);
     } catch { /* skip malformed */ }
   }
 
-  // 2) Plain links (Jina reader markdown of the results page)
+  // 2) Plain links (Jina reader markdown of the results page). Skip asset/schema
+  //    junk (DDG's own doctype "http://www.w3.org/TR/html4/loose.dtd" leaked in).
   if (urls.size === 0) {
     const linkRegex = /https?:\/\/[^\s)"'\]<>]+/g;
     while ((m = linkRegex.exec(text)) !== null && urls.size < 12) {
       const u = m[0].replace(/[.,;]+$/, '');
-      if (!BLOCKED_DOMAINS.test(u) && !/jina\.ai/.test(u)) urls.add(u);
+      if (!BLOCKED_DOMAINS.test(u) && !/jina\.ai/.test(u) && !isJunkUrl(u)) urls.add(u);
     }
   }
 
@@ -239,14 +240,17 @@ async function performWebSearch(query: string, signal?: AbortSignal): Promise<Se
     console.warn('Search providers failed, falling back to Jina search', e);
   }
 
-  // Keyless default: Jina search — a real search API (clean, ranked results),
-  // vastly better than scraping DuckDuckGo. Optional free key raises its limit.
+  // Jina search — a real search API (clean, ranked results). s.jina.ai now
+  // REQUIRES a key (401 without one), so only try it when the user set a Jina
+  // key; otherwise skip straight to the DDG scrape chain (no wasted 401 call).
   try {
     const keys = await getSearchApiKeys();
-    const hits = await jinaWebSearch(query, activeLimits.urlsPerQuery * 2, signal, keys.jina);
-    if (hits.length > 0) {
-      const sorted = hits.sort((a, b) => (HIGH_QUALITY_DOMAINS.test(a.url) ? 0 : 1) - (HIGH_QUALITY_DOMAINS.test(b.url) ? 0 : 1));
-      return sorted.slice(0, activeLimits.urlsPerQuery);
+    if (keys.jina) {
+      const hits = await jinaWebSearch(query, activeLimits.urlsPerQuery * 2, signal, keys.jina);
+      if (hits.length > 0) {
+        const sorted = hits.sort((a, b) => (HIGH_QUALITY_DOMAINS.test(a.url) ? 0 : 1) - (HIGH_QUALITY_DOMAINS.test(b.url) ? 0 : 1));
+        return sorted.slice(0, activeLimits.urlsPerQuery);
+      }
     }
   } catch (e) {
     console.warn('Jina search failed, falling back to DDG scrape chain', e);

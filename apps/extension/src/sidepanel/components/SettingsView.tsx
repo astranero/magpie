@@ -434,7 +434,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           ['tavily', 'Tavily', 'tvly-…'],
           ['brave', 'Brave Search', 'BSA…'],
           ['serper', 'Serper (Google)', '40-char key'],
-          ['jina', 'Jina (optional — raises free limit)', 'jina_…']
+          ['jina', 'Jina (needs a key — s.jina.ai)', 'jina_…']
         ] as const).map(([id, label, ph]) => (
           <div key={id} className="space-y-1.5">
             <label className="text-xs font-medium">{label}</label>
