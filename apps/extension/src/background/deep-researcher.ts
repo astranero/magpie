@@ -1335,7 +1335,16 @@ export async function runDeepResearch(
   activeQuality = await getSourceQuality();
   activeAcademicDepth = await getAcademicDepth();
   const depth = await getResearchDepth();
-  if (depth !== 'standard') onProgress(`[PLANNING] Research depth: ${depth}`);
+  // /deepresearch must actually go deep. The saved depth setting defaults to
+  // 'standard' (6 URLs/query, 5 queries, 2 rounds) — too thin for a deep run —
+  // so floor a deep run at the 'deep' caps (10/7/4) even when the setting is
+  // standard. /research (quick) still honours the setting as-is.
+  if (mode === 'deep' && depth === 'standard') {
+    activeLimits = RESEARCH_LIMITS.deep;
+    onProgress('[PLANNING] Deep run — using deep source limits (10 URLs/query, 7 queries, 4 rounds)');
+  } else if (depth !== 'standard') {
+    onProgress(`[PLANNING] Research depth: ${depth}`);
+  }
   if (activeQuality === 'high') onProgress('[PLANNING] Source quality: high-authority only');
   if (activeAcademicDepth === 'abstract') onProgress('[PLANNING] Academic papers: abstracts only');
   else onProgress('[PLANNING] Academic papers: full text');
