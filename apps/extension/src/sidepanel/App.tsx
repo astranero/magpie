@@ -332,13 +332,25 @@ export default function App() {
   useEffect(() => {
     refreshTabInfo();
     if (typeof chrome !== 'undefined' && chrome.tabs) {
-      const onActivated = () => refreshTabInfo();
-      const onUpdated = (_tabId: number, info: chrome.tabs.TabChangeInfo) => {
-        if (info.status === 'complete' || info.title || info.url) refreshTabInfo();
+      // Debounce: a live page (Gmail's unread counter, an SPA, a playing video)
+      // fires onUpdated many times a second — each changes the title, so a raw
+      // refresh would re-render the whole panel on every tick and, on a busy
+      // mail tab, churn it into a freeze. Collapse bursts into one trailing
+      // refresh, and ignore updates that aren't for the ACTIVE tab.
+      let timer: ReturnType<typeof setTimeout> | null = null;
+      const schedule = () => {
+        if (timer) return;
+        timer = setTimeout(() => { timer = null; refreshTabInfo(); }, 300);
+      };
+      const onActivated = () => schedule();
+      const onUpdated = (_tabId: number, info: chrome.tabs.TabChangeInfo, tab?: chrome.tabs.Tab) => {
+        if (!tab?.active) return; // background-tab noise — not our current page
+        if (info.status === 'complete' || info.title || info.url) schedule();
       };
       chrome.tabs.onActivated.addListener(onActivated);
       chrome.tabs.onUpdated.addListener(onUpdated);
       return () => {
+        if (timer) clearTimeout(timer);
         chrome.tabs.onActivated.removeListener(onActivated);
         chrome.tabs.onUpdated.removeListener(onUpdated);
       };
