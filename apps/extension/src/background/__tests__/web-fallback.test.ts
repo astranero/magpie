@@ -107,14 +107,17 @@ describe('gatherWebSnippets (chat web fallback)', () => {
     expect(sources).toEqual([]);
   });
 
-  it('merges results from an enabled search MCP', async () => {
-    installChrome([{ id: 's1', name: 'DocsMCP', url: 'https://mcp.example.test/mcp', enabled: true }]);
-    const mcpText =
-      'The bookstore owner is confirmed as the antagonist in the official episode guide, ' +
-      'with production notes describing the reveal as the season’s central twist.';
+  // Substantial prose so it clears the content-quality gate (≥200 chars/50 words).
+  const goodMcpText =
+    'The bookstore owner is confirmed as the antagonist in the official episode guide. ' +
+    'Production notes describe the reveal as the season’s central twist, planted through ' +
+    'flashbacks across the earlier episodes. The detective pieces it together after finding ' +
+    'an annotated first edition in the shop, and the motive traces back to a decades-old ' +
+    'betrayal involving the founding families of the town before the archive-room confrontation.';
 
-    (globalThis as any).fetch = vi.fn(async (url: string, init?: any) => {
-      // Web search finds nothing → only the MCP contributes.
+  function mcpFetch(mcpReplyForCall: any) {
+    return vi.fn(async (url: string, init?: any) => {
+      if (url.includes('s.jina.ai')) return { ok: true, headers: { get: () => 'application/json' }, json: async () => ({ data: [] }), text: async () => '{}', url } as any;
       if (url.includes('duckduckgo') || url.includes('jina')) {
         return { ok: true, headers: { get: () => 'text/html' }, text: async () => '<html>no results</html>', url } as any;
       }
@@ -123,16 +126,33 @@ describe('gatherWebSnippets (chat web fallback)', () => {
         const reply: any = { jsonrpc: '2.0', id: body.id };
         if (body.method === 'initialize') reply.result = { capabilities: {} };
         else if (body.method === 'tools/list') reply.result = { tools: [{ name: 'search_docs', description: 'search the knowledge base', inputSchema: { properties: { query: {} } } }] };
-        else if (body.method === 'tools/call') reply.result = { content: [{ type: 'text', text: mcpText }] };
+        else if (body.method === 'tools/call') reply.result = mcpReplyForCall;
         else reply.result = {};
-        return { ok: true, headers: { get: () => 'application/json', }, json: async () => reply, text: async () => JSON.stringify(reply), url } as any;
+        return { ok: true, headers: { get: () => 'application/json' }, json: async () => reply, text: async () => JSON.stringify(reply), url } as any;
       }
       throw new Error(`unexpected fetch ${url}`);
     });
+  }
+
+  it('merges substantial results from an enabled search MCP', async () => {
+    installChrome([{ id: 's1', name: 'DocsMCP', url: 'https://mcp.example.test/mcp', enabled: true }]);
+    (globalThis as any).fetch = mcpFetch({ content: [{ type: 'text', text: goodMcpText }] });
 
     const { context, sources } = await gatherWebSnippets('is the bookstore guy the killer');
     expect(sources.some(s => s.title.includes('DocsMCP'))).toBe(true);
     expect(context).toContain('central twist');
+  });
+
+  it('does NOT cite an MCP tool that returns a protocol-error blob', async () => {
+    // Context7 leaked a raw JSON-RPC error as "content" — it must not become a source.
+    installChrome([{ id: 's1', name: 'Context7', url: 'https://mcp.example.test/mcp', enabled: true }]);
+    const errBlob = '{"jsonrpc":"2.0","error":{"code":-32000,"message":"Server does not support GET requests"},"id":null}';
+    (globalThis as any).fetch = mcpFetch({ content: [{ type: 'text', text: errBlob }] });
+
+    const { context, sources } = await gatherWebSnippets('what is going on today in helsinki');
+    expect(sources).toEqual([]);
+    expect(context).toBe('');
+    expect(context).not.toContain('jsonrpc');
   });
 
   it('honors the deadline and returns fast when fetches hang', async () => {
