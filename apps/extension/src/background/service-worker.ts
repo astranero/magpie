@@ -16,7 +16,7 @@ import { buildFrontmatter, hasFrontmatter } from '../lib/frontmatter';
 import { get as idbGet } from 'idb-keyval';
 import { runDeepResearch, generateSubQuestions, scrapeUrl, isJunkUrl, gatherWebSnippets } from './deep-researcher';
 import { harvestReferences } from '../lib/reference-harvest';
-import { needsIntentResolution, formatHistoryForIntent, parseRepoUrl, selectTreePaths, formatTreeBlock, matchFilesInTree, isChitchat, RepoRef } from '../lib/query-intent';
+import { needsIntentResolution, formatHistoryForIntent, parseRepoUrl, selectTreePaths, formatTreeBlock, matchFilesInTree, isChitchat, isRefusalAnswer, RepoRef } from '../lib/query-intent';
 import { getResearchLimits } from '../lib/research-limits';
 import { looksLikeBuildLog, extractLogHighlights } from '../lib/log-highlights';
 import { addChunksToVectorStore, searchSessionChunks, resetSessionIndex, resetAllSessionIndexes, isConfidentMatch } from '../lib/vector-store';
@@ -1097,7 +1097,7 @@ async function isChatWebFallbackEnabled(): Promise<boolean> {
 }
 
 /** Build the RAG system prompt + formatted history for a chat turn. */
-async function buildChatRequest(chatId: string, projectId: string, prompt: string, signal: AbortSignal, pageContext?: PageContext | null, onStatus?: (s: string) => void): Promise<{ systemPrompt: string; formattedHistory: Array<{ role: string; content: string }>; linkedPages: Array<{ title: string; url: string }> }> {
+async function buildChatRequest(chatId: string, projectId: string, prompt: string, signal: AbortSignal, pageContext?: PageContext | null, onStatus?: (s: string) => void): Promise<{ systemPrompt: string; formattedHistory: Array<{ role: string; content: string }>; linkedPages: Array<{ title: string; url: string }>; grounded: boolean }> {
   // Get all documents for this project
   const allDocs = await listDocuments(projectId);
   const enabledDocs = allDocs.filter(d => d.enabled !== false);
@@ -1132,7 +1132,7 @@ async function buildChatRequest(chatId: string, projectId: string, prompt: strin
       `You are Magpie, a warm, concise research assistant. The user sent a greeting or small talk — NOT a research question. ` +
       `Reply in ONE friendly sentence, then briefly invite them to ask about their captured sources or to run /research <topic>. ` +
       `Do NOT mention "sources" as though they asked a question, and do NOT say you can't answer.`;
-    return { systemPrompt, formattedHistory, linkedPages: [] };
+    return { systemPrompt, formattedHistory, linkedPages: [], grounded: false };
   }
 
   // Follow-up questions get rewritten into standalone ones so retrieval,
@@ -1209,6 +1209,10 @@ async function buildChatRequest(chatId: string, projectId: string, prompt: strin
 
   // Web-search fallback sources (below) surface as clickable footer links.
   let webSources: Array<{ title: string; url: string }> = [];
+  // True only on the workspace-grounded (citation) branch. The streaming layer
+  // uses it to escalate to a web search if the model still refuses ("not found
+  // in your sources") — the reliable safety net behind the score-based gate.
+  let grounded = false;
 
   // Confidence gate: retrieval's keyword fallback almost always returns SOME
   // chunk, so "length > 0" is a poor "we have an answer" signal — a question
@@ -1217,6 +1221,7 @@ async function buildChatRequest(chatId: string, projectId: string, prompt: strin
   // best chunk is GENUINELY relevant (see isConfidentMatch); otherwise fall
   // through to the web-search / general-knowledge branch below.
   if (isConfidentMatch(relevantChunks as Array<{ rerankScore?: number }>)) {
+    grounded = true;
     // Build citation-anchored context (generous — favor fuller grounding over
     // "I couldn't find it" cutoffs; only fires for library-source questions).
     const context = buildCitationContext(relevantChunks, docTitles, 32000);
@@ -1320,7 +1325,7 @@ async function buildChatRequest(chatId: string, projectId: string, prompt: strin
   }
 
   onStatus?.('Writing the answer…');
-  return { systemPrompt: rulesBlock + systemPrompt, formattedHistory, linkedPages };
+  return { systemPrompt: rulesBlock + systemPrompt, formattedHistory, linkedPages, grounded };
 }
 
 /**
@@ -1752,7 +1757,7 @@ chrome.runtime.onConnect.addListener((port) => {
     interactiveDepth++;
     try {
       const pageCtx = req.includePageContext ? await getPageContext().catch(() => null) : null;
-      let { systemPrompt, formattedHistory, linkedPages } = await buildChatRequest(
+      let { systemPrompt, formattedHistory, linkedPages, grounded } = await buildChatRequest(
         chatId, projectId, prompt, localController.signal, pageCtx,
         (text) => safePost({ type: 'STATUS', text })
       );
@@ -1773,6 +1778,34 @@ chrome.runtime.onConnect.addListener((port) => {
         full += delta;
         safePost({ type: 'DELTA', text: delta });
       });
+
+      // RELIABLE NET: the score gate can still let a workspace-grounded turn
+      // reach a refusal (reranker unavailable, or a keyword chunk that squeaks
+      // over the bar). If the model itself says it can't answer from the
+      // sources, escalate to a live web search and REPLACE the refusal — the
+      // model's own judgment is the ground truth the scores only approximate.
+      if (grounded && !systemPromptOverride && isRefusalAnswer(full) && await isChatWebFallbackEnabled()) {
+        safePost({ type: 'STATUS', text: 'Not in your workspace — searching the web…' });
+        const web = await gatherWebSnippets(prompt, {
+          signal: localController.signal,
+          onStatus: (text) => safePost({ type: 'STATUS', text }),
+        }).catch(() => ({ context: '', sources: [] as Array<{ title: string; url: string }> }));
+
+        if (web.context) {
+          safePost({ type: 'RESET' });   // clear the refusal from the panel
+          full = '';
+          const webSys =
+            `You are a helpful research assistant. The user's saved workspace didn't cover this, so the excerpts below are from a LIVE WEB SEARCH run just now. ` +
+            `Begin with this exact italic line: *Searched the web — sources below.* ` +
+            `Answer from the excerpts and attribute claims in plain text to the numbered sources, e.g. "per [W2]". Don't invent citations or facts beyond them; if they don't answer it, say so.` +
+            `\n--- WEB RESULTS ---\n${web.context}\n--- END WEB RESULTS ---`;
+          await chatWithCustomStream(webSys, [], prompt, localController.signal, (delta) => {
+            full += delta;
+            safePost({ type: 'DELTA', text: delta });
+          });
+          linkedPages = web.sources; // footer below now points at the web sources
+        }
+      }
 
       // Deterministic clickable trail of auto-followed links — streamed as a
       // final delta so it renders live AND lands in the saved message.

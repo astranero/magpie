@@ -89,11 +89,23 @@ test('streamed answers finalize their render — caret clears, markdown parses (
     await input.fill(q);
     await input.press('Enter');
     await page.getByText(/there friend/i).last().waitFor({ timeout: 12000 });
-    await page.waitForTimeout(700); // allow finalize to apply
+    // Poll for the finalized state instead of a fixed sleep — DONE→finalize→
+    // re-render can land a few hundred ms after the last token under load, and
+    // a fixed wait races it. The message MUST settle to markdown-with-no-caret;
+    // if it never does (genuinely stuck), waitForFunction throws → test fails.
+    // Interval polling (NOT the default rAF polling, which Playwright throttles
+    // when the page is backgrounded / under load — the source of earlier flake).
+    await page.waitForFunction(() =>
+      !document.querySelector('.animate-pulse') &&
+      !!document.querySelector('em') &&
+      !(document.body.innerText || '').includes('*No matching'),
+      undefined,
+      { timeout: 15000, polling: 100 }
+    );
     return page.evaluate(() => ({
-      caret: !!document.querySelector('.animate-pulse'),        // streaming caret gone?
-      rawStar: (document.body.innerText || '').includes('*No matching'), // raw markdown gone?
-      hasEm: !!document.querySelector('em'),                    // markdown actually parsed?
+      caret: !!document.querySelector('.animate-pulse'),
+      rawStar: (document.body.innerText || '').includes('*No matching'),
+      hasEm: !!document.querySelector('em'),
     }));
   };
 

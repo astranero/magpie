@@ -46,6 +46,25 @@ export function isChitchat(prompt: string): boolean {
   return CHITCHAT_RE.test(p);
 }
 
+/**
+ * Did the model refuse a workspace-grounded turn for lack of sources? Tight
+ * patterns matching the citation-branch refusal shapes ("This information was
+ * not found in your sources.", "I cannot answer this based on the provided
+ * sources.") so a normal answer that merely mentions "sources" doesn't trip it.
+ * Chat uses this to escalate a grounded turn to a live web search — the
+ * reliable net behind the score-based confidence gate.
+ */
+export function isRefusalAnswer(text: string): boolean {
+  const t = (text || '').toLowerCase().trim();
+  if (t.length === 0 || t.length > 600) return false; // real answers run longer than a bare refusal
+  return /\b(can(?:not|'t)|could\s?n(?:o|')t|unable to|do(?:n'?t| not)|does(?:n'?t| not))\b[^.]*\banswer\b/.test(t)
+    || /\bnot\s+(found|available|present|included|mentioned|contained|specified|covered)\b[^.]*\b(source|document|workspace|material)/.test(t)
+    // Reversed order + present-tense: "the sources do not contain / mention …"
+    || /\b(source|document|workspace|material)s?\b[^.]*\b(do(?:n'?t| not)|does(?:n'?t| not))\s+(contain|include|mention|cover|have|specify|provide|address|discuss)/.test(t)
+    || /\bthis information was not found\b/.test(t)
+    || /\bno (relevant )?(information|answer|match|data)\b[^.]*\b(source|document|workspace)/.test(t);
+}
+
 /** Compact history block for the rewrite prompt. */
 export function formatHistoryForIntent(history: Array<{ role: string; content: string }>, maxTurns = 6, maxChars = 350): string {
   return history

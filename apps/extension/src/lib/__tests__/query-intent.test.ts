@@ -156,6 +156,40 @@ describe('isChitchat', () => {
   });
 });
 
+describe('isRefusalAnswer (escalate a grounded turn to the web)', () => {
+  it('matches the citation-branch refusal shapes', async () => {
+    const { isRefusalAnswer } = await import('../query-intent');
+    for (const s of [
+      'This information was not found in your sources.',
+      'I cannot answer this based on the provided sources.',
+      "I can't answer that from the documents you've captured.",
+      'The provided sources do not contain information about tomorrow’s weather.',
+      'No relevant information was found in your workspace for this question.',
+    ]) {
+      expect(isRefusalAnswer(s)).toBe(true);
+    }
+  });
+
+  it('does NOT match normal answers (even ones that mention sources)', async () => {
+    const { isRefusalAnswer } = await import('../query-intent');
+    for (const s of [
+      'Photosynthesis converts light into chemical energy.',
+      'According to your sources, revenue grew 12% in Q3, driven by the EMEA segment.',
+      'The answer is 42. See the attached document for the derivation.',
+      '',
+    ]) {
+      expect(isRefusalAnswer(s)).toBe(false);
+    }
+  });
+
+  it('ignores long text (a real answer, not a bare refusal)', async () => {
+    const { isRefusalAnswer } = await import('../query-intent');
+    const long = 'I cannot answer this without more detail. ' + 'Here is a thorough explanation. '.repeat(30);
+    expect(long.length).toBeGreaterThan(600);
+    expect(isRefusalAnswer(long)).toBe(false);
+  });
+});
+
 describe('context budgets — bigger, all matches', () => {
   it('matchFilesInTree returns ALL matching files (up to 6), not just one', async () => {
     const { matchFilesInTree } = await import('../query-intent');

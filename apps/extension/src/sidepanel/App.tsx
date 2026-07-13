@@ -199,6 +199,23 @@ export default function App() {
     }
     flushDeltaBuffer();
   }, [flushDeltaBuffer]);
+  /** Clear a streaming message's text mid-flight (worker sent RESET — e.g. a
+   *  refusal is being replaced by a web-sourced answer). Drops any buffered
+   *  deltas for it so the replacement starts clean. */
+  const resetStreamingMessage = useCallback((chatId: string, assistantId: string) => {
+    if (deltaBufferRef.current && deltaBufferRef.current.chatId === chatId && deltaBufferRef.current.assistantId === assistantId) {
+      deltaBufferRef.current.text = '';
+    }
+    setMessages(prev => {
+      const list = prev[chatId] || [];
+      const idx = list.findIndex(x => x.id === assistantId);
+      if (idx === -1) return prev;
+      const copy = [...list];
+      copy[idx] = { ...copy[idx], text: '', streaming: true };
+      return { ...prev, [chatId]: copy };
+    });
+  }, []);
+
   /** Mark the streaming assistant message as done — flush + swap render mode. */
   const finalizeStreamingMessage = useCallback((chatId: string, assistantId: string) => {
     // Record BEFORE flushing so the flush itself (which may create or extend
@@ -1339,6 +1356,9 @@ export default function App() {
     port.onMessage.addListener((m: any) => {
       if (m?.type === 'STATUS') {
         setThinkingStatus(prev => ({ ...prev, [currentChatId]: m.text || '' }));
+      } else if (m?.type === 'RESET') {
+        // Worker is replacing the answer (refusal → web-sourced answer).
+        resetStreamingMessage(currentChatId, assistantId);
       } else if (m?.type === 'DELTA') {
         setThinkingStatus(prev => prev[currentChatId] ? { ...prev, [currentChatId]: '' } : prev);
         pushDelta(currentChatId, assistantId, m.text);
