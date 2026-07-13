@@ -9,7 +9,7 @@ import { getResearchLimits, getResearchDepth, getSynthesisCharBudget, getSourceQ
 import { generateBibtex } from '../lib/bibtex';
 import { harvestReferences, partitionRefs, HarvestedRef } from '../lib/reference-harvest';
 import { getMcpServers, McpConnection, isSearchLikeTool, topicArgFor } from '../lib/mcp-client';
-import { searchWithProviders } from '../lib/search-providers';
+import { searchWithProviders, SearchHit } from '../lib/search-providers';
 import { rankPapers } from '../lib/paper-rank';
 import { semaphore } from '../lib/semaphore';
 
@@ -221,15 +221,15 @@ export function extractSearchUrls(text: string): Set<string> {
  * a 202 anti-bot challenge (zero results), so fall back to fetching the same
  * results page through Jina Reader, which renders it server-side.
  */
-async function performWebSearch(query: string, signal?: AbortSignal): Promise<string[]> {
+async function performWebSearch(query: string, signal?: AbortSignal): Promise<SearchHit[]> {
   // User-linked search APIs (Tavily/Brave/Serper) take priority — cleaner
-  // results and no anti-bot roulette. No keys configured → scrape chain.
+  // results, snippets included, and no anti-bot roulette. No keys → scrape chain.
   try {
-    const providerUrls = await searchWithProviders(query, activeLimits.urlsPerQuery * 2, signal);
-    if (providerUrls.length > 0) {
-      const sortedP = providerUrls.sort((a, b) => {
-        const aHigh = HIGH_QUALITY_DOMAINS.test(a) ? 0 : 1;
-        const bHigh = HIGH_QUALITY_DOMAINS.test(b) ? 0 : 1;
+    const hits = await searchWithProviders(query, activeLimits.urlsPerQuery * 2, signal);
+    if (hits.length > 0) {
+      const sortedP = hits.sort((a, b) => {
+        const aHigh = HIGH_QUALITY_DOMAINS.test(a.url) ? 0 : 1;
+        const bHigh = HIGH_QUALITY_DOMAINS.test(b.url) ? 0 : 1;
         return aHigh - bHigh;
       });
       return sortedP.slice(0, activeLimits.urlsPerQuery);
@@ -281,7 +281,8 @@ async function performWebSearch(query: string, signal?: AbortSignal): Promise<st
     return aHigh - bHigh;
   });
 
-  return sorted.slice(0, activeLimits.urlsPerQuery);
+  // DDG scrape yields URLs only — no snippet, so these callers must fetch.
+  return sorted.slice(0, activeLimits.urlsPerQuery).map(url => ({ url }));
 }
 
 /**
@@ -413,19 +414,37 @@ export async function gatherWebSnippets(
   }
   const inner = ac.signal;
   try {
-  // 1) Web search → scrape the top few results in parallel.
+  // 1) Web search. FAST PATH: answer straight from the providers' own snippets
+  //    (Tavily/Brave/Serper) — no page fetch, so ~2s instead of ~10s. Only when
+  //    snippets are thin (keyless DDG, which is url-only) do we scrape pages.
+  const GOOD_SNIPPET = 120; // chars that suffice to answer without fetching
   try {
-    const urls = (await performWebSearch(query, inner)).slice(0, MAX_FETCH);
-    if (urls.length > 0) {
-      onStatus?.('Reading web results…');
-      const parsed = await Promise.all(urls.map(u => scrapeUrl(u, inner).catch(() => null)));
-      urls.forEach((url, i) => {
-        const p = parsed[i];
-        if (!p || !p.markdown.trim()) return;
+    onStatus?.('Searching the web…');
+    const hits = await performWebSearch(query, inner);
+    if (hits.length > 0) {
+      onStatus?.(`Found ${hits.length} result${hits.length === 1 ? '' : 's'}…`);
+
+      for (const h of hits.filter(h => (h.snippet || '').trim().length >= GOOD_SNIPPET).slice(0, MAX_FETCH + 2)) {
         const n = sources.length + 1;
-        sources.push({ title: p.title || url, url });
-        blocks.push(`[W${n}] ${p.title || url}\nURL: ${url}\n${p.markdown.trim().slice(0, PER_DOC_CHARS)}`);
-      });
+        sources.push({ title: h.title || h.url, url: h.url });
+        blocks.push(`[W${n}] ${h.title || h.url}\nURL: ${h.url}\n${(h.snippet || '').trim().slice(0, PER_DOC_CHARS)}`);
+      }
+
+      // Fell short on snippets → scrape a couple of pages (in parallel) to fill.
+      if (blocks.length < 2) {
+        const toScrape = hits.filter(h => (h.snippet || '').trim().length < GOOD_SNIPPET).slice(0, MAX_FETCH);
+        if (toScrape.length > 0) {
+          onStatus?.(`Reading ${toScrape.length} page${toScrape.length === 1 ? '' : 's'}…`);
+          const parsed = await Promise.all(toScrape.map(h => scrapeUrl(h.url, inner).catch(() => null)));
+          toScrape.forEach((h, i) => {
+            const p = parsed[i];
+            if (!p || !p.markdown.trim()) return;
+            const n = sources.length + 1;
+            sources.push({ title: p.title || h.url, url: h.url });
+            blocks.push(`[W${n}] ${p.title || h.url}\nURL: ${h.url}\n${p.markdown.trim().slice(0, PER_DOC_CHARS)}`);
+          });
+        }
+      }
     }
   } catch (e) {
     if (signal?.aborted) throw e;
@@ -724,7 +743,7 @@ async function runWebAgent(
     if (signal?.aborted) throw new Error('AbortError');
     onProgress(`[${label}] Searching: "${q}"`);
     const found = await performWebSearch(q, signal);
-    found.forEach(u => allUrls.add(u));
+    found.forEach(h => allUrls.add(h.url));
     onProgress(`[${label}] → ${found.length} result(s)`);
     await new Promise(r => setTimeout(r, 800));
   }

@@ -769,7 +769,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
         ))}
         {/* No message was queued during the run → field log stays at the end. */}
         {firstQueuedIdx === -1 && fieldLog}
-        {generating[activeChatId] && !researching[activeProjectId] && messages[messages.length - 1]?.role !== 'assistant' && (
+        {generating[activeChatId] && !researching[activeProjectId] && (messages[messages.length - 1]?.role !== 'assistant' || !messages[messages.length - 1]?.text) && (
           <div className="flex justify-start">
             <div className="max-w-[85%] rounded-lg rounded-bl-sm border bg-card border-border text-card-foreground px-4 py-3 text-sm flex items-center gap-2 shadow-card">
               <div className="flex space-x-1" aria-hidden="true">

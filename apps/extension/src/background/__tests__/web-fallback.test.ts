@@ -22,7 +22,7 @@ function jinaDoc(title: string): string {
   return `Title: ${title}\nURL Source: x\nMarkdown Content:\n${PROSE}`;
 }
 
-function installChrome(mcpServers: any[] = []) {
+function installChrome(mcpServers: any[] = [], searchApiKeys?: any) {
   (globalThis as any).chrome = {
     storage: {
       local: {
@@ -30,6 +30,7 @@ function installChrome(mcpServers: any[] = []) {
           const k = Array.isArray(keys) ? keys : [keys];
           const out: any = {};
           if (k.includes('mcpServers')) out.mcpServers = mcpServers;
+          if (k.includes('searchApiKeys') && searchApiKeys) out.searchApiKeys = searchApiKeys;
           if (k.includes('mcpSeeded')) out.mcpSeeded = true; // don't re-seed defaults
           return out; // searchApiKeys absent → no keys → DDG path
         }),
@@ -61,6 +62,36 @@ describe('gatherWebSnippets (chat web fallback)', () => {
     expect(context).toMatch(/\[W1\]/);
     expect(context).toContain('bookstore owner orchestrated');
     expect(sources[0].url).toMatch(/^https?:\/\//);
+  });
+
+  it('answers from provider snippets WITHOUT fetching pages (the fast path)', async () => {
+    installChrome([], { serper: 'test-key' });
+    const fetchMock = vi.fn(async (url: string) => {
+      if (url.includes('serper.dev')) {
+        return {
+          ok: true,
+          headers: { get: () => 'application/json' },
+          json: async () => ({
+            organic: [
+              { link: 'https://a.example/1', title: 'Alpha', snippet: 'The bookstore owner is the confirmed antagonist, revealed in the season finale after the detective finds the annotated first edition.' },
+              { link: 'https://b.example/2', title: 'Beta', snippet: 'A recap notes the reveal is seeded through flashbacks across the season before the archive-room confrontation with the owner.' },
+            ],
+          }),
+          text: async () => '', url,
+        } as any;
+      }
+      throw new Error(`should not fetch pages on the snippet fast path: ${url}`);
+    });
+    (globalThis as any).fetch = fetchMock;
+
+    const { context, sources } = await gatherWebSnippets('is the bookstore guy the killer');
+
+    expect(sources.length).toBe(2);
+    expect(context).toContain('[W1]');
+    expect(context).toContain('confirmed antagonist');
+    // No jina/DDG page fetch happened — only the one search call.
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls.every(c => String(c[0]).includes('serper.dev'))).toBe(true);
   });
 
   it('returns empty when the search yields no usable results', async () => {
