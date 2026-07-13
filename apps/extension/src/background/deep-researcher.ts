@@ -1566,16 +1566,17 @@ Return ONLY the JSON. No explanation outside it.`;
 }
 
 /**
- * Format evaluation result appended to the report: a one-line verdict with
- * the full audit collapsed behind <details> — the evaluation is a quality
- * signal, not part of the research content, so it must not dominate the page.
+ * Format evaluation result appended to the report — a quality-audit appendix.
+ * Pure MARKDOWN (not <details>): the report renderer intentionally has no raw-
+ * HTML plugin (reports embed scraped web text → XSS surface), so HTML tags
+ * would show up literally. A small heading after a rule keeps it clearly an
+ * aside rather than part of the research content.
  */
-function formatEvaluationBlock(ev: EvaluationResult, revised: boolean): string {
+export function formatEvaluationBlock(ev: EvaluationResult, revised: boolean): string {
   const icon = ev.verdict === 'PASS' ? '✅' : ev.verdict === 'NEEDS_REVISION' ? '⚠️' : '❌';
   const lines = [
     `\n\n---\n`,
-    `<details>`,
-    `<summary>${icon} Quality audit: ${ev.verdict} (${ev.score}/10)${revised ? ' — after one revision pass' : ''}</summary>`,
+    `#### ${icon} Quality audit: ${ev.verdict} (${ev.score}/10)${revised ? ' — after one revision pass' : ''}`,
     ``,
     `> ${ev.recommendation}`,
     ``,
@@ -1595,7 +1596,6 @@ function formatEvaluationBlock(ev: EvaluationResult, revised: boolean): string {
     ev.flaggedSections.forEach(f => lines.push(`- \`${f}\``));
     lines.push('');
   }
-  lines.push(`</details>`);
   return lines.join('\n');
 }
 
@@ -1849,13 +1849,15 @@ Your job:
  * Only the clean section above the separator is chunked (the raw block is
  * treated as noise by isNoiseParagraph due to the page-header pattern).
  */
-function buildCleanedPdfDoc(cleanText: string, rawText: string): string {
+export function buildCleanedPdfDoc(cleanText: string, rawText: string): string {
+  // Markdown heading, not <details> — the document renderer has no raw-HTML
+  // plugin, so tags would render literally. A rule + heading keeps the raw
+  // extraction clearly separated as a reference appendix.
   return (
     cleanText.trim() +
     `\n\n---\n\n` +
-    `<details>\n<summary>Raw PDF extraction (reference only — not indexed)</summary>\n\n` +
-    rawText.trim() +
-    `\n\n</details>`
+    `## Raw PDF extraction (reference only — not indexed)\n\n` +
+    rawText.trim()
   );
 }
 

@@ -29,8 +29,34 @@ import {
   sourceTier,
   dedupeSourceRecords,
   buildSourcesDocMarkdown,
+  formatEvaluationBlock,
+  buildCleanedPdfDoc,
   SourceRecord,
 } from '../deep-researcher';
+
+describe('generated report/doc content is pure markdown (no raw HTML tags)', () => {
+  // The report + document renderers deliberately have no raw-HTML plugin
+  // (reports embed scraped web text → XSS surface), so any <details>/<summary>
+  // would show up as literal tags. These blocks must stay markdown.
+  it('formatEvaluationBlock emits a markdown heading, not <details>', () => {
+    const ev: any = {
+      verdict: 'NEEDS_REVISION', score: 4, recommendation: 'Expand section 5.',
+      strengths: ['Clear logistics.'], weaknesses: ['Thin on examples.'],
+      flaggedSections: ['Section 5: Initiating Intimacy'],
+    };
+    const out = formatEvaluationBlock(ev, true);
+    expect(out).not.toMatch(/<\/?details>|<\/?summary>/);
+    expect(out).toContain('#### ⚠️ Quality audit: NEEDS_REVISION (4/10) — after one revision pass');
+    expect(out).toContain('**Weaknesses:**');
+  });
+
+  it('buildCleanedPdfDoc emits a markdown heading, not <details>', () => {
+    const out = buildCleanedPdfDoc('Clean body.', 'RAW extraction blob.');
+    expect(out).not.toMatch(/<\/?details>|<\/?summary>/);
+    expect(out).toContain('## Raw PDF extraction (reference only — not indexed)');
+    expect(out).toContain('RAW extraction blob.');
+  });
+});
 
 // ─── buildAnchoredContext ─────────────────────────────────────────────────────
 
