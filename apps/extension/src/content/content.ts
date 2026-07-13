@@ -1,5 +1,6 @@
 import { Readability } from '@mozilla/readability';
 import TurndownService from 'turndown';
+import { extractMailboxList } from './mailbox';
 
 // ─────────────────────────────────────────────
 // Enhanced Content Script — AI Research Assistant
@@ -324,6 +325,16 @@ async function scrapePage(): Promise<{
   if (extras.length > 0) {
     markdown += `\n\n## Page extras (comments & build info)\n\n${extras.join('\n\n')}`;
   }
+
+  // Webmail: Readability extracts the OPENED message and drops the inbox list,
+  // so "what other messages do I have?" comes up empty. Recover the visible
+  // message rows from the DOM (host-gated; ephemeral page context only).
+  try {
+    const mailbox = extractMailboxList(document, window.location.hostname);
+    if (mailbox.length > 0) {
+      markdown += `\n\n## Mailbox — messages visible on this page\n\n${mailbox.join('\n')}`;
+    }
+  } catch { /* extraction is best-effort — never break page capture over it */ }
 
   // If the title looks like a generic site name (e.g. "Google Gemini"),
   // try to extract a real content title from the first markdown heading.

@@ -47,6 +47,15 @@ export function isChitchat(prompt: string): boolean {
 }
 
 /**
+ * Is the user asking about their messages / inbox (as opposed to a workspace
+ * doc)? When true and a webmail page is open, chat answers from the mailbox in
+ * page context instead of running a pointless web search.
+ */
+export function isMessageQuery(prompt: string): boolean {
+  return /\b(e-?mails?|inbox|messages?|gmail|who\s+(emailed|wrote|sent)|unread|my\s+mail)\b/i.test(prompt || '');
+}
+
+/**
  * Did the model refuse a workspace-grounded turn for lack of sources? Tight
  * patterns matching the citation-branch refusal shapes ("This information was
  * not found in your sources.", "I cannot answer this based on the provided

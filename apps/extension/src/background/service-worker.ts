@@ -16,7 +16,7 @@ import { buildFrontmatter, hasFrontmatter } from '../lib/frontmatter';
 import { get as idbGet } from 'idb-keyval';
 import { runDeepResearch, generateSubQuestions, scrapeUrl, isJunkUrl, gatherWebSnippets } from './deep-researcher';
 import { harvestReferences } from '../lib/reference-harvest';
-import { needsIntentResolution, formatHistoryForIntent, parseRepoUrl, selectTreePaths, formatTreeBlock, matchFilesInTree, isChitchat, isRefusalAnswer, RepoRef } from '../lib/query-intent';
+import { needsIntentResolution, formatHistoryForIntent, parseRepoUrl, selectTreePaths, formatTreeBlock, matchFilesInTree, isChitchat, isRefusalAnswer, isMessageQuery, RepoRef } from '../lib/query-intent';
 import { getResearchLimits } from '../lib/research-limits';
 import { looksLikeBuildLog, extractLogHighlights } from '../lib/log-highlights';
 import { addChunksToVectorStore, searchSessionChunks, resetSessionIndex, resetAllSessionIndexes, isConfidentMatch } from '../lib/vector-store';
@@ -1237,7 +1237,11 @@ async function buildChatRequest(chatId: string, projectId: string, prompt: strin
     // the user turned it off. The open page is still appended below, so the
     // model sees the web excerpts AND the current page.
     let web: { context: string; sources: Array<{ title: string; url: string }> } = { context: '', sources: [] };
-    if (await isChatWebFallbackEnabled()) {
+    // A mailbox question with a webmail page open is answered from the page's
+    // recovered message list (appended to page context below) — don't burn a
+    // web search on it.
+    const mailboxOnPage = isMessageQuery(prompt) && !!pageContext;
+    if (!mailboxOnPage && await isChatWebFallbackEnabled()) {
       onStatus?.('Searching the web…');
       try {
         web = await gatherWebSnippets(effectiveQuery, { signal, onStatus });

@@ -156,6 +156,21 @@ describe('isChitchat', () => {
   });
 });
 
+describe('isMessageQuery (answer from the on-page mailbox, not the web)', () => {
+  it('matches inbox / email / message intent', async () => {
+    const { isMessageQuery } = await import('../query-intent');
+    for (const s of ['what messages do I have', 'who emailed me today', 'anything in my inbox?', 'summarize my emails', 'any unread mail', 'what other messages I have']) {
+      expect(isMessageQuery(s)).toBe(true);
+    }
+  });
+  it('does NOT match unrelated questions or commands', async () => {
+    const { isMessageQuery } = await import('../query-intent');
+    for (const s of ['what is TLS', 'summarize this paper', '/research batteries', 'how do I deploy']) {
+      expect(isMessageQuery(s)).toBe(false);
+    }
+  });
+});
+
 describe('isRefusalAnswer (escalate a grounded turn to the web)', () => {
   it('matches the citation-branch refusal shapes', async () => {
     const { isRefusalAnswer } = await import('../query-intent');
