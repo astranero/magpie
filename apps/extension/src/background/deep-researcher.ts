@@ -8,7 +8,7 @@ import { checkContentQuality, extractDoi } from '../lib/quality-gate';
 import { getResearchLimits, getResearchDepth, getSynthesisCharBudget, getSourceQuality, getAcademicDepth, RESEARCH_LIMITS, ResearchLimits, SourceQuality, AcademicDepth } from '../lib/research-limits';
 import { generateBibtex } from '../lib/bibtex';
 import { harvestReferences, partitionRefs, HarvestedRef } from '../lib/reference-harvest';
-import { getMcpServers, McpConnection, isSearchLikeTool, topicArgFor } from '../lib/mcp-client';
+import { getMcpServers, McpConnection, isSearchLikeTool, argsForQuery } from '../lib/mcp-client';
 import { searchWithProviders, SearchHit } from '../lib/search-providers';
 import { rankPapers } from '../lib/paper-rank';
 import { semaphore } from '../lib/semaphore';
@@ -462,9 +462,9 @@ export async function gatherWebSnippets(
         const tools = (await conn.listTools()).filter(isSearchLikeTool).slice(0, 1);
         for (const tool of tools) {
           if (inner.aborted) break;
+          const args = argsForQuery(tool, query);
+          if (!args) continue; // schema exposes no fillable param — skip, don't error
           onStatus?.(`Querying ${server.name}…`);
-          const args = topicArgFor(tool);
-          args[Object.keys(args)[0]] = query;
           const text = (await conn.callTool(tool.name, args)).trim();
           if (text.length < 40) continue;
           const n = sources.length + 1;
@@ -1154,10 +1154,10 @@ async function runMcpAgent(
       }
       for (const tool of tools) {
         if (signal?.aborted) throw new Error('AbortError');
+        const args = argsForQuery(tool, topic);
+        if (!args) { onProgress(`[MCP] ${server.name}/${tool.name}: no fillable query param — skipping`); continue; }
         onProgress(`[MCP] ${server.name}: calling ${tool.name}…`);
         try {
-          const args = topicArgFor(tool);
-          args[Object.keys(args)[0]] = topic;
           const text = await conn.callTool(tool.name, args);
           const gate = checkContentQuality(text, `${server.name}/${tool.name}`);
           if (!gate.pass) {

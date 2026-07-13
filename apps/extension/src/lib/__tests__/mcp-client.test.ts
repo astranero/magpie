@@ -1,5 +1,28 @@
 import { describe, it, expect, vi } from 'vitest';
-import { McpConnection, isSearchLikeTool, topicArgFor } from '../mcp-client';
+import { McpConnection, isSearchLikeTool, topicArgFor, argsForQuery } from '../mcp-client';
+
+describe('argsForQuery', () => {
+  it('maps the query onto a non-generic REQUIRED param (Context7 resolve-library-id)', () => {
+    // The exact tool that errored: it wants `libraryName`, not `query`.
+    const tool = { name: 'resolve-library-id', description: 'search for a library id', inputSchema: { type: 'object', properties: { libraryName: { type: 'string' } }, required: ['libraryName'] } };
+    expect(argsForQuery(tool, 'react router')).toEqual({ libraryName: 'react router' });
+  });
+
+  it('prefers a generic search key when present', () => {
+    const tool = { name: 'search', inputSchema: { properties: { query: {}, limit: {} } } };
+    expect(argsForQuery(tool, 'quokkas')).toEqual({ query: 'quokkas' });
+  });
+
+  it('fills every required param so the call validates', () => {
+    const tool = { name: 'find', inputSchema: { properties: { q: {}, index: {} }, required: ['q', 'index'] } };
+    expect(argsForQuery(tool, 'x')).toEqual({ q: 'x', index: 'x' });
+  });
+
+  it('returns null when there is no fillable param (caller skips instead of erroring)', () => {
+    expect(argsForQuery({ name: 'noargs', inputSchema: { type: 'object' } }, 'x')).toBeNull();
+    expect(argsForQuery({ name: 'noschema' }, 'x')).toBeNull();
+  });
+});
 
 const baseUrl = 'http://localhost:3920/mcp';
 

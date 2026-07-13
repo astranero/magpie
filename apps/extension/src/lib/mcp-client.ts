@@ -196,3 +196,24 @@ export function topicArgFor(tool: McpTool): Record<string, unknown> {
   const key = ['query', 'q', 'search', 'topic', 'text', 'prompt'].find(k => props.includes(k)) || props[0] || 'query';
   return { [key]: '' };
 }
+
+/**
+ * Build a full arguments object that feeds `query` to a search-like tool.
+ * Robust to non-generic parameter names (e.g. Context7's resolve-library-id
+ * wants `libraryName`, not `query` — passing `query` triggered a validation
+ * error): prefer a known search key, else the tool's first REQUIRED param, else
+ * its first param. Also fills any OTHER required params with the query so the
+ * call validates. Returns null when the schema exposes no param we can fill —
+ * callers skip the tool instead of sending a rejected call.
+ */
+export function argsForQuery(tool: McpTool, query: string): Record<string, unknown> | null {
+  const schema = (tool.inputSchema as any) || {};
+  const props = Object.keys(schema.properties || {});
+  const required: string[] = Array.isArray(schema.required) ? schema.required : [];
+  const preferred = ['query', 'q', 'search', 'searchquery', 'topic', 'text', 'prompt', 'keyword', 'term', 'question', 'libraryname', 'name'];
+  const key = props.find(p => preferred.includes(p.toLowerCase())) || required[0] || props[0];
+  if (!key) return null;
+  const args: Record<string, unknown> = { [key]: query };
+  for (const r of required) if (!(r in args)) args[r] = query;
+  return args;
+}
