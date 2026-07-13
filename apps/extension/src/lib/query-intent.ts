@@ -47,6 +47,18 @@ export function isChitchat(prompt: string): boolean {
 }
 
 /**
+ * Is this research topic genuinely scientific/scholarly? Deep research runs an
+ * academic agent (Semantic Scholar / HuggingFace papers); for practical or
+ * consumer topics ("game engines for a solo dev", "date ideas in Helsinki")
+ * that agent pulls off-topic CS/paper results — often with garbled PDF text —
+ * that drag the report down. Only include academic sources when the topic
+ * clearly calls for research literature.
+ */
+export function isAcademicQuery(topic: string): boolean {
+  return /\b(stud(?:y|ies)|research(?:ers?)?|evidence|clinical|trials?|meta-?analysis|peer[-\s]?reviewed|literature\s+review|systematic\s+review|efficacy|mechanisms?|hypothesis|empirical|scientific|biolog\w*|chemistr\w*|physics|neuroscience|genetics?|genomics?|epidemiolog\w*|pharmacolog\w*|molecular|proteins?|disease|pathophysiolog\w*|cognition|neural|quantum|theorem|equations?|academ\w*|papers?|journal|dataset)\b/i.test(topic || '');
+}
+
+/**
  * Is the user asking about their messages / inbox (as opposed to a workspace
  * doc)? When true and a webmail page is open, chat answers from the mailbox in
  * page context instead of running a pointless web search.

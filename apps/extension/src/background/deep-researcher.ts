@@ -5,6 +5,7 @@ import { addChunksToVectorStore, searchSessionChunks } from '../lib/vector-store
 import { getJob, updateJob, getPage, savePage, listPages } from '../lib/research-store';
 import { pdfUrlToBody } from '../lib/pdf-parser';
 import { checkContentQuality, extractDoi } from '../lib/quality-gate';
+import { isAcademicQuery } from '../lib/query-intent';
 import { getResearchLimits, getResearchDepth, getSynthesisCharBudget, getSourceQuality, getAcademicDepth, RESEARCH_LIMITS, ResearchLimits, SourceQuality, AcademicDepth } from '../lib/research-limits';
 import { generateBibtex } from '../lib/bibtex';
 import { harvestReferences, partitionRefs, HarvestedRef } from '../lib/reference-harvest';
@@ -70,7 +71,7 @@ const RESEARCH_CITATION_RULES =
   `2. Citation format: [anchor_id] taken verbatim from the <c>anchor_id</c> tag preceding the excerpt you used. ONE anchor per bracket. For multiple corroborating sources write [anchor1][anchor2] — never comma-separate inside one bracket.\n` +
   `3. Never fabricate an anchor ID or cite one that wasn't given to you.\n` +
   `4. When multiple sources support the same claim, cite all of them — that IS the credibility signal. Do NOT use vague labels like "[High confidence]" or "[Low confidence]"; showing 2-3 independent anchors on a claim is more useful than a confidence tag.\n` +
-  `5. If the excerpts don't cover something, say so explicitly instead of citing something unrelated.\n` +
+  `5. If the excerpts don't cover a sub-point, OMIT it — do NOT pad the report with paragraphs or whole sections cataloguing what the sources "do not contain". At most ONE short clause noting a gap, and only when that gap is central to the question. Answering the covered parts well beats reciting the report's own gaps. Never lead a section with a disclaimer about missing data.\n` +
   `6. SOURCES DESCRIBE DIFFERENT SYSTEMS. Each [Source: …] block is a separate paper/page about its OWN system, method, or subject. NEVER merge mechanisms from different sources into one system as if they were parts of the same thing — attribute every mechanism, metric, and name to the specific system its source describes ("The X paper proposes…", "Separately, Y reports…").\n` +
   `7. If the research topic PRESUMES a connection the excerpts do not support (e.g. "how does system A use technique B" when no source shows A using B), state that mismatch plainly in the first paragraph instead of inventing the connection.\n` +
   `8. Ignore sources that are topically unrelated to the research question (a keyword match is not relevance) — do not force them into the narrative.\n` +
@@ -2069,9 +2070,15 @@ async function runDeeperResearch(
     if (stage === 1) {
       stageJobs.push(
         runMcpAgent(projectId, topic, onProgress, signal),
-        runAcademicAgent(projectId, topic, onProgress, signal, llmChatFn),
         runNewsAgent(projectId, topic, onProgress, signal)
       );
+      // Academic papers only for genuinely scholarly topics — on practical or
+      // consumer topics they return off-topic CS papers (often garbled PDFs).
+      if (isAcademicQuery(topic)) {
+        stageJobs.push(runAcademicAgent(projectId, topic, onProgress, signal, llmChatFn));
+      } else {
+        onProgress('[ACADEMIC] Skipped — topic is practical, not scholarly (web/news only)');
+      }
     }
 
     const outcomes = await Promise.allSettled(stageJobs);

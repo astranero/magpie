@@ -156,6 +156,31 @@ describe('isChitchat', () => {
   });
 });
 
+describe('isAcademicQuery (gate the academic agent)', () => {
+  it('is FALSE for practical / consumer topics (which pulled off-topic papers)', async () => {
+    const { isAcademicQuery } = await import('../query-intent');
+    for (const s of [
+      'Romantic date ideas in Helsinki for a Friday evening and advice on initiating intimacy',
+      'best software tools and game engines for a solo developer to build mobile gacha games',
+      'cheapest flights to Lisbon in December',
+      'how to set up a home espresso bar',
+    ]) {
+      expect(isAcademicQuery(s)).toBe(false);
+    }
+  });
+  it('is TRUE for genuinely scholarly topics', async () => {
+    const { isAcademicQuery } = await import('../query-intent');
+    for (const s of [
+      'clinical trials of metformin for longevity',
+      'recent research on CRISPR off-target effects',
+      'meta-analysis of SSRIs efficacy',
+      'quantum error correction theorem',
+    ]) {
+      expect(isAcademicQuery(s)).toBe(true);
+    }
+  });
+});
+
 describe('isMessageQuery (answer from the on-page mailbox, not the web)', () => {
   it('matches inbox / email / message intent', async () => {
     const { isMessageQuery } = await import('../query-intent');

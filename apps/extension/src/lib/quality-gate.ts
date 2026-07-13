@@ -82,6 +82,13 @@ export function checkContentQuality(markdown: string, title?: string): GateResul
   const words = text.split(/\s+/).filter(Boolean);
   if (words.length < MIN_WORDS) return { pass: false, reason: 'thin-content' };
 
+  // Spaced-out garble: some PDF extractors render each glyph as its own token
+  // ("O k a y , l e t ' s . . ."). Real prose has very few single-char words
+  // (a, I); if most tokens are single characters the text is unusable — reject
+  // so this garbage never becomes a cited source.
+  const singles = words.reduce((n, w) => n + (w.length === 1 ? 1 : 0), 0);
+  if (words.length >= 40 && singles / words.length > 0.4) return { pass: false, reason: 'garbled-spacing' };
+
   const probe = `${title || ''}\n${text.slice(0, 2000)}`;
   if (words.length <= PATTERN_CHECK_MAX_WORDS) {
     if (matchAny(probe, BOT_PATTERNS)) return { pass: false, reason: 'anti-bot' };

@@ -84,6 +84,18 @@ describe('extractDoi', () => {
   });
 });
 
+describe('checkContentQuality — garbled spacing', () => {
+  it('rejects spaced-single-char PDF garble', () => {
+    // The exact shape academic PDFs produced: "O k a y , l e t ' s . . ."
+    const garble = `O k a y , l e t s . . . W a i t , . . . L e t s t a c k l e A l t e r n a t i v e s `.repeat(6);
+    expect(checkContentQuality(garble).reason).toBe('garbled-spacing');
+  });
+  it('passes normal prose with a few single-char words', () => {
+    const prose = `I went to a shop and I bought a book about a war in a far away land. It was a good read overall. `.repeat(6);
+    expect(checkContentQuality(prose).pass).toBe(true);
+  });
+});
+
 describe('looksLikeOcrGarbage', () => {
   it('flags symbol soup', () => {
     expect(looksLikeOcrGarbage('�?~ #@! ()[]{} --- ___ === +++ ||| ^^^ %%% $$$ &&& *** ;;; ::: ,,, ... ??? !!! ~~~ ``` "" \'\' <> // \\\\ '.repeat(3))).toBe(true);
