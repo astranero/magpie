@@ -1,6 +1,11 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useMemo } from 'react';
 import { LocalDocument } from '../types';
 import { contentHasTag } from '../../lib/frontmatter';
+
+// Machine-gathered research sources (a deep run captures dozens) collapse into
+// one group so they don't bury the user's own curated docs. Pure + module-level
+// so the derived-list useMemos below have stable deps.
+const isResearchSource = (d: LocalDocument) => contentHasTag(d.content || '', 'research-source');
 import { Download, ExternalLink, Trash2, Cloud, CloudDownload, Plus, Minus, Library, BookOpen, FileUp, FolderUp, FileText, Image, Search, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { MagpieEmptyIllustration } from './BrandMark';
@@ -71,15 +76,18 @@ export const LoreView: React.FC<LoreViewProps> = ({
   }, [searchQuery]);
 
   const titleFilter = searchQuery.trim().toLowerCase();
-  const docsToShow = (showLore ? globalDocuments : documents)
-    .filter(d => !titleFilter || d.title.toLowerCase().includes(titleFilter));
-  const projectDocIds = new Set(documents.map(d => d.id));
 
-  // Machine-gathered research sources (a deep run captures dozens) collapse
-  // into one group so they don't bury the user's own curated documents.
-  const isResearchSource = (d: LocalDocument) => contentHasTag(d.content || '', 'research-source');
-  const curatedDocs = docsToShow.filter(d => !isResearchSource(d));
-  const researchSourceDocs = docsToShow.filter(isResearchSource);
+  // MEMOIZED — isResearchSource parses each doc's FULL content, so running the
+  // filters on every render (a research run's dozens of large docs) locked the
+  // main thread on unrelated re-renders (tab switch, progress toasts). Recompute
+  // only when the docs or the filter actually change.
+  const docsToShow = useMemo(
+    () => (showLore ? globalDocuments : documents).filter(d => !titleFilter || d.title.toLowerCase().includes(titleFilter)),
+    [showLore, globalDocuments, documents, titleFilter]
+  );
+  const projectDocIds = useMemo(() => new Set(documents.map(d => d.id)), [documents]);
+  const curatedDocs = useMemo(() => docsToShow.filter(d => !isResearchSource(d)), [docsToShow]);
+  const researchSourceDocs = useMemo(() => docsToShow.filter(isResearchSource), [docsToShow]);
 
   return (
     <div className="flex-1 flex flex-col overflow-hidden bg-background">
