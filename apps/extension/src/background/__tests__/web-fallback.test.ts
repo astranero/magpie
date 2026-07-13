@@ -107,52 +107,21 @@ describe('gatherWebSnippets (chat web fallback)', () => {
     expect(sources).toEqual([]);
   });
 
-  // Substantial prose so it clears the content-quality gate (≥200 chars/50 words).
-  const goodMcpText =
-    'The bookstore owner is confirmed as the antagonist in the official episode guide. ' +
-    'Production notes describe the reveal as the season’s central twist, planted through ' +
-    'flashbacks across the earlier episodes. The detective pieces it together after finding ' +
-    'an annotated first edition in the shop, and the motive traces back to a decades-old ' +
-    'betrayal involving the founding families of the town before the archive-room confrontation.';
-
-  function mcpFetch(mcpReplyForCall: any) {
-    return vi.fn(async (url: string, init?: any) => {
-      if (url.includes('s.jina.ai')) return { ok: true, headers: { get: () => 'application/json' }, json: async () => ({ data: [] }), text: async () => '{}', url } as any;
-      if (url.includes('duckduckgo') || url.includes('jina')) {
-        return { ok: true, headers: { get: () => 'text/html' }, text: async () => '<html>no results</html>', url } as any;
-      }
-      if (url.includes('mcp.example.test')) {
-        const body = JSON.parse(init.body);
-        const reply: any = { jsonrpc: '2.0', id: body.id };
-        if (body.method === 'initialize') reply.result = { capabilities: {} };
-        else if (body.method === 'tools/list') reply.result = { tools: [{ name: 'search_docs', description: 'search the knowledge base', inputSchema: { properties: { query: {} } } }] };
-        else if (body.method === 'tools/call') reply.result = mcpReplyForCall;
-        else reply.result = {};
-        return { ok: true, headers: { get: () => 'application/json' }, json: async () => reply, text: async () => JSON.stringify(reply), url } as any;
-      }
-      throw new Error(`unexpected fetch ${url}`);
-    });
-  }
-
-  it('merges substantial results from an enabled search MCP', async () => {
-    installChrome([{ id: 's1', name: 'DocsMCP', url: 'https://mcp.example.test/mcp', enabled: true }]);
-    (globalThis as any).fetch = mcpFetch({ content: [{ type: 'text', text: goodMcpText }] });
-
-    const { context, sources } = await gatherWebSnippets('is the bookstore guy the killer');
-    expect(sources.some(s => s.title.includes('DocsMCP'))).toBe(true);
-    expect(context).toContain('central twist');
-  });
-
-  it('does NOT cite an MCP tool that returns a protocol-error blob', async () => {
-    // Context7 leaked a raw JSON-RPC error as "content" — it must not become a source.
+  it('never calls enabled MCP servers — MCP belongs to /research, not the chat web fallback', async () => {
+    // Context7 (code-library docs) matched general chat questions and polluted
+    // answers, so the chat gather no longer touches MCP at all.
     installChrome([{ id: 's1', name: 'Context7', url: 'https://mcp.example.test/mcp', enabled: true }]);
-    const errBlob = '{"jsonrpc":"2.0","error":{"code":-32000,"message":"Server does not support GET requests"},"id":null}';
-    (globalThis as any).fetch = mcpFetch({ content: [{ type: 'text', text: errBlob }] });
+    const fetchMock = vi.fn(async (url: string) => {
+      if (url.includes('s.jina.ai')) return { ok: true, headers: { get: () => 'application/json' }, json: async () => ({ data: [] }), url } as any;
+      if (url.includes('duckduckgo') || url.includes('jina')) return { ok: true, headers: { get: () => 'text/html' }, text: async () => '<html>no results</html>', url } as any;
+      throw new Error(`unexpected fetch ${url}`); // an MCP call would land here
+    });
+    (globalThis as any).fetch = fetchMock;
 
-    const { context, sources } = await gatherWebSnippets('what is going on today in helsinki');
+    const { context, sources } = await gatherWebSnippets('what dramas should I know about');
     expect(sources).toEqual([]);
     expect(context).toBe('');
-    expect(context).not.toContain('jsonrpc');
+    expect(fetchMock.mock.calls.every(c => !String(c[0]).includes('mcp.example.test'))).toBe(true);
   });
 
   it('honors the deadline and returns fast when fetches hang', async () => {

@@ -465,37 +465,10 @@ export async function gatherWebSnippets(
     console.warn('[chat web] search/scrape failed', e);
   }
 
-  // 2) Enabled search MCPs — same discovery the research pipeline uses, one
-  //    search-like tool each so a chat turn stays quick.
-  try {
-    const servers = (await getMcpServers()).filter(s => s.enabled);
-    for (const server of servers) {
-      if (inner.aborted) break;
-      try {
-        const conn = new McpConnection(server);
-        const tools = (await conn.listTools()).filter(isSearchLikeTool).slice(0, 1);
-        for (const tool of tools) {
-          if (inner.aborted) break;
-          const args = argsForQuery(tool, query);
-          if (!args) continue; // schema exposes no fillable param — skip, don't error
-          onStatus?.(`Querying ${server.name}…`);
-          const text = (await conn.callTool(tool.name, args)).trim();
-          // A tool that returns a raw JSON-RPC / transport error (Context7 leaked
-          // "Server does not support GET requests" here) or thin, non-prose output
-          // must NOT become a cited source. Reject error blobs + gate on quality.
-          if (/"jsonrpc"\s*:|"error"\s*:\s*\{|does not support|method not (?:found|allowed)|invalid (?:request|params)/i.test(text)) continue;
-          if (!checkContentQuality(text).pass) continue;
-          const n = sources.length + 1;
-          sources.push({ title: `${server.name} · ${tool.name}`, url: server.url });
-          blocks.push(`[W${n}] ${server.name} — ${tool.name}\n${text.slice(0, PER_DOC_CHARS)}`);
-        }
-      } catch (e) {
-        console.warn(`[chat web] MCP ${server.name} failed`, e);
-      }
-    }
-  } catch (e) {
-    console.warn('[chat web] MCP search failed', e);
-  }
+  // NOTE: no MCP call here on purpose. Enabled MCPs (e.g. Context7 = code-library
+  // docs) matched general chat questions and polluted answers — Context7 fuzzy-
+  // matched "know" in "dramas I should know about" and returned code libraries.
+  // MCP tools belong in /research (runMcpAgent), not a quick chat web fallback.
   } finally {
     clearTimeout(deadline);
   }
