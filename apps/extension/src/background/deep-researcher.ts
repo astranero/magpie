@@ -10,7 +10,7 @@ import { getResearchLimits, getResearchDepth, getSynthesisCharBudget, getSourceQ
 import { generateBibtex } from '../lib/bibtex';
 import { harvestReferences, partitionRefs, HarvestedRef } from '../lib/reference-harvest';
 import { getMcpServers, McpConnection, isSearchLikeTool, argsForQuery } from '../lib/mcp-client';
-import { searchWithProviders, SearchHit } from '../lib/search-providers';
+import { searchWithProviders, jinaWebSearch, getSearchApiKeys, SearchHit } from '../lib/search-providers';
 import { rankPapers } from '../lib/paper-rank';
 import { semaphore } from '../lib/semaphore';
 
@@ -236,7 +236,20 @@ async function performWebSearch(query: string, signal?: AbortSignal): Promise<Se
       return sortedP.slice(0, activeLimits.urlsPerQuery);
     }
   } catch (e) {
-    console.warn('Search providers failed, falling back to scrape chain', e);
+    console.warn('Search providers failed, falling back to Jina search', e);
+  }
+
+  // Keyless default: Jina search — a real search API (clean, ranked results),
+  // vastly better than scraping DuckDuckGo. Optional free key raises its limit.
+  try {
+    const keys = await getSearchApiKeys();
+    const hits = await jinaWebSearch(query, activeLimits.urlsPerQuery * 2, signal, keys.jina);
+    if (hits.length > 0) {
+      const sorted = hits.sort((a, b) => (HIGH_QUALITY_DOMAINS.test(a.url) ? 0 : 1) - (HIGH_QUALITY_DOMAINS.test(b.url) ? 0 : 1));
+      return sorted.slice(0, activeLimits.urlsPerQuery);
+    }
+  } catch (e) {
+    console.warn('Jina search failed, falling back to DDG scrape chain', e);
   }
 
   const ddgUrl = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`;

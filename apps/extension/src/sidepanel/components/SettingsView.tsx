@@ -113,7 +113,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   };
   const persistSearchKeys = () => {
     const clean: SearchApiKeys = {};
-    (['tavily', 'brave', 'serper'] as const).forEach(k => {
+    (['tavily', 'brave', 'serper', 'jina'] as const).forEach(k => {
       const v = (searchKeys[k] || '').trim();
       if (v) clean[k] = v;
     });
@@ -433,7 +433,8 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
         {([
           ['tavily', 'Tavily', 'tvly-…'],
           ['brave', 'Brave Search', 'BSA…'],
-          ['serper', 'Serper (Google)', '40-char key']
+          ['serper', 'Serper (Google)', '40-char key'],
+          ['jina', 'Jina (optional — raises free limit)', 'jina_…']
         ] as const).map(([id, label, ph]) => (
           <div key={id} className="space-y-1.5">
             <label className="text-xs font-medium">{label}</label>
@@ -448,7 +449,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           </div>
         ))}
         <p className="text-[10px] text-muted-foreground font-mono leading-normal">
-          With a key set, /research and /deepresearch search through that provider instead of scraping DuckDuckGo — cleaner results, no anti-bot failures. Tried in the order listed; first configured provider wins. Keys stay in local extension storage and are only sent to the provider itself.
+          For the best results, link a search key: /research and /deepresearch then query that provider instead of scraping DuckDuckGo — cleaner, more relevant results, no anti-bot failures. Tavily and Brave have free tiers. Without any key, research falls back to keyless Jina search (rate-limited) then DuckDuckGo. Tried in the order listed; first configured provider wins. Keys stay in local extension storage and are only sent to the provider itself.
         </p>
       </Section>
 

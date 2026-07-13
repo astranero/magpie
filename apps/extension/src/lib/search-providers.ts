@@ -11,6 +11,9 @@ export interface SearchApiKeys {
   tavily?: string;
   brave?: string;
   serper?: string;
+  /** Jina AI key — optional. Jina search works keyless (rate-limited); a free
+   *  key (jina.ai) just raises the limit. */
+  jina?: string;
 }
 
 /** A search result. `snippet` is the provider's own summary — rich enough for
@@ -76,10 +79,33 @@ async function serperSearch(key: string, query: string, maxResults: number, sign
 }
 
 /**
+ * Jina AI search (s.jina.ai) — a real search API that works KEYLESS (rate
+ * limited; a free key raises the limit). Far better relevance/quality than
+ * scraping DuckDuckGo's anti-bot'd HTML, and it returns clean titles +
+ * descriptions. `X-Respond-With: no-content` skips full-page bodies so it's a
+ * fast SERP-style call feeding the snippet-first path. Used as the keyless
+ * default before the DDG fallback.
+ */
+export async function jinaWebSearch(query: string, maxResults: number, signal?: AbortSignal, key?: string): Promise<SearchHit[]> {
+  const headers: Record<string, string> = {
+    'Accept': 'application/json',
+    'X-Respond-With': 'no-content',
+  };
+  if (key) headers['Authorization'] = `Bearer ${key}`;
+  const res = await fetch(`https://s.jina.ai/?q=${encodeURIComponent(query)}`, { headers, signal });
+  if (!res.ok) throw new Error(`Jina search ${res.status}`);
+  const data = await res.json();
+  return (data?.data || [])
+    .slice(0, maxResults)
+    .map((r: any) => ({ url: r.url, title: r.title, snippet: r.description || r.content }))
+    .filter((h: SearchHit) => h.url);
+}
+
+/**
  * Search using the user's linked providers. Returns hits (with the provider's
  * own snippet) so callers can answer without fetching pages. Returns [] when no
  * provider is configured or every configured provider failed — callers fall
- * back to the built-in DDG scrape chain.
+ * back to Jina search, then the DDG scrape chain.
  */
 export async function searchWithProviders(query: string, maxResults: number, signal?: AbortSignal): Promise<SearchHit[]> {
   const keys = await getSearchApiKeys();
