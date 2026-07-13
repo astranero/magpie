@@ -15,7 +15,6 @@ import { Edit2, Trash2, FileText, Library, MessageSquare, SlidersHorizontal } fr
 import { LocalDocument, Project, Chat, ChatMessage, ResearchPlan, ResolvedCitation, TabInfo, View } from './types';
 import { LoreView } from './components/LoreView';
 import { LinkPreview, LinkPreviewState } from './components/LinkPreview';
-import { MagpieMark } from './components/BrandMark';
 
 // Brand import moved to top level, removing here due to TS import rule
 import { ChatView } from './components/ChatView';
@@ -1562,7 +1561,6 @@ export default function App() {
       {/* ── Functional Header (Topic) ── */}
       {view !== 'settings' && (
         <header className="card-rule flex items-center px-3.5 py-2.5 bg-card gap-2 shrink-0">
-          <MagpieMark size={18} className="shrink-0 text-foreground" />
           {editingProjectId ? (
             <input
               autoFocus
