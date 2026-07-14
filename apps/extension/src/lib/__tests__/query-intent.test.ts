@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { needsIntentResolution, formatHistoryForIntent, parseRepoUrl, selectTreePaths, formatTreeBlock, isStructureQuestion, questionKeywords, expandNavKeywords, isImplementationQuestion, findRepoUrlInText, isPageMetaQuestion, mentionsPageDeixis, overlapsPage, isLocationDependent, timezoneToPlace } from '../query-intent';
+import { needsIntentResolution, formatHistoryForIntent, parseRepoUrl, selectTreePaths, formatTreeBlock, isStructureQuestion, questionKeywords, expandNavKeywords, isImplementationQuestion, findRepoUrlInText, isPageMetaQuestion, mentionsPageDeixis, overlapsPage, isLocationDependent, timezoneToPlace, isEnumerationQuestion } from '../query-intent';
 
 describe('isStructureQuestion', () => {
   it('true for layout / file-location questions', () => {
@@ -76,6 +76,19 @@ describe('isPageMetaQuestion', () => {
       'how much is their pricing',
       'does it support webhooks',
     ]) expect(isPageMetaQuestion(q)).toBe(false);
+  });
+});
+
+describe('isEnumerationQuestion', () => {
+  it('true for list / "what are" / "other" asks', () => {
+    for (const q of ['what series are published', 'list all the shows', 'what are the products', 'what about other series', 'how many episodes are there']) {
+      expect(isEnumerationQuestion(q)).toBe(true);
+    }
+  });
+  it('false for single-fact asks', () => {
+    for (const q of ['what is the pricing', 'how does auth work', 'is today cold']) {
+      expect(isEnumerationQuestion(q)).toBe(false);
+    }
   });
 });
 

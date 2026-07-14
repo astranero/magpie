@@ -167,6 +167,15 @@ export function overlapsPage(q: string, pageText: string): boolean {
   return kw.some(k => hay.includes(k));
 }
 
+/** Is the question a LIST / enumeration ("what series are published?", "list all
+ *  X", "what other …")? These have weak per-chunk signal, so narrow semantic
+ *  retrieval on a long page returns only the featured item — the caller should
+ *  instead feed the page in reading order so the whole list is present. */
+const ENUM_RE = /\b(list|enumerate|catalog)\b|\bwhat\s+(are|other|all)\b|\bwhich\s+\w+\s+(are|were)\b|\bwhat\s+\w+s\s+(are|were|is)\b|\bhow\s+many\b|\b(other|more|remaining|additional|rest\s+of)\s+\w+/i;
+export function isEnumerationQuestion(q: string): boolean {
+  return ENUM_RE.test(q || '');
+}
+
 /** Is the question ABOUT the current page itself (summarize / overview / gist /
  *  "what's the consensus of this page") rather than a topic to go look up? These
  *  must never trigger link-following or a forward search — the answer is the

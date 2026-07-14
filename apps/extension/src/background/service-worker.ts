@@ -16,7 +16,7 @@ import { buildFrontmatter, hasFrontmatter } from '../lib/frontmatter';
 import { get as idbGet } from 'idb-keyval';
 import { runDeepResearch, generateSubQuestions, scrapeUrl, isJunkUrl, gatherWebSnippets } from './deep-researcher';
 import { harvestReferences } from '../lib/reference-harvest';
-import { needsIntentResolution, formatHistoryForIntent, parseRepoUrl, selectTreePaths, formatTreeBlock, isChitchat, isRefusalAnswer, isStructureQuestion, isImplementationQuestion, findRepoUrlInText, isPageMetaQuestion, questionKeywords, mentionsPageDeixis, overlapsPage, isLocationDependent, timezoneToPlace, RepoRef } from '../lib/query-intent';
+import { needsIntentResolution, formatHistoryForIntent, parseRepoUrl, selectTreePaths, formatTreeBlock, isChitchat, isRefusalAnswer, isStructureQuestion, isImplementationQuestion, findRepoUrlInText, isPageMetaQuestion, questionKeywords, mentionsPageDeixis, overlapsPage, isLocationDependent, timezoneToPlace, isEnumerationQuestion, RepoRef } from '../lib/query-intent';
 import { selectSemantic, fetchWithinBudget, parseRouterSelection, TOTAL_CTX_BUDGET, RerankFn, LinkRef, Selection } from '../lib/context-retrieval';
 import { getResearchLimits } from '../lib/research-limits';
 import { looksLikeBuildLog, extractLogHighlights } from '../lib/log-highlights';
@@ -561,6 +561,16 @@ const PAGE_RETRIEVAL_BUDGET = 22000;  // chars of the most-relevant sections on 
 async function selectPageMarkdown(ctx: PageContext, question: string): Promise<string> {
   const md = ctx.markdown;
   if (md.length <= MAX_PAGE_CHARS) return md;
+
+  // Enumeration/list questions ("what series are published?") match the featured
+  // item most strongly under semantic retrieval, so they'd get a slice, not the
+  // list. Feed the page in reading order (head-biased) up to the budget instead.
+  if (isEnumerationQuestion(question)) {
+    console.log('[PAGE] enumeration question — reading-order slice, not semantic retrieval');
+    return md.length > PAGE_RETRIEVAL_BUDGET
+      ? md.slice(0, PAGE_RETRIEVAL_BUDGET) + '\n\n[... rest of the page truncated ...]'
+      : md;
+  }
 
   try {
     const entry = pageContextCache.get(ctx.url);
