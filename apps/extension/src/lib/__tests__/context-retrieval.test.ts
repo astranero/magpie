@@ -4,7 +4,6 @@ import {
   parseRouterSelection,
   fetchWithinBudget,
   MAX_FILES,
-  MAX_LINKS,
   type LinkRef,
   type RerankFn,
 } from '../context-retrieval';
@@ -58,13 +57,20 @@ describe('selectSemantic — links', () => {
     expect(rerank).not.toHaveBeenCalled();
   });
 
-  it('reranks link labels when nothing lexically matches', async () => {
-    const sel = await selectSemantic('tell me about the documentation', [], links, substringRerank);
-    // "documentation" doesn't substring-match "Docs", so rerank scores are low → none.
-    // Use a word that the rerank stub matches:
-    const sel2 = await selectSemantic('where are the docs', [], links, substringRerank);
-    expect(sel2.links.map(l => l.url)).toContain('https://x.com/docs');
-    expect(sel.links.length).toBeLessThanOrEqual(MAX_LINKS);
+  it('follows via nav synonym (documentation → a "Docs" link), no rerank', async () => {
+    const rerank = vi.fn(substringRerank);
+    const sel = await selectSemantic('tell me about the documentation', [], links, rerank);
+    expect(sel.links.map(l => l.url)).toContain('https://x.com/docs');
+    expect(rerank).not.toHaveBeenCalled();
+  });
+
+  it('follows NOTHING for a non-navigational / meta question (no rerank pollution)', async () => {
+    const rerank = vi.fn(substringRerank);
+    // "consensus of this page" carries no navigational intent — must not drag in
+    // the nearest tangential link (the bug this guards against).
+    const sel = await selectSemantic('what is the consensus of this page', [], links, rerank);
+    expect(sel.links).toEqual([]);
+    expect(rerank).not.toHaveBeenCalled();
   });
 });
 

@@ -67,8 +67,11 @@ async function rankBySemantic<T>(
  * file is guessed (path names rarely encode deep concepts; that's the agentic
  * strategy's job).
  *
- * Links: a question keyword on a link's text/href (pricing → "Pricing") is the
- * obvious next hop — follow it with no reranker round-trip; else rerank labels.
+ * Links: a question keyword (nav-expanded, so pricing → "Plans"/"Billing") on a
+ * link's text/href is the obvious next hop — follow it. We deliberately do NOT
+ * rerank-follow when nothing lexically matches: a question with no navigational
+ * intent ("summarize this page", "what's the consensus?") would otherwise drag
+ * in the nearest tangential links and pollute the answer with their content.
  */
 export async function selectSemantic(
   question: string,
@@ -89,12 +92,11 @@ export async function selectSemantic(
   }
 
   // ── Links ──
-  // Expand to navigational synonyms so a pricing question follows a "Plans" link.
+  // Lexical only, expanded to navigational synonyms (pricing → "Plans"/"Billing").
+  // No rerank fallback on purpose — see the doc comment: following the nearest
+  // link for a non-navigational question is what polluted answers.
   const linkKeywords = keywords.length ? expandNavKeywords(keywords) : keywords;
-  let picked: LinkRef[] = linkKeywords.length ? links.filter(l => lexicalLinkMatch(l, linkKeywords)) : [];
-  if (picked.length === 0) {
-    picked = await rankBySemantic(question, links, l => `${l.anchorText || ''} ${l.url}`, rerank, MAX_LINKS);
-  }
+  const picked: LinkRef[] = linkKeywords.length ? links.filter(l => lexicalLinkMatch(l, linkKeywords)) : [];
   const chosenLinks = picked.slice(0, MAX_LINKS).map(l => ({ url: l.url, title: l.anchorText || l.url }));
 
   // ── Combined cap: files first, then links up to MAX_SELECTED ──
