@@ -136,12 +136,43 @@ export default function App() {
   useEffect(() => {
     if (typeof chrome === 'undefined' || !chrome.storage) return;
     loadCustomSkills().then(setCustomCommands);
-    const onChange = (changes: Record<string, unknown>, area: string) => {
-      if (area === 'local' && 'customSkills' in changes) loadCustomSkills().then(setCustomCommands);
+    // Adopt the active session another sidepanel instance switched to (idempotent
+    // on mount too), so two tabs/windows show the same session.
+    chrome.storage.local.get(['araActiveProjectId', 'araActiveChatId']).then((r: any) => {
+      if (typeof r.araActiveProjectId === 'string' && r.araActiveProjectId) setActiveProjectId(r.araActiveProjectId);
+      if (typeof r.araActiveChatId === 'string' && r.araActiveChatId) setActiveChatId(r.araActiveChatId);
+    });
+    const onChange = (changes: Record<string, any>, area: string) => {
+      if (area !== 'local') return;
+      if ('customSkills' in changes) loadCustomSkills().then(setCustomCommands);
+      const p = changes.araActiveProjectId?.newValue;
+      if (typeof p === 'string' && p) setActiveProjectId(prev => (prev === p ? prev : p));
+      const c = changes.araActiveChatId?.newValue;
+      if (typeof c === 'string' && c) setActiveChatId(prev => (prev === c ? prev : c));
     };
     chrome.storage.onChanged.addListener(onChange);
     return () => chrome.storage.onChanged.removeListener(onChange);
   }, []);
+
+  // When this instance becomes visible again, re-pull the current session's
+  // content/status from the shared source (DB + worker) — another instance may
+  // have advanced the chat or a research run while we were hidden.
+  useEffect(() => {
+    const onVis = () => {
+      if (document.hidden) return;
+      if (activeChatId) loadChatHistory(activeChatId);
+      if (activeProjectId) loadDocuments(activeProjectId);
+      msg('GET_RESEARCH_STATUS').then((res: any) => {
+        const job = res?.job;
+        if (res?.success && job) {
+          if (Array.isArray(job.logs) && job.logs.length) setResearchLogs(prev => ({ ...prev, [job.projectId]: job.logs }));
+          if (res.running) setResearching(prev => ({ ...prev, [job.projectId]: true }));
+        }
+      }).catch(() => {});
+    };
+    document.addEventListener('visibilitychange', onVis);
+    return () => document.removeEventListener('visibilitychange', onVis);
+  }, [activeProjectId, activeChatId]);
 
   // Drive
   const [authed, setAuthed] = useState(false);
@@ -596,6 +627,10 @@ export default function App() {
   useEffect(() => {
     if (activeProjectId) {
       set('ara-active-project-id', activeProjectId).catch(console.error);
+      // Mirror the active session through chrome.storage.local so a second
+      // sidepanel instance (another tab/window) follows it — chrome.storage
+      // fires onChanged across contexts; idb-keyval does not.
+      if (typeof chrome !== 'undefined' && chrome.storage) chrome.storage.local.set({ araActiveProjectId: activeProjectId });
       loadDocuments(activeProjectId);
       loadChats(activeProjectId);
     }
@@ -604,6 +639,7 @@ export default function App() {
   // Load chat history whenever the active chat changes
   useEffect(() => {
     if (activeChatId) {
+      if (typeof chrome !== 'undefined' && chrome.storage) chrome.storage.local.set({ araActiveChatId: activeChatId });
       loadChatHistory(activeChatId);
     }
   }, [activeChatId]);
