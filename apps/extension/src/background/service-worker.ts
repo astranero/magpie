@@ -24,6 +24,7 @@ import { addChunksToVectorStore, searchSessionChunks, resetSessionIndex, resetAl
 import { replaceChunksForDoc } from '../lib/db';
 import { pdfUrlToBody, pdfOpfsToBody, pdfBase64ToBody, ensureOffscreen as ensureOffscreenDoc } from '../lib/pdf-parser';
 import { setEnsureOffscreen, sendToOffscreen } from '../lib/offscreen-client';
+import { crumb, dumpCrashLog, installCrashHandlers } from '../lib/crash-log';
 import { getProviderSettings, chatWithCustom, chatWithCustomStream, handleFetchCustomModels, chatWithTools, ToolDef } from './llm-client';
 import { handleSearchLibrary, handleRecallDocs } from './library-handlers';
 import { handleLinkDocument, handleUnlinkDocument, handleListDocuments, handleGetDocument, handleDeleteDocument, handleGetDocumentCount, handleUpdateDocumentSelection } from './document-handlers';
@@ -81,6 +82,13 @@ const abortControllers = new Map<string, AbortController>();
 // sidepanel that mounts mid-answer (a per-tab panel just switched to) pull the
 // in-flight text and keep streaming, instead of missing the whole answer.
 const liveChatStreams = new Map<string, string>();
+
+// Crash breadcrumbs: route uncaught errors here, and on startup print whatever
+// was persisted before the previous run ended — so a reload after a crash shows
+// what the worker/offscreen was doing when it died.
+installCrashHandlers('sw');
+dumpCrashLog('[Magpie crashlog]').catch(() => {});
+crumb('sw', 'service worker started');
 
 // ─────────────────────────────────────────────
 // Side Panel — toggle on icon click
@@ -2579,6 +2587,7 @@ async function executeResearch({ projectId, chatId, topic, effectiveTopic, mode 
   let lastProgressAt = Date.now();
   const onProgress = (status: string) => {
     lastProgressAt = Date.now();
+    crumb('research', status.slice(0, 200));  // persists — the last one before a crash survives
     chrome.runtime.sendMessage({ action: 'DEEP_RESEARCH_LOG', projectId, status }).catch(() => {});
     appendJobLog(status).catch(() => {});
   };

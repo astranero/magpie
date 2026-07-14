@@ -11,8 +11,10 @@ import * as pdfjsLib from 'pdfjs-dist';
 // Vite resolves this to a bundled worker file URL.
 import pdfWorkerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
 import { buildPageMarkdown, TextBlock } from '../lib/pdf-layout';
+import { crumb, installCrashHandlers } from '../lib/crash-log';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
+installCrashHandlers('offscreen');
 
 // ── Inference worker proxy ──
 // Embeddings + re-ranking run in a dedicated Worker so their ONNX inference
@@ -48,6 +50,7 @@ function spawnInferenceWorker(): void {
   };
   inferenceWorker.onerror = (e) => {
     console.warn('[offscreen] inference worker crashed:', e.message);
+    crumb('offscreen', 'inference worker crashed', e.message || 'unknown');
     for (const [, p] of workerPending) p.reject(new Error(e.message || 'inference worker crashed'));
     workerPending.clear();
     try { inferenceWorker.terminate(); } catch { /* already gone */ }
@@ -84,11 +87,15 @@ function callWorker<T>(msg: Record<string, unknown>): Promise<T> {
   });
 }
 
-const generateEmbeddings = (texts: string[]): Promise<number[][]> =>
-  callWorker<{ embeddings: number[][] }>({ type: 'embed', texts }).then(r => r.embeddings);
+const generateEmbeddings = (texts: string[]): Promise<number[][]> => {
+  crumb('offscreen', 'embed start', { n: texts.length, chars: texts.reduce((a, t) => a + t.length, 0) });
+  return callWorker<{ embeddings: number[][] }>({ type: 'embed', texts }).then(r => r.embeddings);
+};
 
-const rerank = (query: string, passages: string[]): Promise<number[]> =>
-  callWorker<{ scores: number[] }>({ type: 'rerank', query, passages }).then(r => r.scores);
+const rerank = (query: string, passages: string[]): Promise<number[]> => {
+  crumb('offscreen', 'rerank start', { n: passages.length });
+  return callWorker<{ scores: number[] }>({ type: 'rerank', query, passages }).then(r => r.scores);
+};
 
 function base64ToUint8Array(b64: string): Uint8Array {
   const binary = atob(b64);
@@ -144,6 +151,7 @@ async function parsePdfUrl(url: string): Promise<{ pages: string[]; imagePages: 
     if (len > 0) sizeMb = len / (1024 * 1024);
   } catch { /* size probe optional */ }
   if (sizeMb > MAX_PDF_URL_MB) throw new Error(`PDF too large to parse safely (${Math.round(sizeMb)} MB)`);
+  crumb('offscreen', 'pdf parse start', { url: url.slice(0, 120), sizeMb: Math.round(sizeMb) });
   // 30s floor + 3s per MB, capped at 5 min
   const timeoutMs = Math.min(300000, 30000 + Math.ceil(sizeMb) * 3000);
   const res = await fetch(url, { redirect: 'follow', signal: AbortSignal.timeout(timeoutMs) });
@@ -255,6 +263,7 @@ async function parsePdfData(data: Uint8Array): Promise<{ pages: string[]; imageP
 
 chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
   if (request?.action === 'OFFSCREEN_PARSE_PDF') {
+    crumb('offscreen', 'pdf parse (base64) start', { base64Mb: Math.round((request.base64 as string || '').length / 1.33 / 1024 / 1024) });
     parsePdf(request.base64 as string)
       .then(result => sendResponse({ ok: true, ...result }))
       .catch(err => sendResponse({ ok: false, error: err instanceof Error ? err.message : String(err) }));

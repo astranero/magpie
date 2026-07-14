@@ -6,6 +6,7 @@ import { Section } from './Section';
 import { CustomSkill, sanitizeCustomSkill } from '../../lib/commands';
 import { McpServerConfig, McpConnection, getMcpServers, saveMcpServers } from '../../lib/mcp-client';
 import { SearchApiKeys, getSearchApiKeys, saveSearchApiKeys } from '../../lib/search-providers';
+import { getCrashLog, clearCrashLog, formatCrashLog } from '../../lib/crash-log';
 
 interface SettingsViewProps {
   customUrl: string;
@@ -57,6 +58,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   // How chat gathers extra detail from the open page (repo files / links).
   const [pageCtxStrategy, setPageCtxStrategy] = useState<'semantic' | 'router' | 'agentic'>('semantic');
   const [inferenceDevice, setInferenceDevice] = useState<'wasm' | 'webgpu'>('wasm');
+  const [diagStatus, setDiagStatus] = useState('');
   const [userLocation, setUserLocation] = useState('');
   const tzGuess = (() => { try { return (Intl.DateTimeFormat().resolvedOptions().timeZone || '').split('/').pop()?.replace(/_/g, ' ') || ''; } catch { return ''; } })();
   useEffect(() => {
@@ -358,6 +360,34 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           </Select>
           <p className="text-[10px] text-muted-foreground font-mono leading-normal">
             How on-device embeddings/re-ranking run. WASM is CPU-bound but memory-stable. WebGPU is faster but its GPU memory can accumulate on a heavy deep-research run and silently crash the extension — pick it only if your runs are small. Applies immediately.
+          </p>
+        </div>
+
+        <div className="space-y-1.5">
+          <label className="text-xs font-medium">Diagnostics</label>
+          <div className="flex gap-2 items-center">
+            <button
+              className="flex-1 h-8 text-xs font-medium rounded-lg border border-border hover:bg-muted transition-colors"
+              onClick={async () => {
+                const log = await getCrashLog();
+                const text = log.length ? formatCrashLog(log) : '(no breadcrumbs recorded)';
+                try { await navigator.clipboard.writeText(text); setDiagStatus(`Copied ${log.length} breadcrumb(s)`); }
+                catch { setDiagStatus('Copy failed'); }
+                setTimeout(() => setDiagStatus(''), 3000);
+              }}
+            >
+              Copy crash log
+            </button>
+            <button
+              className="h-8 px-3 text-xs font-medium rounded-lg text-muted-foreground hover:text-foreground"
+              onClick={async () => { await clearCrashLog(); setDiagStatus('Cleared'); setTimeout(() => setDiagStatus(''), 2000); }}
+            >
+              Clear
+            </button>
+          </div>
+          {diagStatus && <p className="text-[10px] text-primary font-mono">{diagStatus}</p>}
+          <p className="text-[10px] text-muted-foreground font-mono leading-normal">
+            Breadcrumbs of what the extension was doing, persisted so they survive a crash. After a crash, click Copy and share it to pin down the cause. (Also printed to the service-worker console on startup.)
           </p>
         </div>
       </Section>
