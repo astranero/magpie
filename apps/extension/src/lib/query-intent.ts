@@ -132,6 +132,23 @@ export function isImplementationQuestion(q: string): boolean {
   return IMPL_RE.test(q || '');
 }
 
+/** Is the question location- or "near me"-dependent (weather, local info)? Used
+ *  to decide whether to inject the user's place into a web search query. */
+const LOCATION_RE = /\b(weather|forecast|temperature|climate|humidity|rain|snow|sunny|near\s?me|nearby|around\s+here|local(?:ly)?|closest|nearest|restaurants?|cafes?|coffee|bars?|hotels?|traffic|directions|things\s+to\s+do|open\s+now|gas\s+prices?|my\s+area)\b/i;
+export function isLocationDependent(q: string): boolean {
+  return LOCATION_RE.test(q || '');
+}
+
+/** Best-effort place name from an IANA timezone: "Europe/Helsinki" → "Helsinki",
+ *  "America/Argentina/Buenos_Aires" → "Buenos Aires". A zero-config location hint
+ *  when the user hasn't set one explicitly. Empty for non-geographic zones. */
+export function timezoneToPlace(tz: string): string {
+  if (!tz || !tz.includes('/')) return '';
+  const city = tz.split('/').pop() || '';
+  if (/^(UTC|GMT|Etc|Unknown)$/i.test(city)) return '';
+  return city.replace(/_/g, ' ').trim();
+}
+
 // Strong page-referential phrases ("this project", "the docs", "on this site").
 // Deliberately NOT bare pronouns — "is it cold today?" uses "it" expletively and
 // must not be mistaken for a page question.

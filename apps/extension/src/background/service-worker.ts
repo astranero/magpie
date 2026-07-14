@@ -16,7 +16,7 @@ import { buildFrontmatter, hasFrontmatter } from '../lib/frontmatter';
 import { get as idbGet } from 'idb-keyval';
 import { runDeepResearch, generateSubQuestions, scrapeUrl, isJunkUrl, gatherWebSnippets } from './deep-researcher';
 import { harvestReferences } from '../lib/reference-harvest';
-import { needsIntentResolution, formatHistoryForIntent, parseRepoUrl, selectTreePaths, formatTreeBlock, isChitchat, isRefusalAnswer, isStructureQuestion, isImplementationQuestion, findRepoUrlInText, isPageMetaQuestion, questionKeywords, mentionsPageDeixis, overlapsPage, RepoRef } from '../lib/query-intent';
+import { needsIntentResolution, formatHistoryForIntent, parseRepoUrl, selectTreePaths, formatTreeBlock, isChitchat, isRefusalAnswer, isStructureQuestion, isImplementationQuestion, findRepoUrlInText, isPageMetaQuestion, questionKeywords, mentionsPageDeixis, overlapsPage, isLocationDependent, timezoneToPlace, RepoRef } from '../lib/query-intent';
 import { selectSemantic, fetchWithinBudget, parseRouterSelection, TOTAL_CTX_BUDGET, RerankFn, LinkRef, Selection } from '../lib/context-retrieval';
 import { getResearchLimits } from '../lib/research-limits';
 import { looksLikeBuildLog, extractLogHighlights } from '../lib/log-highlights';
@@ -1138,6 +1138,19 @@ async function buildChatRequest(chatId: string, projectId: string, prompt: strin
     ? `--- WORKSPACE INSTRUCTIONS (always follow these for this workspace) ---\n${project.rules.trim()}\n--- END WORKSPACE INSTRUCTIONS ---\n\n`
     : '';
 
+  // User locale context — an approximate place (explicit setting, else derived
+  // from the system timezone) + timezone, so location/time-dependent questions
+  // ("weather today", "near me") use the user's own region instead of the search
+  // provider's IP geolocation. Coarse by design (city/region, never precise).
+  const { userLocation } = await chrome.storage.local.get('userLocation');
+  const tz = (() => { try { return Intl.DateTimeFormat().resolvedOptions().timeZone || ''; } catch { return ''; } })();
+  const place = String(userLocation || '').trim() || timezoneToPlace(tz);
+  const localeBlock = place
+    ? `--- USER CONTEXT (use for location/time-dependent questions; don't ask the user where they are) ---\n` +
+      `Approximate location: ${place}${userLocation ? '' : ' (inferred from the system timezone — flag the assumption if relevant)'}.` +
+      `${tz ? ` Timezone: ${tz}.` : ''}\n--- END USER CONTEXT ---\n\n`
+    : '';
+
   // History first: intent resolution needs it (retrieved BEFORE the new user
   // message is saved, so it holds only prior turns).
   const history = await getChatHistory(chatId);
@@ -1298,7 +1311,10 @@ async function buildChatRequest(chatId: string, projectId: string, prompt: strin
     if (await isChatWebFallbackEnabled()) {
       onStatus?.('Searching the web…');
       try {
-        web = await gatherWebSnippets(effectiveQuery, { signal, onStatus });
+        // Localize the query so "weather today" resolves to the user's region,
+        // not the search provider's server IP.
+        const webQuery = place && isLocationDependent(effectiveQuery) ? `${effectiveQuery} ${place}` : effectiveQuery;
+        web = await gatherWebSnippets(webQuery, { signal, onStatus });
       } catch (e) {
         if (signal.aborted) throw e;
         console.warn('[chat web] fallback failed', e);
@@ -1467,7 +1483,7 @@ async function buildChatRequest(chatId: string, projectId: string, prompt: strin
   }
 
   onStatus?.('Writing the answer…');
-  return { systemPrompt: rulesBlock + systemPrompt, formattedHistory, linkedPages, grounded };
+  return { systemPrompt: rulesBlock + localeBlock + systemPrompt, formattedHistory, linkedPages, grounded };
 }
 
 /**

@@ -56,9 +56,11 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   const [webFallback, setWebFallback] = useState(true);
   // How chat gathers extra detail from the open page (repo files / links).
   const [pageCtxStrategy, setPageCtxStrategy] = useState<'semantic' | 'router' | 'agentic'>('semantic');
+  const [userLocation, setUserLocation] = useState('');
+  const tzGuess = (() => { try { return (Intl.DateTimeFormat().resolvedOptions().timeZone || '').split('/').pop()?.replace(/_/g, ' ') || ''; } catch { return ''; } })();
   useEffect(() => {
     if (typeof chrome === 'undefined' || !chrome.storage) return;
-    chrome.storage.local.get(['researchDepth', 'contextTokens', 's2ApiKey', 'sourceQuality', 'academicDepth', 'chatWebFallback', 'pageContextStrategy']).then(r => {
+    chrome.storage.local.get(['researchDepth', 'contextTokens', 's2ApiKey', 'sourceQuality', 'academicDepth', 'chatWebFallback', 'pageContextStrategy', 'userLocation']).then(r => {
       if (r.researchDepth === 'deep' || r.researchDepth === 'exhaustive') setResearchDepth(r.researchDepth);
       if (r.sourceQuality === 'high') setSourceQuality('high');
       if (r.academicDepth === 'abstract') setAcademicDepth('abstract');
@@ -66,6 +68,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
       if (r.s2ApiKey) setS2ApiKey(r.s2ApiKey);
       setWebFallback(r.chatWebFallback !== false);
       if (r.pageContextStrategy === 'router' || r.pageContextStrategy === 'agentic') setPageCtxStrategy(r.pageContextStrategy);
+      if (typeof r.userLocation === 'string') setUserLocation(r.userLocation);
     });
   }, []);
   const saveResearchSetting = (patch: Record<string, unknown>) => {
@@ -322,6 +325,21 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           </Select>
           <p className="text-[10px] text-muted-foreground font-mono leading-normal">
             When you chat about an open page (a repo, a product site), how the assistant decides which files or sub-pages to open. Semantic is fast and reliable; Router and Agentic reason more but add model calls. Falls back to Semantic if a smarter mode fails.
+          </p>
+        </div>
+
+        <div className="space-y-1.5">
+          <label className="text-xs font-medium">Your location</label>
+          <input
+            type="text"
+            value={userLocation}
+            onChange={(e) => setUserLocation(e.target.value)}
+            onBlur={() => saveResearchSetting({ userLocation: userLocation.trim() })}
+            placeholder={tzGuess ? `e.g. ${tzGuess}` : 'City, region or country'}
+            className="w-full rounded-lg border border-border bg-background px-3 py-2 text-xs font-mono"
+          />
+          <p className="text-[10px] text-muted-foreground font-mono leading-normal">
+            Used for location- or time-dependent questions (weather, “near me”, local info). Leave blank to infer an approximate region from your system timezone{tzGuess ? ` (${tzGuess})` : ''}. Kept on-device; only added to a web query when the question is location-dependent.
           </p>
         </div>
       </Section>

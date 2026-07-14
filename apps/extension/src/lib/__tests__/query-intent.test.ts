@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { needsIntentResolution, formatHistoryForIntent, parseRepoUrl, selectTreePaths, formatTreeBlock, isStructureQuestion, questionKeywords, expandNavKeywords, isImplementationQuestion, findRepoUrlInText, isPageMetaQuestion, mentionsPageDeixis, overlapsPage } from '../query-intent';
+import { needsIntentResolution, formatHistoryForIntent, parseRepoUrl, selectTreePaths, formatTreeBlock, isStructureQuestion, questionKeywords, expandNavKeywords, isImplementationQuestion, findRepoUrlInText, isPageMetaQuestion, mentionsPageDeixis, overlapsPage, isLocationDependent, timezoneToPlace } from '../query-intent';
 
 describe('isStructureQuestion', () => {
   it('true for layout / file-location questions', () => {
@@ -97,6 +97,25 @@ describe('intent router heuristics', () => {
     expect(overlapsPage('what can you say about pricing', page)).toBe(true);
     expect(overlapsPage('is today cold', page)).toBe(false);
     expect(overlapsPage('what about this', page)).toBe(false); // only stopwords → no overlap
+  });
+});
+
+describe('location awareness', () => {
+  it('isLocationDependent: true for weather / near-me / local asks', () => {
+    for (const q of ['what is the weather like today', 'coffee near me', 'best restaurants nearby', 'traffic right now']) {
+      expect(isLocationDependent(q)).toBe(true);
+    }
+  });
+  it('isLocationDependent: false for non-local asks', () => {
+    for (const q of ['what is this repo about', 'explain OAuth', 'summarize the page']) {
+      expect(isLocationDependent(q)).toBe(false);
+    }
+  });
+  it('timezoneToPlace: derives a city from an IANA zone', () => {
+    expect(timezoneToPlace('Europe/Helsinki')).toBe('Helsinki');
+    expect(timezoneToPlace('America/Argentina/Buenos_Aires')).toBe('Buenos Aires');
+    expect(timezoneToPlace('UTC')).toBe('');
+    expect(timezoneToPlace('')).toBe('');
   });
 });
 
