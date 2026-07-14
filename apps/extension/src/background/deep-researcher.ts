@@ -181,37 +181,38 @@ async function fetchTextInner(url: string, signal: AbortSignal): Promise<string>
     throw new Error(`Unsupported content-type: ${type}`);
   }
 
-  // Reject an oversize body by its declared length before downloading it.
-  const declared = Number(res.headers.get('content-length') || 0);
-  if (declared > MAX_FETCH_BYTES) {
-    try { await res.body?.cancel(); } catch { /* ignore */ }
-    throw new Error(`Response too large (${Math.round(declared / 1024 / 1024)} MB)`);
-  }
-
-  // content-length is often absent (chunked / streamed), so the real guard is a
-  // hard byte cap while reading: a runaway body is aborted before it can buffer
-  // into worker memory and crash the process.
+  // Read the body in chunks and KEEP only the first MAX_FETCH_BYTES, then stop.
+  // We don't reject an oversize page — we use the partial content (the article is
+  // usually early, and DOMParser/Readability tolerate truncated HTML), so a heavy
+  // page contributes what it can instead of being dropped. The point is that the
+  // service worker never buffers the WHOLE body: that's what OOM-killed it.
+  // (content-length can't be trusted — it's absent on chunked/streamed responses,
+  // which is exactly the runaway case — so the streaming byte cap is the guard.)
   if (!res.body) return res.text();
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
   let out = '';
   let bytes = 0;
+  let truncated = false;
   try {
     for (;;) {
       const { done, value } = await reader.read();
       if (done) break;
-      if (value) {
-        bytes += value.byteLength;
-        if (bytes > MAX_FETCH_BYTES) {
-          throw new Error(`Response exceeded ${MAX_FETCH_BYTES / 1024 / 1024} MB cap`);
-        }
-        out += decoder.decode(value, { stream: true });
+      if (!value) continue;
+      if (bytes + value.byteLength > MAX_FETCH_BYTES) {
+        // Take only the remaining allowance from this chunk, then stop.
+        out += decoder.decode(value.subarray(0, MAX_FETCH_BYTES - bytes), { stream: true });
+        truncated = true;
+        break;
       }
+      bytes += value.byteLength;
+      out += decoder.decode(value, { stream: true });
     }
     out += decoder.decode();
   } finally {
     try { await reader.cancel(); } catch { /* ignore */ }
   }
+  if (truncated) console.warn(`[fetch] ${url} truncated at ${MAX_FETCH_BYTES / 1024 / 1024} MB — using partial content`);
   return out;
 }
 
@@ -778,13 +779,12 @@ async function scrapeUrlList(
   signal: AbortSignal | undefined,
   label: AgentLabel
 ): Promise<AgentOutcome> {
-  // Per-STAGE source budget: totalSourcesCap is the whole-run target, spread
-  // across `rounds` stages (120 over 6 → ~20/stage), hard-capped at 25. This
-  // keeps each gather burst small enough to reach the stage checkpoint within one
-  // MV3 service-worker lifetime; breadth accrues across rounds, and a recycle
-  // resumes forward instead of restarting the stage.
-  const perStage = Math.ceil(activeLimits.totalSourcesCap / Math.max(1, activeLimits.rounds));
-  const cap = Math.min(25, Math.max(1, perStage));
+  // Per-STAGE source cap: 45 (or the depth's total, whichever is smaller — so
+  // standard's 40 is unchanged). Keeps each gather burst bounded enough to reach
+  // the stage checkpoint within one MV3 worker lifetime while still gathering
+  // broadly; breadth also accrues across the run's rounds. Safe at 45 now that
+  // oversize page bodies can't OOM the worker (see fetchTextInner's byte cap).
+  const cap = Math.min(45, activeLimits.totalSourcesCap);
   const urlList = [...new Set(urls)].filter(u => !isJunkUrl(u)).slice(0, cap);
   const sources: SourceRecord[] = [];
   const docIds: string[] = [];
