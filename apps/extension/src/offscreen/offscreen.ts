@@ -189,19 +189,34 @@ async function getEmbedder() {
   return embedder;
 }
 
+// A std::bad_alloc from OrtRun leaves the WASM heap/session wedged — every
+// subsequent call fails too. Tear the pipeline down so the next getEmbedder()
+// rebuilds a fresh session on a clean heap instead of limping.
+async function resetEmbedder(): Promise<void> {
+  try { await embedder?.dispose?.(); } catch { /* best-effort */ }
+  embedder = null;
+}
+
+// all-MiniLM context window is 256 tokens, but the tokenizer's model_max_length
+// is the "no limit" sentinel, so the pipeline's internal truncation is a no-op.
+// A long text then tokenizes to thousands of tokens, the whole batch pads to it,
+// and OrtRun OOMs (std::bad_alloc). Cap chars so the sequence length — and thus
+// peak allocation — is actually bounded. ~1000 chars stays under 256 tokens for
+// English; the tail we drop is retrieval noise, not signal.
+const MAX_EMBED_CHARS = 1000;
+const capText = (t: string) => (t.length > MAX_EMBED_CHARS ? t.slice(0, MAX_EMBED_CHARS) : t);
+
 async function generateEmbeddings(texts: string[]): Promise<number[][]> {
-  const extractor = await getEmbedder();
   if (texts.length === 0) return [];
-  
-  // Peak ONNX memory per batch ≈ batch_size × LONGEST-sequence length (every
-  // text is padded to the max), so 256 was no limit at all — one long chunk
-  // in a big batch still blew the WASM heap (std::bad_alloc from OrtRun).
-  // 8 bounds peak allocation regardless of document size; throughput loss is
-  // negligible next to model inference time.
+
+  // 8 caps how many capped sequences are padded together per OrtRun; throughput
+  // loss is negligible next to model inference time.
   const MAX_BATCH_SIZE = 8;
-  
-  const processBatch = async (batchTexts: string[]): Promise<number[][]> => {
+
+  const processBatch = async (rawBatch: string[]): Promise<number[][]> => {
+    const batchTexts = rawBatch.map(capText);
     try {
+      const extractor = await getEmbedder();
       const output = await extractor(batchTexts, { pooling: 'mean', normalize: true });
       const data = output.data as Float32Array;
       const dim = output.dims?.[1] ?? (data.length / batchTexts.length);
@@ -231,21 +246,34 @@ async function generateEmbeddings(texts: string[]): Promise<number[][]> {
       }
       return embeddings;
     } catch (batchErr) {
-      // fall back to sequential if batched call isn't supported for this model or fails
-      if (batchErr instanceof Error && batchErr.message.includes('Integer overflow')) {
-        console.warn('Batched embedding failed due to integer overflow, falling back to sequential:', batchErr);
-      } else {
-        console.warn('Batched embedding failed, falling back to sequential:', batchErr);
-      }
-      
+      // A batch OOM wedges the session — rebuild before the per-text retries,
+      // otherwise they all fail on the same poisoned heap.
+      console.warn('Batched embedding failed, resetting embedder and falling back to sequential:', batchErr);
+      await resetEmbedder();
+
+      // One text at a time bounds peak allocation to a single capped sequence.
+      // We do NOT substitute a zero vector on failure: a zero embedding has
+      // cosine 0 with every query, so it isn't just "missing" — it silently
+      // corrupts retrieval and never surfaces. Throw instead; the caller
+      // (saveDocument) then stores the chunks vector-less (keyword-searchable)
+      // and can be re-indexed later.
       const embeddings: number[][] = [];
       for (const text of batchTexts) {
         try {
+          const extractor = await getEmbedder();
           const output = await extractor(text, { pooling: 'mean', normalize: true });
           embeddings.push(Array.from(output.data as Float32Array));
         } catch (e) {
-          console.error('Failed to generate embedding for text:', text, e);
-          embeddings.push(new Array(384).fill(0)); // default dimension from model
+          // Retry this one text once on a fresh session before giving up.
+          await resetEmbedder();
+          try {
+            const extractor = await getEmbedder();
+            const output = await extractor(text, { pooling: 'mean', normalize: true });
+            embeddings.push(Array.from(output.data as Float32Array));
+          } catch (e2) {
+            console.error('Failed to generate embedding after reset+retry:', e2);
+            throw e2;
+          }
         }
       }
       return embeddings;
