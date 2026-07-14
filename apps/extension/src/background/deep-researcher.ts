@@ -412,9 +412,18 @@ export async function scrapeUrl(url: string, signal?: AbortSignal): Promise<Pars
  */
 export async function gatherWebSnippets(
   query: string,
-  opts: { signal?: AbortSignal; onStatus?: (s: string) => void; deadlineMs?: number } = {}
+  opts: { signal?: AbortSignal; onStatus?: (s: string) => void; deadlineMs?: number; restrictToHost?: string } = {}
 ): Promise<{ context: string; sources: { title: string; url: string }[] }> {
-  const { signal, onStatus, deadlineMs = 10000 } = opts;
+  const { signal, onStatus, deadlineMs = 10000, restrictToHost } = opts;
+  // Same-site "forward check": keep only results on the given host (e.g. a docs
+  // site the user is already reading) so the answer stays within that source
+  // instead of pulling the open web. `site:` also nudges providers that honor it.
+  const onHost = (u: string): boolean => {
+    if (!restrictToHost) return true;
+    try { return new URL(u).hostname.replace(/^www\./, '').endsWith(restrictToHost.replace(/^www\./, '')); }
+    catch { return false; }
+  };
+  if (restrictToHost) query = `site:${restrictToHost} ${query}`;
   const MAX_FETCH = 2;        // top results to actually scrape (chat wants speed)
   const PER_DOC_CHARS = 1500; // excerpt cap per source — enough to answer, cheap to send
   const blocks: string[] = [];
@@ -438,7 +447,7 @@ export async function gatherWebSnippets(
   const GOOD_SNIPPET = 120; // chars that suffice to answer without fetching
   try {
     onStatus?.('Searching the web…');
-    const hits = await performWebSearch(query, inner);
+    const hits = (await performWebSearch(query, inner)).filter(h => onHost(h.url));
     if (hits.length > 0) {
       onStatus?.(`Found ${hits.length} result${hits.length === 1 ? '' : 's'}…`);
 

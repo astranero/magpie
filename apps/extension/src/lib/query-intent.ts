@@ -132,6 +132,15 @@ export function isImplementationQuestion(q: string): boolean {
   return IMPL_RE.test(q || '');
 }
 
+/** Is the question ABOUT the current page itself (summarize / overview / gist /
+ *  "what's the consensus of this page") rather than a topic to go look up? These
+ *  must never trigger link-following or a forward search — the answer is the
+ *  page. */
+const PAGE_META_RE = /\b(summar(y|ise|ize|ies)|tl;?dr|overview|gist|consensus|recap|takeaways?)\b|\bwhat('?s| is| does| are)\b[^?]*\b(this|the)\s+page\b/i;
+export function isPageMetaQuestion(q: string): boolean {
+  return PAGE_META_RE.test(q || '');
+}
+
 /** First repository URL embedded in page text that parseRepoUrl accepts, if any.
  *  Lets a product/marketing page hand off implementation questions to its own
  *  source repo. */

@@ -16,7 +16,7 @@ import { buildFrontmatter, hasFrontmatter } from '../lib/frontmatter';
 import { get as idbGet } from 'idb-keyval';
 import { runDeepResearch, generateSubQuestions, scrapeUrl, isJunkUrl, gatherWebSnippets } from './deep-researcher';
 import { harvestReferences } from '../lib/reference-harvest';
-import { needsIntentResolution, formatHistoryForIntent, parseRepoUrl, selectTreePaths, formatTreeBlock, isChitchat, isRefusalAnswer, isStructureQuestion, isImplementationQuestion, findRepoUrlInText, RepoRef } from '../lib/query-intent';
+import { needsIntentResolution, formatHistoryForIntent, parseRepoUrl, selectTreePaths, formatTreeBlock, isChitchat, isRefusalAnswer, isStructureQuestion, isImplementationQuestion, findRepoUrlInText, isPageMetaQuestion, questionKeywords, RepoRef } from '../lib/query-intent';
 import { selectSemantic, fetchWithinBudget, parseRouterSelection, TOTAL_CTX_BUDGET, RerankFn, LinkRef, Selection } from '../lib/context-retrieval';
 import { getResearchLimits } from '../lib/research-limits';
 import { looksLikeBuildLog, extractLogHighlights } from '../lib/log-highlights';
@@ -1401,6 +1401,36 @@ async function buildChatRequest(chatId: string, projectId: string, prompt: strin
     for (const b of enrich.blocks) systemPrompt += b;
     for (const s of enrich.sources) linkedPages.push(s);
     if (enrich.sources.length) console.log(`[CTX] followed ${enrich.sources.length} source(s): ${enrich.sources.map(s => s.url).join(', ')}`);
+
+    // ── Forward-check the rest of THIS site ──
+    // On a docs/site page, "where can I find X?" about a topic the current page
+    // doesn't cover shouldn't dead-end at "not on this page". If nothing on the
+    // page satisfied it, search the SAME DOMAIN only (e.g. learn.microsoft.com) —
+    // "check the rest of the documentation" without pulling the open web. Skipped
+    // for page-summary asks (the answer is the page) and when web search is off.
+    const host = (() => { try { return new URL(pageContext.url).hostname.replace(/^www\./, ''); } catch { return ''; } })();
+    const isLocalHost = !host || /^(localhost|127\.|0\.0\.0\.0|10\.|192\.168\.)/.test(host) || host.endsWith('.local');
+    if (
+      !enrich.sources.length && !repoRef && host && !isLocalHost &&
+      questionKeywords(effectiveQuery).length && !isPageMetaQuestion(effectiveQuery) &&
+      await isChatWebFallbackEnabled()
+    ) {
+      onStatus?.(`Checking the rest of ${host}…`);
+      try {
+        const site = await gatherWebSnippets(effectiveQuery, { signal, restrictToHost: host, deadlineMs: 8000 });
+        if (site.context) {
+          console.log(`[FORWARD-CHECK] ${host}: ${site.sources.length} same-site result(s)`);
+          systemPrompt +=
+            `\n\n--- ELSEWHERE ON ${host} (same site the user is reading; found via a site-scoped search just now, NOT saved) ---\n` +
+            `${site.context}\n--- END ---\n` +
+            `The current page didn't cover this. You MAY answer from these same-site results and should point the user to the relevant page. Attribute claims in plain text to their [W#] source; do not invent anchors.`;
+          for (const s of site.sources) linkedPages.push(s);
+        }
+      } catch (e) {
+        if (signal.aborted) throw e;
+        console.warn('[FORWARD-CHECK] failed', e);
+      }
+    }
   }
 
   onStatus?.('Writing the answer…');

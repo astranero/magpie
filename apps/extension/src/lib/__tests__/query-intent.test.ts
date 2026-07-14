@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { needsIntentResolution, formatHistoryForIntent, parseRepoUrl, selectTreePaths, formatTreeBlock, isStructureQuestion, questionKeywords, expandNavKeywords, isImplementationQuestion, findRepoUrlInText } from '../query-intent';
+import { needsIntentResolution, formatHistoryForIntent, parseRepoUrl, selectTreePaths, formatTreeBlock, isStructureQuestion, questionKeywords, expandNavKeywords, isImplementationQuestion, findRepoUrlInText, isPageMetaQuestion } from '../query-intent';
 
 describe('isStructureQuestion', () => {
   it('true for layout / file-location questions', () => {
@@ -57,6 +57,25 @@ describe('isImplementationQuestion', () => {
     for (const q of ['what is this product', 'how much does it cost', 'who made this']) {
       expect(isImplementationQuestion(q)).toBe(false);
     }
+  });
+});
+
+describe('isPageMetaQuestion', () => {
+  it('true when the question is about the page itself', () => {
+    for (const q of [
+      'summarize this page',
+      'what is the consensus of this page',
+      'give me a tldr',
+      "what's this page about",
+      'overview please',
+    ]) expect(isPageMetaQuestion(q)).toBe(true);
+  });
+  it('false for topical look-ups (these may forward-check the site)', () => {
+    for (const q of [
+      'where can I find out about pipelines',
+      'how much is their pricing',
+      'does it support webhooks',
+    ]) expect(isPageMetaQuestion(q)).toBe(false);
   });
 });
 
