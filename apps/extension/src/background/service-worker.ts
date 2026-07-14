@@ -16,7 +16,7 @@ import { buildFrontmatter, hasFrontmatter } from '../lib/frontmatter';
 import { get as idbGet } from 'idb-keyval';
 import { runDeepResearch, generateSubQuestions, scrapeUrl, isJunkUrl, gatherWebSnippets } from './deep-researcher';
 import { harvestReferences } from '../lib/reference-harvest';
-import { needsIntentResolution, formatHistoryForIntent, parseRepoUrl, selectTreePaths, formatTreeBlock, matchFilesInTree, isChitchat, isRefusalAnswer, isMessageQuery, RepoRef } from '../lib/query-intent';
+import { needsIntentResolution, formatHistoryForIntent, parseRepoUrl, selectTreePaths, formatTreeBlock, matchFilesInTree, isChitchat, isRefusalAnswer, RepoRef } from '../lib/query-intent';
 import { getResearchLimits } from '../lib/research-limits';
 import { looksLikeBuildLog, extractLogHighlights } from '../lib/log-highlights';
 import { addChunksToVectorStore, searchSessionChunks, resetSessionIndex, resetAllSessionIndexes, isConfidentMatch } from '../lib/vector-store';
@@ -1231,17 +1231,27 @@ async function buildChatRequest(chatId: string, projectId: string, prompt: strin
       `\nCRITICAL ANTI-HALLUCINATION RULE: If the answer cannot be found in the provided sources, you MUST say "I cannot answer this based on the provided sources." DO NOT rely on external knowledge.\n` +
       RESPONSE_STYLE +
       `\n--- SOURCES ---\n${context}\n--- END SOURCES ---`;
+  } else if (pageContext) {
+    // The user has a page open and no workspace match — they're asking ABOUT
+    // that page. Answer from it (appended below), NOT from a live web search:
+    // a page-grounded question ("what is this?", "how much is their pricing?")
+    // that also triggers a web search drags in unrelated hits (e.g. the pH-
+    // indicator "litmus", a generic pricing guide) and pollutes the answer. If
+    // the page genuinely doesn't cover it, the model says so and the user can
+    // run /research explicitly. `grounded` stays false, so the streaming-layer
+    // refusal→web net doesn't fire on these either.
+    onStatus?.('Reading the page…');
+    systemPrompt =
+      `You are a helpful research assistant. Answer using the CURRENT PAGE the user is viewing (provided below); ` +
+      `use your general knowledge only to fill small, obvious gaps. Do NOT invent citations. ` +
+      `If the page doesn't cover the question, say so in one line rather than guessing or padding with unrelated facts.` +
+      RESPONSE_STYLE;
   } else {
-    // No workspace match. Before conceding to stale "general knowledge",
-    // escalate to a quick live web search (+ any enabled search MCPs) unless
-    // the user turned it off. The open page is still appended below, so the
-    // model sees the web excerpts AND the current page.
+    // No workspace match and no open page. Before conceding to stale "general
+    // knowledge", escalate to a quick live web search (+ any enabled search
+    // MCPs) unless the user turned it off.
     let web: { context: string; sources: Array<{ title: string; url: string }> } = { context: '', sources: [] };
-    // A mailbox question with a webmail page open is answered from the page's
-    // recovered message list (appended to page context below) — don't burn a
-    // web search on it.
-    const mailboxOnPage = isMessageQuery(prompt) && !!pageContext;
-    if (!mailboxOnPage && await isChatWebFallbackEnabled()) {
+    if (await isChatWebFallbackEnabled()) {
       onStatus?.('Searching the web…');
       try {
         web = await gatherWebSnippets(effectiveQuery, { signal, onStatus });
