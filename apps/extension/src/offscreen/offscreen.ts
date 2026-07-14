@@ -21,7 +21,19 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
 // whole embed/rerank; the worker keeps that main thread free. `chrome.*` isn't
 // available inside a Worker, so we hand it the WASM base URL on init.
 const inferenceWorker = new Worker(new URL('./inference.worker.ts', import.meta.url), { type: 'module' });
-inferenceWorker.postMessage({ type: 'init', wasmPaths: chrome.runtime.getURL('transformers/') });
+// Embedder device is user-selectable (Settings → Inference acceleration); default
+// WASM for stability (WebGPU can silently OOM the renderer on heavy runs). The
+// Worker can't read chrome.storage, so we read it here and hand it over on init,
+// and push changes live via set_device.
+inferenceWorker.postMessage({ type: 'init', wasmPaths: chrome.runtime.getURL('transformers/'), device: 'wasm' });
+chrome.storage.local.get('inferenceDevice').then((r: any) => {
+  if (r?.inferenceDevice === 'webgpu') inferenceWorker.postMessage({ type: 'set_device', device: 'webgpu' });
+});
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area !== 'local' || !('inferenceDevice' in changes)) return;
+  const device = changes.inferenceDevice.newValue === 'webgpu' ? 'webgpu' : 'wasm';
+  inferenceWorker.postMessage({ type: 'set_device', device });
+});
 
 let workerReqSeq = 0;
 const workerPending = new Map<number, { resolve: (v: any) => void; reject: (e: any) => void }>();
@@ -101,6 +113,12 @@ async function parsePdfOpfs(opfsName: string): Promise<{ pages: string[]; imageP
  * ~64 MB cap and OOMs the worker when base64-encoding large buffers). The
  * timeout scales with an initial HEAD size probe.
  */
+// A research run auto-ingests PDFs from the open web — a huge one (whole
+// proceedings, a scanned book) buffers entirely in memory here and, with pdf.js
+// structures on top, can OOM the offscreen renderer. Cap it: skip oversize PDFs
+// (the run continues with its other sources) rather than risk the whole process.
+const MAX_PDF_URL_MB = 75;
+
 async function parsePdfUrl(url: string): Promise<{ pages: string[]; imagePages: { index: number; dataUrl: string }[]; bytes: number }> {
   let sizeMb = 0;
   try {
@@ -108,11 +126,16 @@ async function parsePdfUrl(url: string): Promise<{ pages: string[]; imagePages: 
     const len = Number(head.headers.get('content-length') || 0);
     if (len > 0) sizeMb = len / (1024 * 1024);
   } catch { /* size probe optional */ }
+  if (sizeMb > MAX_PDF_URL_MB) throw new Error(`PDF too large to parse safely (${Math.round(sizeMb)} MB)`);
   // 30s floor + 3s per MB, capped at 5 min
   const timeoutMs = Math.min(300000, 30000 + Math.ceil(sizeMb) * 3000);
   const res = await fetch(url, { redirect: 'follow', signal: AbortSignal.timeout(timeoutMs) });
   if (!res.ok) throw new Error(`PDF fetch failed: HTTP ${res.status}`);
   const buf = await res.arrayBuffer();
+  // HEAD may lie / be absent — enforce the cap on the real byte length too.
+  if (buf.byteLength > MAX_PDF_URL_MB * 1024 * 1024) {
+    throw new Error(`PDF too large to parse safely (${Math.round(buf.byteLength / 1024 / 1024)} MB)`);
+  }
   const parsed = await parsePdfData(new Uint8Array(buf));
   return { ...parsed, bytes: buf.byteLength };
 }

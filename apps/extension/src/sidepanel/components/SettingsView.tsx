@@ -56,11 +56,13 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   const [webFallback, setWebFallback] = useState(true);
   // How chat gathers extra detail from the open page (repo files / links).
   const [pageCtxStrategy, setPageCtxStrategy] = useState<'semantic' | 'router' | 'agentic'>('semantic');
+  const [inferenceDevice, setInferenceDevice] = useState<'wasm' | 'webgpu'>('wasm');
   const [userLocation, setUserLocation] = useState('');
   const tzGuess = (() => { try { return (Intl.DateTimeFormat().resolvedOptions().timeZone || '').split('/').pop()?.replace(/_/g, ' ') || ''; } catch { return ''; } })();
   useEffect(() => {
     if (typeof chrome === 'undefined' || !chrome.storage) return;
-    chrome.storage.local.get(['researchDepth', 'contextTokens', 's2ApiKey', 'sourceQuality', 'academicDepth', 'chatWebFallback', 'pageContextStrategy', 'userLocation']).then(r => {
+    chrome.storage.local.get(['researchDepth', 'contextTokens', 's2ApiKey', 'sourceQuality', 'academicDepth', 'chatWebFallback', 'pageContextStrategy', 'userLocation', 'inferenceDevice']).then(r => {
+      if (r.inferenceDevice === 'webgpu') setInferenceDevice('webgpu');
       if (r.researchDepth === 'deep' || r.researchDepth === 'exhaustive') setResearchDepth(r.researchDepth);
       if (r.sourceQuality === 'high') setSourceQuality('high');
       if (r.academicDepth === 'abstract') setAcademicDepth('abstract');
@@ -340,6 +342,22 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           />
           <p className="text-[10px] text-muted-foreground font-mono leading-normal">
             Used for location- or time-dependent questions (weather, “near me”, local info). Leave blank to infer an approximate region from your system timezone{tzGuess ? ` (${tzGuess})` : ''}. Kept on-device; only added to a web query when the question is location-dependent.
+          </p>
+        </div>
+
+        <div className="space-y-1.5">
+          <label className="text-xs font-medium">Inference acceleration</label>
+          <Select value={inferenceDevice} onValueChange={(v) => { setInferenceDevice(v as any); saveResearchSetting({ inferenceDevice: v }); }}>
+            <SelectTrigger className="w-full rounded-lg">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent className="border border-border rounded-lg shadow-card">
+              <SelectItem value="wasm" className="font-mono text-xs">WASM (CPU) — stable, recommended</SelectItem>
+              <SelectItem value="webgpu" className="font-mono text-xs">WebGPU (GPU) — faster, can crash on big runs</SelectItem>
+            </SelectContent>
+          </Select>
+          <p className="text-[10px] text-muted-foreground font-mono leading-normal">
+            How on-device embeddings/re-ranking run. WASM is CPU-bound but memory-stable. WebGPU is faster but its GPU memory can accumulate on a heavy deep-research run and silently crash the extension — pick it only if your runs are small. Applies immediately.
           </p>
         </div>
       </Section>

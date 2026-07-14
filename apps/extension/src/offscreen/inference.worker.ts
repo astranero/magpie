@@ -12,26 +12,39 @@
 
 import { env, pipeline, AutoTokenizer, AutoModelForSequenceClassification } from '@huggingface/transformers';
 
+type Device = 'wasm' | 'webgpu';
 type Req =
-  | { type: 'init'; wasmPaths: string }
+  | { type: 'init'; wasmPaths: string; device?: Device }
+  | { type: 'set_device'; device: Device }
   | { id: number; type: 'embed'; texts: string[] }
   | { id: number; type: 'rerank'; query: string; passages: string[] };
 
 // ── Embeddings ──
 
+// Default WASM — see getEmbedder. The offscreen doc can override via the
+// `inferenceDevice` setting (init / set_device).
+let embedDevice: Device = 'wasm';
 let embedder: any = null;
 async function getEmbedder() {
   if (!embedder) {
     // Xenova mirror: onnx-community/all-MiniLM-L6-v2 went 401 (gated) on HF in
     // mid-2026. Same base model + ONNX export, embeddings stay compatible.
     //
-    // WASM, not WebGPU: a heavy deep-research run embeds thousands of chunks, and
-    // the WebGPU backend accumulates GPU buffers → the GPU/renderer process OOMs
-    // and dies SILENTLY (no JS exception, nothing in the logs — the exact crash
-    // reported). WASM keeps a bounded, GC'd heap on this worker thread; combined
-    // with the char + batch caps below, allocation stays bounded. Slower per
-    // embed, but embedding is background work and stability wins.
-    embedder = await pipeline('feature-extraction', 'Xenova/all-MiniLM-L6-v2', { device: 'wasm' });
+    // Default WASM, not WebGPU: a heavy deep-research run embeds thousands of
+    // chunks, and the WebGPU backend accumulates GPU buffers → the GPU/renderer
+    // process OOMs and dies SILENTLY (no JS exception — the reported crash). WASM
+    // keeps a bounded, GC'd heap on this worker thread; with the char + batch caps
+    // below, allocation stays bounded. WebGPU is faster and available as an opt-in
+    // (Settings → Inference acceleration); we fall back to WASM if it can't init.
+    try {
+      embedder = await pipeline('feature-extraction', 'Xenova/all-MiniLM-L6-v2', { device: embedDevice });
+    } catch (e) {
+      if (embedDevice !== 'wasm') {
+        console.warn(`[worker] ${embedDevice} embedder init failed, falling back to wasm:`, e);
+        embedDevice = 'wasm';
+        embedder = await pipeline('feature-extraction', 'Xenova/all-MiniLM-L6-v2', { device: 'wasm' });
+      } else throw e;
+    }
   }
   return embedder;
 }
@@ -196,11 +209,21 @@ self.onmessage = async (e: MessageEvent<Req>) => {
   if (req.type === 'init') {
     if (env.backends?.onnx?.wasm) env.backends.onnx.wasm.wasmPaths = req.wasmPaths;
     env.allowLocalModels = false;
+    if (req.device === 'wasm' || req.device === 'webgpu') embedDevice = req.device;
     // Warm both models so the first real request doesn't pay init latency.
     Promise.all([
       getEmbedder().catch(err => console.warn('[worker preload] embedder failed:', err)),
       getReranker().catch(err => console.warn('[worker preload] reranker failed:', err)),
-    ]).then(() => console.log('[worker preload] models ready'));
+    ]).then(() => console.log(`[worker preload] models ready (embed device: ${embedDevice})`));
+    return;
+  }
+
+  if (req.type === 'set_device') {
+    if ((req.device === 'wasm' || req.device === 'webgpu') && req.device !== embedDevice) {
+      embedDevice = req.device;
+      await resetEmbedder();               // rebuild on the new device next call
+      getEmbedder().catch(() => {});       // warm it
+    }
     return;
   }
 
