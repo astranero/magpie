@@ -9,20 +9,95 @@ import { extractMailboxList } from './mailbox';
 chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
   if (request.action === 'SCRAPE_PAGE') {
     scrapePage().then(result => {
-      sendResponse(result);
+      // Flag a PDF-viewer page so the worker can capture the actual PDF (e.g.
+      // ACM /doi/epdf/…) instead of the useless viewer HTML.
+      sendResponse({ ...result, pdfUrl: looksLikePdfViewer() ? (findPdfUrl() || window.location.href) : undefined });
     }).catch(_err => {
       sendResponse({
         title: document.title || 'Untitled',
         url: window.location.href,
         favicon: getFavicon(),
         markdown: document.body?.innerText || '',
-        wordCount: 0
+        wordCount: 0,
+        pdfUrl: looksLikePdfViewer() ? (findPdfUrl() || window.location.href) : undefined
       });
     });
     return true; // Keep the message channel open for the async response
   }
+  if (request.action === 'EXTRACT_PDF') {
+    // Fetch the PDF FROM THE PAGE so it carries the user's session cookies —
+    // paywalled PDFs the user can view are then fetchable. Bytes come back as
+    // base64 (OPFS is origin-scoped, so we can't hand the extension a file).
+    extractPdf(request.url as string | undefined)
+      .then(sendResponse)
+      .catch(err => sendResponse({ ok: false, error: String(err?.message || err) }));
+    return true;
+  }
   return false;
 });
+
+/** Best-effort absolute PDF URL for the current page (generic, no per-site map). */
+function findPdfUrl(): string | null {
+  const abs = (u: string | null | undefined): string | null => {
+    if (!u) return null;
+    try { return new URL(u, document.baseURI).href; } catch { return null; }
+  };
+  // 1. Academic standard meta tag — the most reliable generic signal.
+  const meta = document.querySelector<HTMLMetaElement>('meta[name="citation_pdf_url"]');
+  if (meta?.content) return abs(meta.content);
+  // 2. Embedded PDF objects.
+  const embed = document.querySelector<HTMLEmbedElement>('embed[type="application/pdf"]');
+  if (embed?.getAttribute('src')) return abs(embed.getAttribute('src'));
+  const obj = document.querySelector<HTMLObjectElement>('object[type="application/pdf"]');
+  if (obj?.getAttribute('data')) return abs(obj.getAttribute('data'));
+  // 3. An iframe pointing at a PDF-ish URL.
+  const iframeSrc = Array.from(document.querySelectorAll<HTMLIFrameElement>('iframe[src]'))
+    .map(f => f.getAttribute('src') || '')
+    .find(s => /\.pdf(\?|$)|\/pdf\//i.test(s));
+  if (iframeSrc) return abs(iframeSrc);
+  // 4. URL heuristic for common viewer routes (ACM /doi/epdf/ → /doi/pdf/).
+  if (/\/epdf\//i.test(location.href)) return location.href.replace(/\/epdf\//i, '/pdf/');
+  return null;
+}
+
+/** Does the page look like a PDF VIEWER (vs. an abstract page that merely links a
+ *  PDF)? Only then do we prefer capturing the PDF over the page text. */
+function looksLikePdfViewer(): boolean {
+  return !!document.querySelector('embed[type="application/pdf"], object[type="application/pdf"]')
+    || /\/epdf\//i.test(location.href)
+    || document.contentType === 'application/pdf';
+}
+
+function bufToBase64(buf: ArrayBuffer): string {
+  const bytes = new Uint8Array(buf);
+  let binary = '';
+  const CHUNK = 0x8000;
+  for (let i = 0; i < bytes.length; i += CHUNK) binary += String.fromCharCode(...bytes.subarray(i, i + CHUNK));
+  return btoa(binary);
+}
+
+const MAX_PDF_BYTES = 40 * 1024 * 1024;
+async function extractPdf(preferred?: string): Promise<Record<string, unknown>> {
+  const url = preferred || findPdfUrl();
+  if (!url) return { ok: false, error: 'no PDF found on this page' };
+  let res: Response;
+  try {
+    res = await fetch(url, { credentials: 'include', headers: { Accept: 'application/pdf,*/*' } });
+  } catch (e: any) {
+    return { ok: false, error: `fetch failed: ${e?.message || e}` };
+  }
+  if (!res.ok) return { ok: false, error: `HTTP ${res.status}` };
+  const buf = await res.arrayBuffer();
+  const ct = res.headers.get('content-type') || '';
+  const head = String.fromCharCode(...new Uint8Array(buf.slice(0, 5)));
+  if (!ct.includes('application/pdf') && !head.startsWith('%PDF')) {
+    return { ok: false, error: `not a PDF (got ${ct || 'unknown type'} — likely a login/paywall page)` };
+  }
+  if (buf.byteLength > MAX_PDF_BYTES) {
+    return { ok: false, error: `PDF too large to capture inline (${Math.round(buf.byteLength / 1024 / 1024)} MB)` };
+  }
+  return { ok: true, base64: bufToBase64(buf), url, title: document.title };
+}
 
 function getFavicon(): string {
   const link = document.querySelector<HTMLLinkElement>(

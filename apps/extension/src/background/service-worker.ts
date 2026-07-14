@@ -22,7 +22,7 @@ import { getResearchLimits } from '../lib/research-limits';
 import { looksLikeBuildLog, extractLogHighlights } from '../lib/log-highlights';
 import { addChunksToVectorStore, searchSessionChunks, resetSessionIndex, resetAllSessionIndexes, isConfidentMatch } from '../lib/vector-store';
 import { replaceChunksForDoc } from '../lib/db';
-import { pdfUrlToBody, pdfOpfsToBody, ensureOffscreen as ensureOffscreenDoc } from '../lib/pdf-parser';
+import { pdfUrlToBody, pdfOpfsToBody, pdfBase64ToBody, ensureOffscreen as ensureOffscreenDoc } from '../lib/pdf-parser';
 import { setEnsureOffscreen, sendToOffscreen } from '../lib/offscreen-client';
 import { getProviderSettings, chatWithCustom, chatWithCustomStream, handleFetchCustomModels, chatWithTools, ToolDef } from './llm-client';
 import { handleSearchLibrary, handleRecallDocs } from './library-handlers';
@@ -510,6 +510,8 @@ interface ScrapedPage {
   wordCount: number;
   kind?: string;
   author?: string;
+  /** Set when the page is a PDF viewer (e.g. ACM /doi/epdf/…) — capture the PDF. */
+  pdfUrl?: string;
 }
 
 /** Scrape a tab via the content script (injecting it if missing). For
@@ -694,6 +696,17 @@ async function captureTab(tab: chrome.tabs.Tab, explicitProjectId: string | null
   // Execute the content script to scrape the page
   const scraped = await scrapeTabViaContentScript(tab);
 
+  // PDF-viewer page (e.g. ACM /doi/epdf/…): the scrape is useless viewer HTML.
+  // Have the content script fetch the actual PDF from the page (so it carries the
+  // user's session cookies) and capture that instead. Fall through on failure.
+  if (scraped?.pdfUrl) {
+    const captured = await captureEmbeddedPdf(linkTarget, tab, scraped.pdfUrl, scraped.title).catch((e) => {
+      console.warn('[capture] embedded PDF capture failed, falling back to page scrape:', e);
+      return null;
+    });
+    if (captured) return captured;
+  }
+
   if (!scraped?.markdown) {
     // Chrome's PDF viewer blocks content scripts entirely — a PDF served
     // without a .pdf extension lands here. Check the content type.
@@ -835,26 +848,57 @@ async function capturePdfUrl(projectId: string | null, tab: chrome.tabs.Tab): Pr
     body = md;
   }
 
-  const now = new Date().toISOString();
   const nameFromUrl = decodeURIComponent(url.split('/').pop() || 'PDF').replace(/\.pdf.*$/i, '');
   // Chrome's PDF viewer usually puts the filename or document title in tab.title
   const title = (tab.title && tab.title.trim() && tab.title !== url)
     ? tab.title.replace(/\.pdf$/i, '').trim()
     : nameFromUrl;
+  return savePdfDocument(projectId, url, title, tab.favIconUrl || '', body);
+}
 
+/** Persist a parsed PDF body as a first-class `pdf` document (+ vector store). */
+async function savePdfDocument(
+  projectId: string | null, url: string, title: string, favicon: string, body: string,
+): Promise<Record<string, unknown>> {
+  const now = new Date().toISOString();
   const wordCount = body.split(/\s+/).filter(Boolean).length;
   const fullMarkdown = buildFrontmatter({ title, type: 'pdf', source: url, captured: now, wordCount }) + body;
   const tempId = crypto.randomUUID?.() ?? `${Date.now()}`;
   const chunks = chunkDocument({ docShortId: makeDocShortId(tempId), content: fullMarkdown });
   const { id: docId, chunks: savedChunks } = await saveDocument({
-    title, url, content: fullMarkdown, capturedAt: now,
-    favicon: tab.favIconUrl || '', wordCount, syncedToDrive: false
+    title, url, content: fullMarkdown, capturedAt: now, favicon, wordCount, syncedToDrive: false,
   }, chunks);
   if (projectId) {
     await linkDocumentToProject(projectId, docId);
     await addChunksToVectorStore(projectId, savedChunks);
   }
   return { docId, title, chunkCount: chunks.length, linkedTo: projectId };
+}
+
+/**
+ * Capture a PDF embedded in a viewer page (ACM /doi/epdf/…, etc.). The content
+ * script fetches the bytes from the page (session cookies → paywalled PDFs work)
+ * and returns base64; we parse it locally and save it. Returns null so the caller
+ * falls back to a normal page scrape if there's no usable PDF.
+ */
+async function captureEmbeddedPdf(
+  projectId: string | null, tab: chrome.tabs.Tab, pdfUrl: string, fallbackTitle: string,
+): Promise<Record<string, unknown> | null> {
+  if (!tab.id) return null;
+  const ex: any = await new Promise((resolve) => {
+    chrome.tabs.sendMessage(tab.id!, { action: 'EXTRACT_PDF', url: pdfUrl }, (r) => {
+      resolve(chrome.runtime.lastError ? { ok: false, error: chrome.runtime.lastError.message } : r);
+    });
+  });
+  if (!ex?.ok || !ex.base64) {
+    console.warn('[capture] EXTRACT_PDF:', ex?.error || 'no bytes');
+    return null;
+  }
+  const body = await pdfBase64ToBody(ex.base64 as string, imageToText);
+  const textOnly = body.replace(/## Page \d+/g, '').replace(/\*\(no extractable text\)\*/g, '').trim();
+  if (textOnly.length < 50) throw new Error('captured PDF had no extractable text (scanned — try Import PDF)');
+  const title = ((ex.title as string) || fallbackTitle || (ex.url as string) || pdfUrl).replace(/\.pdf$/i, '').trim();
+  return savePdfDocument(projectId, (ex.url as string) || pdfUrl, title, tab.favIconUrl || '', body);
 }
 
 /** Save one processed document (text) into IndexedDB + vector store + project. */
