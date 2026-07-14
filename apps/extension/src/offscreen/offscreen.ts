@@ -87,8 +87,16 @@ function callWorker<T>(msg: Record<string, unknown>): Promise<T> {
   });
 }
 
+// JS heap of THIS renderer (offscreen doc — Chrome-only API). It does NOT include
+// the inference worker's WASM linear memory, but a climbing value still points at
+// JS-side accumulation in the renderer (panel + offscreen share a process).
+const heapMB = (): number | undefined => {
+  try { const m = (performance as any).memory; return m ? Math.round(m.usedJSHeapSize / 1048576) : undefined; }
+  catch { return undefined; }
+};
+
 const generateEmbeddings = (texts: string[]): Promise<number[][]> => {
-  crumb('offscreen', 'embed start', { n: texts.length, chars: texts.reduce((a, t) => a + t.length, 0) });
+  crumb('offscreen', 'embed start', { n: texts.length, chars: texts.reduce((a, t) => a + t.length, 0), heapMB: heapMB() });
   return callWorker<{ embeddings: number[][] }>({ type: 'embed', texts }).then(r => r.embeddings);
 };
 

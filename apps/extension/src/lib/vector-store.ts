@@ -140,9 +140,9 @@ export async function addChunksToVectorStore(sessionId: string, chunks: Chunk[])
   newChunks.forEach(c => { if (c.docId) indexed.add(c.docId); });
   if (toInsert.length < newChunks.length) {
     crumb('vector', 'session index full — capped', { at: cur + toInsert.length, dropped: newChunks.length - toInsert.length });
-  } else if (cur + toInsert.length >= MAX_SESSION_CHUNKS - 200 || (cur >> 9) !== ((cur + toInsert.length) >> 9)) {
-    // Log the running total near the cap / every ~512 chunks so a crash shows how
-    // large the store was (confirms the cumulative-memory cause).
+  } else if ((cur >> 7) !== ((cur + toInsert.length) >> 7)) {
+    // Log the running total every ~128 chunks so a crash shows how large the
+    // in-memory store was (confirms/rules out the cumulative-memory cause).
     crumb('vector', 'session chunks', { n: cur + toInsert.length });
   }
 }
