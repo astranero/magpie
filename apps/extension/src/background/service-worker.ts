@@ -1145,8 +1145,12 @@ async function buildChatRequest(chatId: string, projectId: string, prompt: strin
   // from the system timezone) + timezone, so location/time-dependent questions
   // ("weather today", "near me") use the user's own region instead of the search
   // provider's IP geolocation. Coarse by design (city/region, never precise).
-  const { userLocation } = await chrome.storage.local.get('userLocation');
-  const tz = (() => { try { return Intl.DateTimeFormat().resolvedOptions().timeZone || ''; } catch { return ''; } })();
+  const { userLocation, araTimezone } = await chrome.storage.local.get(['userLocation', 'araTimezone']);
+  // Prefer the timezone captured by the sidepanel (a real document): MV3 service
+  // workers can report Intl timeZone as "UTC", which would blank out the place
+  // and make the model ask "what's your city?". Fall back to the worker's own.
+  const swTz = (() => { try { return Intl.DateTimeFormat().resolvedOptions().timeZone || ''; } catch { return ''; } })();
+  const tz = String(araTimezone || '').trim() || swTz;
   const place = String(userLocation || '').trim() || timezoneToPlace(tz);
   const localeBlock = place
     ? `--- USER CONTEXT (use for location/time-dependent questions; don't ask the user where they are) ---\n` +

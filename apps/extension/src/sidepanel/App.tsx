@@ -136,6 +136,13 @@ export default function App() {
   useEffect(() => {
     if (typeof chrome === 'undefined' || !chrome.storage) return;
     loadCustomSkills().then(setCustomCommands);
+    // Capture the timezone HERE (a real document reliably reports it) so the
+    // service worker — which can report "UTC" — has a trustworthy location hint
+    // for weather / "near me" answers.
+    try {
+      const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+      if (tz) chrome.storage.local.set({ araTimezone: tz });
+    } catch { /* ignore */ }
     // Adopt the active session another sidepanel instance switched to (idempotent
     // on mount too), so two tabs/windows show the same session.
     chrome.storage.local.get(['araActiveProjectId', 'araActiveChatId']).then((r: any) => {
