@@ -12,6 +12,12 @@
 // behalf.
 
 const KEY = 'crashLog';
+// A tiny SEPARATE single-key record of the most recent crumb. Rewriting the
+// whole 300-element ring buffer on every crumb is a big, slow write that may not
+// commit to disk before an imminent OOM. Overwriting one small key is far more
+// likely to flush in time — so this is the record most likely to survive the
+// crash, and dumpCrashLog surfaces it first.
+const LAST = 'crashLastOp';
 const MAX = 300;
 
 export interface Crumb { t: number; s: string; m: string; d?: string }
@@ -40,10 +46,14 @@ async function load(): Promise<Crumb[]> {
 /** Append + persist a crumb in a context that HAS chrome.storage. */
 function append(c: Crumb): void {
   void (async () => {
+    const store = localStore();
+    if (!store) return;
+    // Write the tiny "last op" key FIRST — smallest write, best flush odds.
+    try { await store.set({ [LAST]: c }); } catch { /* best-effort */ }
     const b = await load();
     b.push(c);
     if (b.length > MAX) b.splice(0, b.length - MAX);
-    try { await localStore()?.set({ [KEY]: b }); } catch { /* best-effort */ }
+    try { await store.set({ [KEY]: b }); } catch { /* best-effort */ }
   })();
 }
 
@@ -64,9 +74,18 @@ export function crumb(scope: string, msg: string, data?: unknown): void {
     catch { c.d = String(data); }
     if (c.d.length > 500) c.d = c.d.slice(0, 500);
   }
+  // Live trail: an OOM in the offscreen/renderer process takes ITS console down,
+  // but the service-worker console survives. Logging here means an open SW
+  // console shows the last op before the crash even if the storage write loses
+  // the race. (Offscreen crumbs also get logged again by the SW on receipt.)
+  try { console.log(`[crumb] ${fmt(c)}`); } catch { /* ignore */ }
   if (localStore()) { append(c); return; }
   try { (chrome as any)?.runtime?.sendMessage?.({ action: 'CRASH_CRUMB', crumb: c }); }
   catch { /* nothing else we can do from here */ }
+}
+
+function fmt(c: Crumb): string {
+  return `[${c.s}] ${c.m}${c.d ? ' — ' + c.d : ''}`;
 }
 
 /** Register a receiver so crumbs forwarded from a storage-less context (the
@@ -75,7 +94,12 @@ export function crumb(scope: string, msg: string, data?: unknown): void {
 export function installCrumbReceiver(): void {
   try {
     (chrome as any)?.runtime?.onMessage?.addListener?.((req: any) => {
-      if (req?.action === 'CRASH_CRUMB' && req.crumb) append(req.crumb as Crumb);
+      if (req?.action === 'CRASH_CRUMB' && req.crumb) {
+        // Log in the SW console too — this is where offscreen crumbs become
+        // visible after the offscreen console has died with its process.
+        try { console.log(`[crumb→sw] ${fmt(req.crumb)}`); } catch { /* ignore */ }
+        append(req.crumb as Crumb);
+      }
       // Don't return true — this is fire-and-forget, no response.
     });
   } catch { /* ignore */ }
@@ -87,7 +111,7 @@ export async function getCrashLog(): Promise<Crumb[]> {
 
 export async function clearCrashLog(): Promise<void> {
   buf = [];
-  try { await localStore()?.set({ [KEY]: [] }); } catch { /* ignore */ }
+  try { await localStore()?.remove([KEY, LAST]); } catch { /* ignore */ }
 }
 
 /** Human-readable dump (also the format the Settings "copy" button produces). */
@@ -101,7 +125,16 @@ export function formatCrashLog(crumbs: Crumb[]): string {
 /** Print the persisted breadcrumbs to the console — call on startup so a reload
  *  after a crash surfaces what came just before it. */
 export async function dumpCrashLog(label = '[crashlog]'): Promise<void> {
+  const store = localStore();
+  let last: Crumb | null = null;
+  try { last = ((await store?.get(LAST))?.[LAST] as Crumb) ?? null; } catch { /* ignore */ }
   const b = await load();
+  // The single-key "last op" is the record most likely to have survived a hard
+  // crash — surface it prominently even when the ring buffer lost its tail.
+  if (last) {
+    const ts = new Date(last.t).toISOString().slice(11, 23);
+    console.log(`${label} LAST OP before restart: ${ts} ${fmt(last)}`);
+  }
   if (!b.length) return;
   console.log(`${label} ${b.length} breadcrumb(s) persisted before this start (most recent last):\n${formatCrashLog(b.slice(-60))}`);
 }
