@@ -91,7 +91,7 @@ installCrashHandlers('sw');
 // (this is where the PDF/embed/rerank crashes actually happen). Persist them.
 installCrumbReceiver();
 dumpCrashLog('[Magpie crashlog]').catch(() => {});
-crumb('sw', 'service worker started');
+crumb('sw', 'service worker started', { build: 'fetchcap+sizecrumbs' });
 
 // The offscreen doc can't read chrome.storage to learn the inference device, and
 // can't watch it for changes — so we push changes to it from here (this context

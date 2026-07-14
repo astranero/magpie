@@ -13,6 +13,7 @@ import { getMcpServers, McpConnection, isSearchLikeTool, argsForQuery } from '..
 import { searchWithProviders, jinaWebSearch, getSearchApiKeys, SearchHit } from '../lib/search-providers';
 import { rankPapers } from '../lib/paper-rank';
 import { semaphore } from '../lib/semaphore';
+import { crumb } from '../lib/crash-log';
 
 // F9: serial indexing — one document at a time through the ONNX embedding
 // pipeline. Even concurrency=2 causes WASM integer-overflow crashes when
@@ -212,7 +213,12 @@ async function fetchTextInner(url: string, signal: AbortSignal): Promise<string>
   } finally {
     try { await reader.cancel(); } catch { /* ignore */ }
   }
-  if (truncated) console.warn(`[fetch] ${url} truncated at ${MAX_FETCH_BYTES / 1024 / 1024} MB — using partial content`);
+  // Breadcrumb the body size AFTER the read completes. If a crash breadcrumb ends
+  // with "Reading N" and NO following "fetch body" crumb, the worker died WHILE
+  // buffering this body (per-URL oversize). If the "fetch body" crumb IS present
+  // and death follows, the fetch was fine and the OOM is downstream (cumulative /
+  // parse / embed). `build:` tag lets us confirm this code is actually loaded.
+  crumb('fetch', truncated ? 'body (truncated)' : 'body', { kb: Math.round(out.length / 1024), b: 'cap8', url: url.slice(0, 70) });
   return out;
 }
 
@@ -414,6 +420,7 @@ export async function scrapeUrl(url: string, signal?: AbortSignal): Promise<Pars
   if (!parsed && !/\.pdf($|\?)/i.test(url)) {
     try {
       const html = await fetchText(url, 15000, signal);
+      crumb('scrape', 'offscreen html parse', { kb: Math.round(html.length / 1024), url: url.slice(0, 70) });
       parsed = await parseHtmlOffscreen(html, url);
     } catch (e) {
       console.warn(`Failed to fetch ${url}`, e);
