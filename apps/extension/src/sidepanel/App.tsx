@@ -455,8 +455,11 @@ export default function App() {
       }
       if (m.action === 'CHAT_DELTA') {
         if (streamingChatsRef.current.has(m.chatId)) return; // our own stream renders via the port
-        const aId = mirrorStreamRef.current[m.chatId];
-        if (aId) pushDelta(m.chatId, aId, (m.text as string) || '');
+        // A delta can arrive before this panel processed CHAT_STATE:true (or it
+        // mounted mid-stream) — open a mirror on the fly so nothing is dropped.
+        let aId = mirrorStreamRef.current[m.chatId];
+        if (!aId) { aId = uid(); mirrorStreamRef.current[m.chatId] = aId; setGenerating(prev => ({ ...prev, [m.chatId]: true })); }
+        appendMirrorDelta(m.chatId, aId, (m.text as string) || '');
         return;
       }
       if (m.action === 'CHAT_RESET') {
@@ -699,6 +702,23 @@ export default function App() {
   // effect) means the chat id is always one that belongs to activeProjectId —
   // loadChats has already reconciled it — so the stored pair is never
   // inconsistent.
+  // Append a mirrored token DIRECTLY to state (create the assistant message on
+  // first token). Deliberately NOT via pushDelta: that batches through
+  // requestAnimationFrame, which the browser pauses in a non-focused/hidden
+  // panel — so the mirror would buffer but never paint until refocused. The
+  // background already coalesces tokens, so per-message setState is fine.
+  const appendMirrorDelta = useCallback((chatId: string, aId: string, text: string) => {
+    if (!text) return;
+    setMessages(prev => {
+      const list = prev[chatId] || [];
+      const idx = list.findIndex(x => x.id === aId);
+      if (idx === -1) return { ...prev, [chatId]: [...list, { id: aId, role: 'assistant' as const, text, streaming: true }] };
+      const copy = [...list];
+      copy[idx] = { ...copy[idx], text: copy[idx].text + text, streaming: true };
+      return { ...prev, [chatId]: copy };
+    });
+  }, []);
+
   // If another instance is mid-answer in this chat, seed a live mirror from the
   // in-flight text so a panel that just mounted / switched to this chat keeps
   // streaming instead of missing the answer. No-op if we're the initiator.
@@ -710,9 +730,9 @@ export default function App() {
       const aId = uid();
       mirrorStreamRef.current[chatId] = aId;
       setGenerating(prev => ({ ...prev, [chatId]: true }));
-      if (r.full) pushDelta(chatId, aId, r.full as string);
+      if (r.full) appendMirrorDelta(chatId, aId, r.full as string);
     }).catch(() => {});
-  }, [pushDelta]);
+  }, [appendMirrorDelta]);
 
   useEffect(() => {
     if (activeChatId) {
