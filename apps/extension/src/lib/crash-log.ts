@@ -43,17 +43,38 @@ async function load(): Promise<Crumb[]> {
   return buf!;
 }
 
+// The 300-element ring buffer is expensive to serialize; writing it on EVERY
+// crumb means hundreds of chrome.storage.local writes over a research run, which
+// is real churn on the service worker. So we write only the TINY "last op" key
+// per crumb (immediate — this is what survives a crash), and DEBOUNCE the full
+// ring-buffer write to at most once per interval. A crash between flushes loses a
+// little history but never the last op.
+let ringDirty = false;
+let ringTimer: ReturnType<typeof setTimeout> | null = null;
+const RING_FLUSH_MS = 2000;
+
+function scheduleRingFlush(store: chrome.storage.StorageArea): void {
+  if (ringTimer) return;
+  ringTimer = setTimeout(() => {
+    ringTimer = null;
+    if (!ringDirty || !buf) return;
+    ringDirty = false;
+    try { void store.set({ [KEY]: buf }); } catch { /* best-effort */ }
+  }, RING_FLUSH_MS);
+}
+
 /** Append + persist a crumb in a context that HAS chrome.storage. */
 function append(c: Crumb): void {
   void (async () => {
     const store = localStore();
     if (!store) return;
-    // Write the tiny "last op" key FIRST — smallest write, best flush odds.
+    // Tiny "last op" key — immediate, smallest write, best flush odds on a crash.
     try { await store.set({ [LAST]: c }); } catch { /* best-effort */ }
     const b = await load();
     b.push(c);
     if (b.length > MAX) b.splice(0, b.length - MAX);
-    try { await store.set({ [KEY]: b }); } catch { /* best-effort */ }
+    ringDirty = true;
+    scheduleRingFlush(store);
   })();
 }
 
