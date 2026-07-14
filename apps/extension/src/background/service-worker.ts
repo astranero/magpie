@@ -1125,7 +1125,7 @@ async function isQuestionAboutPage(q: string, page: PageContext, signal: AbortSi
   }
 }
 
-async function buildChatRequest(chatId: string, projectId: string, prompt: string, signal: AbortSignal, pageContext?: PageContext | null, onStatus?: (s: string) => void): Promise<{ systemPrompt: string; formattedHistory: Array<{ role: string; content: string }>; linkedPages: Array<{ title: string; url: string }>; grounded: boolean }> {
+async function buildChatRequest(chatId: string, projectId: string, prompt: string, signal: AbortSignal, pageContext?: PageContext | null, onStatus?: (s: string) => void): Promise<{ systemPrompt: string; formattedHistory: Array<{ role: string; content: string }>; linkedPages: Array<{ title: string; url: string }>; grounded: boolean; place?: string }> {
   // Get all documents for this project
   const allDocs = await listDocuments(projectId);
   const enabledDocs = allDocs.filter(d => d.enabled !== false);
@@ -1282,7 +1282,10 @@ async function buildChatRequest(chatId: string, projectId: string, prompt: strin
   // hijack it. Without this gate, an imported library doc that happens to match
   // the keyword ("pricing") fires the citation branch and answers from the doc
   // (inventing tiers, citing [1..14]) while ignoring the page the user attached.
-  if (!usePage && isConfidentMatch(relevantChunks as Array<{ rerankScore?: number }>)) {
+  // Location/live questions ("weather today") must not ground on the workspace —
+  // a stray chunk that clears the confidence bar sends them to the citation
+  // refusal ("cannot answer from sources") instead of a localized web answer.
+  if (!usePage && !isLocationDependent(effectiveQuery) && isConfidentMatch(relevantChunks as Array<{ rerankScore?: number }>)) {
     grounded = true;
     // Build citation-anchored context (generous — favor fuller grounding over
     // "I couldn't find it" cutoffs; only fires for library-source questions).
@@ -1492,7 +1495,7 @@ async function buildChatRequest(chatId: string, projectId: string, prompt: strin
   }
 
   onStatus?.('Writing the answer…');
-  return { systemPrompt: rulesBlock + localeBlock + systemPrompt, formattedHistory, linkedPages, grounded };
+  return { systemPrompt: rulesBlock + localeBlock + systemPrompt, formattedHistory, linkedPages, grounded, place };
 }
 
 /**
@@ -2000,7 +2003,7 @@ chrome.runtime.onConnect.addListener((port) => {
     interactiveDepth++;
     try {
       const pageCtx = req.includePageContext ? await getPageContext().catch(() => null) : null;
-      let { systemPrompt, formattedHistory, linkedPages, grounded } = await buildChatRequest(
+      let { systemPrompt, formattedHistory, linkedPages, grounded, place } = await buildChatRequest(
         chatId, projectId, prompt, localController.signal, pageCtx,
         (text) => safePost({ type: 'STATUS', text })
       );
@@ -2029,7 +2032,10 @@ chrome.runtime.onConnect.addListener((port) => {
       // model's own judgment is the ground truth the scores only approximate.
       if (grounded && !systemPromptOverride && isRefusalAnswer(full) && await isChatWebFallbackEnabled()) {
         safePost({ type: 'STATUS', text: 'Not in your workspace — searching the web…' });
-        const web = await gatherWebSnippets(prompt, {
+        // Localize the query (same as the main web branch) so "weather today"
+        // resolves to the user's region, not the search provider's server IP.
+        const netQuery = place && isLocationDependent(prompt) ? `${prompt} ${place}` : prompt;
+        const web = await gatherWebSnippets(netQuery, {
           signal: localController.signal,
           onStatus: (text) => safePost({ type: 'STATUS', text }),
         }).catch(() => ({ context: '', sources: [] as Array<{ title: string; url: string }> }));
@@ -2038,6 +2044,7 @@ chrome.runtime.onConnect.addListener((port) => {
           safePost({ type: 'RESET' });   // clear the refusal from the panel
           full = '';
           const webSys =
+            (place ? `The user is in ${place}; answer for that location and do NOT ask them which city. ` : '') +
             `You are a friendly, knowledgeable assistant. The excerpts below are from a live web search run just now — treat them as your facts. ` +
             `Answer like a sharp, helpful friend: lead with the direct answer in natural, plain language, then just enough detail. ` +
             `Don't clutter the prose with [W#] tags — the sources are shown as links below. Use only what the excerpts support; if they don't answer it, say so plainly.` +
