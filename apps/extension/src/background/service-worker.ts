@@ -1116,19 +1116,33 @@ async function isChatWebFallbackEnabled(): Promise<boolean> {
  * only a genuinely ambiguous question costs one cheap classification call.
  * Fails OPEN to the page — the user did attach it.
  */
+// Cache the LLM classification (the only slow part of the router) per page+
+// question, so re-asking / follow-ups on the same page don't pay the extra
+// serial call each turn. Heuristic hits are instant and skip this entirely.
+const pageRelevanceCache = new Map<string, { val: boolean; ts: number }>();
+const PAGE_RELEVANCE_TTL_MS = 5 * 60 * 1000;
+
 async function isQuestionAboutPage(q: string, page: PageContext, signal: AbortSignal): Promise<boolean> {
   // Weather / "near me" / local asks are about the world, not the open page —
   // route them out even if the page happens to contain a matching word.
   if (isLocationDependent(q)) return false;
   if (mentionsPageDeixis(q)) return true;
   if (overlapsPage(q, `${page.title} ${page.markdown.slice(0, 4000)}`)) return true;
+
+  const key = `${page.url}::${q.toLowerCase().replace(/\s+/g, ' ').trim().slice(0, 160)}`;
+  const cached = pageRelevanceCache.get(key);
+  if (cached && Date.now() - cached.ts < PAGE_RELEVANCE_TTL_MS) return cached.val;
+
   try {
     const sys =
       `You are an intent router. The user is viewing a web page titled "${page.title}". ` +
       `Decide whether their question is about THIS page (its subject, site, or content) or is an unrelated general question ` +
       `— weather, math, world facts, another website, personal chit-chat. Reply with exactly one word: PAGE or OTHER.`;
     const ans = await chatWithCustom(sys, [], q, signal);
-    return !/\bOTHER\b/i.test(ans);
+    const val = !/\bOTHER\b/i.test(ans);
+    if (pageRelevanceCache.size > 200) pageRelevanceCache.clear(); // bound memory
+    pageRelevanceCache.set(key, { val, ts: Date.now() });
+    return val;
   } catch (e) {
     if (signal.aborted) throw e;
     return true; // provider hiccup — honor the attached page rather than drop it
@@ -1401,6 +1415,10 @@ async function buildChatRequest(chatId: string, projectId: string, prompt: strin
     // The page is usually the repo itself. But "what's behind pricing?" on a
     // marketing page is really a CODE question — if that page links to its own
     // source repo, follow it one hop and answer from the code, not the copy.
+    // NOTE: the repo URL comes from page CONTENT (attacker-influenceable), so its
+    // fetched files are DATA, not instructions — the same RAG-injection surface
+    // as any followed link. parseRepoUrl allow-lists hosts (github/gitlab/…) and
+    // getRepoTree only hits their public read APIs, which bounds the exposure.
     let repoRef = parseRepoUrl(pageContext.url);
     if (!repoRef && isImplementationQuestion(effectiveQuery)) {
       const linked = findRepoUrlInText(pageContext.markdown);

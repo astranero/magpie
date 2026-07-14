@@ -158,10 +158,19 @@ export function mentionsPageDeixis(q: string): boolean {
   return PAGE_DEIXIS_RE.test(q || '');
 }
 
-/** Does the question share a content keyword with the page (title + body sample)?
- *  A cheap "is this plausibly about the page" signal for the intent router. */
+// Words too common to signal "this question is about the page" — a page
+// containing "today"/"new"/"time" shouldn't bind an unrelated question to it.
+const OVERLAP_STOP = new Set([
+  'today', 'tomorrow', 'yesterday', 'tonight', 'now', 'new', 'old', 'good', 'bad',
+  'thing', 'things', 'stuff', 'time', 'times', 'year', 'years', 'day', 'days',
+  'week', 'weeks', 'month', 'lot', 'big', 'small', 'best', 'worst', 'top',
+]);
+
+/** Does the question share a MEANINGFUL content keyword with the page (title +
+ *  body sample)? A cheap "is this plausibly about the page" signal for the intent
+ *  router; low-signal common words are excluded so they don't force a false match. */
 export function overlapsPage(q: string, pageText: string): boolean {
-  const kw = questionKeywords(q);
+  const kw = questionKeywords(q).filter(k => !OVERLAP_STOP.has(k));
   if (!kw.length) return false;
   const hay = (pageText || '').toLowerCase();
   return kw.some(k => hay.includes(k));

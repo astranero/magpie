@@ -110,6 +110,8 @@ describe('intent router heuristics', () => {
     expect(overlapsPage('what can you say about pricing', page)).toBe(true);
     expect(overlapsPage('is today cold', page)).toBe(false);
     expect(overlapsPage('what about this', page)).toBe(false); // only stopwords → no overlap
+    // Low-signal common words alone must not bind the question to the page.
+    expect(overlapsPage('what is new', 'we shipped new features today')).toBe(false);
   });
 });
 

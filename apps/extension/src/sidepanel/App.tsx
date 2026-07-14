@@ -150,6 +150,11 @@ export default function App() {
     // adopted chat that isn't in the project.
     const adopt = (s: any) => {
       if (!s || typeof s !== 'object') return;
+      // Record what we're adopting so the resulting state change doesn't echo a
+      // redundant write back to storage.
+      if (typeof s.projectId === 'string' && s.projectId && typeof s.chatId === 'string' && s.chatId) {
+        lastSessionJsonRef.current = JSON.stringify({ projectId: s.projectId, chatId: s.chatId });
+      }
       if (typeof s.projectId === 'string' && s.projectId) setActiveProjectId(prev => (prev === s.projectId ? prev : s.projectId));
       if (typeof s.chatId === 'string' && s.chatId) setActiveChatId(prev => (prev === s.chatId ? prev : s.chatId));
     };
@@ -203,6 +208,10 @@ export default function App() {
   // Chats THIS instance is actively streaming — so a CHAT_STATE broadcast from
   // the background (which echoes to us too) doesn't fight our own live stream.
   const streamingChatsRef = useRef<Set<string>>(new Set());
+  // Last active-session pair we wrote/adopted, so an adopt→setState→effect cycle
+  // doesn't re-publish the same value (chrome.storage.set fires onChanged even
+  // when the value is unchanged).
+  const lastSessionJsonRef = useRef<string>('');
 
   // F3: buffer streamed deltas + flush once per animation frame.
   // Prevents per-token setMessages storms during long responses.
@@ -662,7 +671,11 @@ export default function App() {
   useEffect(() => {
     if (activeChatId) {
       if (typeof chrome !== 'undefined' && chrome.storage && activeProjectId) {
-        chrome.storage.local.set({ araActiveSession: { projectId: activeProjectId, chatId: activeChatId } });
+        const json = JSON.stringify({ projectId: activeProjectId, chatId: activeChatId });
+        if (json !== lastSessionJsonRef.current) {
+          lastSessionJsonRef.current = json;
+          chrome.storage.local.set({ araActiveSession: { projectId: activeProjectId, chatId: activeChatId } });
+        }
       }
       loadChatHistory(activeChatId);
     }
