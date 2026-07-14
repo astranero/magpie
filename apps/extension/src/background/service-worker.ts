@@ -1252,6 +1252,7 @@ async function buildChatRequest(chatId: string, projectId: string, prompt: strin
   const RESPONSE_STYLE =
     `\nRESPONSE STYLE — write like an expert collaborator, not a chatbot:\n` +
     `• Lead with the answer or artifact. NO preamble, no "Certainly!/Great question!", no sycophancy, no closing summary.\n` +
+    `• Sound human and plain-spoken: state facts directly ("it's 23°C in Helsinki, feels like 18°"), not stiff nominalizations ("is considered cold", "is described as pleasant"). No robotic hedging.\n` +
     `• Match length to the question: a definition gets 2-4 sentences, a how-to gets a compact step list. Don't pre-answer things not asked.\n` +
     `• Calibrate to the user's demonstrated expertise — use precise terms, don't over-explain standard basics.\n` +
     `• Prefer scannable structure — bold key terms, short lists, a comparison table — over dense paragraphs. Section headings only when several distinct things were asked.\n` +
@@ -1328,9 +1329,10 @@ async function buildChatRequest(chatId: string, projectId: string, prompt: strin
       console.log(`[RAG] No workspace match — answered from ${web.sources.length} live web source(s)`);
       webSources = web.sources;
       systemPrompt =
-        `You are a helpful research assistant. The user's saved workspace had no match, so the excerpts below were pulled from a LIVE WEB SEARCH run just now. ` +
-        `Begin your answer with this exact italic line: *Searched the web — sources below.* ` +
-        `Answer from the excerpts and attribute claims in plain text to the numbered sources, e.g. "per [W2]". Do NOT invent citation anchors or facts beyond the excerpts; if they don't answer the question, say so plainly.` +
+        `You are a friendly, knowledgeable assistant. The excerpts below were pulled from a live web search just now — treat them as your facts. ` +
+        `Answer the way a sharp, helpful friend would: lead with the direct answer in natural, plain language, then just enough detail — no more. ` +
+        `Do NOT clutter the prose with [W#] tags or "per [W2]" — the sources are already shown as links below; reference one inline only if it genuinely adds clarity. ` +
+        `Use only what the excerpts support; if they don't actually answer the question, say so plainly rather than padding.` +
         RESPONSE_STYLE +
         `\n--- WEB RESULTS ---\n${web.context}\n--- END WEB RESULTS ---`;
     } else {
@@ -2032,9 +2034,9 @@ chrome.runtime.onConnect.addListener((port) => {
           safePost({ type: 'RESET' });   // clear the refusal from the panel
           full = '';
           const webSys =
-            `You are a helpful research assistant. The user's saved workspace didn't cover this, so the excerpts below are from a LIVE WEB SEARCH run just now. ` +
-            `Begin with this exact italic line: *Searched the web — sources below.* ` +
-            `Answer from the excerpts and attribute claims in plain text to the numbered sources, e.g. "per [W2]". Don't invent citations or facts beyond them; if they don't answer it, say so.` +
+            `You are a friendly, knowledgeable assistant. The excerpts below are from a live web search run just now — treat them as your facts. ` +
+            `Answer like a sharp, helpful friend: lead with the direct answer in natural, plain language, then just enough detail. ` +
+            `Don't clutter the prose with [W#] tags — the sources are shown as links below. Use only what the excerpts support; if they don't answer it, say so plainly.` +
             `\n--- WEB RESULTS ---\n${web.context}\n--- END WEB RESULTS ---`;
           await chatWithCustomStream(webSys, [], prompt, localController.signal, (delta) => {
             full += delta;
