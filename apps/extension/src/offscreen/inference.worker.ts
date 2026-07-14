@@ -143,17 +143,46 @@ async function getReranker() {
 
 const sigmoid = (x: number) => 1 / (1 + Math.exp(-x));
 
+// Bound peak allocation the same way the embedder does. Without this a single
+// rerank of many long passages pads them ALL into one tensor, and if the
+// tokenizer's model_max_length is the "no limit" sentinel, `truncation:true` is
+// a no-op → the tensor explodes → OrtRun std::bad_alloc, which on a heavy deep-
+// research run took down the whole offscreen renderer. ms-marco context is 512
+// tokens; ~2000 chars stays under that for English.
+const MAX_RERANK_CHARS = 2000;
+const RERANK_MAX_LENGTH = 512;
+const RERANK_BATCH = 16;
+
+async function resetReranker(): Promise<void> {
+  try { await rerankerModel?.dispose?.(); } catch { /* best-effort */ }
+  tokenizer = null;
+  rerankerModel = null;
+}
+
 async function rerank(query: string, passages: string[]): Promise<number[]> {
-  const { tokenizer, model } = await getReranker();
-  const inputs = await tokenizer(Array(passages.length).fill(query), {
-    text_pair: passages,
-    padding: true,
-    truncation: true,
-  });
-  const { logits } = await model(inputs);
-  const data = logits.data as Float32Array;
   const scores: number[] = [];
-  for (let i = 0; i < passages.length; i++) scores.push(sigmoid(data[i]));
+  for (let i = 0; i < passages.length; i += RERANK_BATCH) {
+    const batch = passages.slice(i, i + RERANK_BATCH)
+      .map(p => (p.length > MAX_RERANK_CHARS ? p.slice(0, MAX_RERANK_CHARS) : p));
+    try {
+      const { tokenizer, model } = await getReranker();
+      const inputs = await tokenizer(Array(batch.length).fill(query), {
+        text_pair: batch,
+        padding: true,
+        truncation: true,
+        max_length: RERANK_MAX_LENGTH,   // force truncation even if model_max_length is the sentinel
+      });
+      const { logits } = await model(inputs);
+      const data = logits.data as Float32Array;
+      for (let j = 0; j < batch.length; j++) scores.push(sigmoid(data[j]));
+    } catch (err) {
+      // A batch OOM wedges the session — rebuild before continuing so the rest
+      // of the run doesn't fail on a poisoned heap. Neutral score for this batch.
+      console.warn('Rerank batch failed, resetting reranker:', err);
+      await resetReranker();
+      for (let j = 0; j < batch.length; j++) scores.push(0.5);
+    }
+  }
   return scores;
 }
 
