@@ -643,6 +643,50 @@ function renderSourceEntry(r: SourceRecord): string {
   return sourceEntry(r.title, r.url);
 }
 
+/** Escape parens so a URL doesn't terminate a markdown link early. */
+function escLinkUrl(url: string): string {
+  return url.replace(/\(/g, '%28').replace(/\)/g, '%29');
+}
+
+/**
+ * In the chat panel, inline `[shortId.sN.pM]` anchors resolve to clickable
+ * citation chips at render time. A saved/exported markdown file has no such
+ * resolver, so those anchors were dead raw text. Rewrite them into real
+ * markdown links pointing at the cited source's URL, numbered in order of first
+ * appearance so `[[3](url)]` lines up with `3.` in the Sources list.
+ *
+ * The anchor's short id is `makeDocShortId(record.docId)`, so we map anchors to
+ * SourceRecords directly — no DB round-trip. Grouped `[a, b]` anchors (rare;
+ * the synthesis prompt asks for individual brackets) are left as-is. Returns the
+ * linked text plus the cited records in citation order.
+ */
+export function linkifyReportCitations(
+  synthesis: string,
+  records: SourceRecord[]
+): { text: string; cited: SourceRecord[] } {
+  const byShort = new Map<string, SourceRecord>();
+  for (const r of records) {
+    if (!r.docId) continue;
+    const short = makeDocShortId(r.docId);
+    if (!byShort.has(short)) byShort.set(short, r);
+  }
+  const numByShort = new Map<string, number>();
+  const cited: SourceRecord[] = [];
+  const re = /\[([a-z]\w{1,8})\.s\d+\.p\d+(?:\.\d+)?\]/gi;
+  const text = synthesis.replace(re, (full, short: string) => {
+    const rec = byShort.get(short);
+    if (!rec) return full; // unknown anchor — leave untouched rather than drop it
+    let n = numByShort.get(short);
+    if (n === undefined) {
+      n = cited.length + 1;
+      numByShort.set(short, n);
+      cited.push(rec);
+    }
+    return rec.url ? `[[${n}](${escLinkUrl(rec.url)})]` : `[${n}]`;
+  });
+  return { text, cited };
+}
+
 /**
  * URLs that can never be research sources: schema/DTD references, asset
  * files, tracker endpoints. These leak in from link extraction on scraped
@@ -1261,8 +1305,15 @@ async function saveSynthesisReport(
 ): Promise<void> {
   const truncatedTopic = topic.length > 120 ? topic.slice(0, 117) + '…' : topic;
   const title = `Deep Research: ${truncatedTopic}`;
-  const sourceLines = [...new Set(dedupeSourceRecords(sources).map(renderSourceEntry))];
-  const body = `${synthesis}\n\n## Sources\n${sourceLines.map(s => `- ${s}`).join('\n')}`;
+
+  // Turn inline [anchor] citations into real links, and number the Sources list
+  // to match — cited sources first (in citation order), then any uncited ones.
+  const { text: linkedSynthesis, cited } = linkifyReportCitations(synthesis, sources);
+  const unique = dedupeSourceRecords(sources).filter(r => r.url || r.title);
+  const citedKeys = new Set(cited.map(r => r.docId || r.url));
+  const ordered = [...cited, ...unique.filter(r => !citedKeys.has(r.docId || r.url))];
+  const sourceLines = ordered.map((r, i) => `${i + 1}. ${renderSourceEntry(r)}`);
+  const body = `${linkedSynthesis}\n\n## Sources\n${sourceLines.join('\n')}`;
   const fullSynthesisMarkdown = buildFrontmatter({
     title,
     type: 'deep-research',

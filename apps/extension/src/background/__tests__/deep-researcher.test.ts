@@ -31,8 +31,41 @@ import {
   buildSourcesDocMarkdown,
   formatEvaluationBlock,
   buildCleanedPdfDoc,
+  linkifyReportCitations,
   SourceRecord,
 } from '../deep-researcher';
+
+describe('linkifyReportCitations', () => {
+  // makeDocShortId = 'd' + fullId.slice(0,6), so docId '9b96b9…' → anchor short 'd9b96b9'
+  const rec = (docId: string, url: string, title: string): SourceRecord =>
+    ({ docId, url, title, label: 'WEB', tier: 'standard' });
+
+  it('rewrites inline anchors to numbered markdown links', () => {
+    const records = [rec('9b96b9AA', 'https://ex.com/a', 'Paper A')];
+    const { text, cited } = linkifyReportCitations('Claim [d9b96b9.s1.p6].', records);
+    expect(text).toBe('Claim [[1](https://ex.com/a)].');
+    expect(cited).toHaveLength(1);
+  });
+
+  it('reuses the same number for repeated anchors of one source', () => {
+    const records = [rec('9b96b9AA', 'https://ex.com/a', 'A'), rec('412359BB', 'https://ex.com/b', 'B')];
+    const { text, cited } = linkifyReportCitations('[d9b96b9.s1.p6] x [d412359.s2.p1] y [d9b96b9.s3.p0].', records);
+    expect(text).toBe('[[1](https://ex.com/a)] x [[2](https://ex.com/b)] y [[1](https://ex.com/a)].');
+    expect(cited.map(c => c.title)).toEqual(['A', 'B']);
+  });
+
+  it('escapes parens in URLs and leaves unknown anchors untouched', () => {
+    const records = [rec('9b96b9AA', 'https://ex.com/a_(1)', 'A')];
+    const { text } = linkifyReportCitations('[d9b96b9.s1.p6] and [dZZZZ99.s1.p1].', records);
+    expect(text).toBe('[[1](https://ex.com/a_%281%29)] and [dZZZZ99.s1.p1].');
+  });
+
+  it('numbers plain [n] when the source has no URL', () => {
+    const records = [rec('9b96b9AA', '', 'A')];
+    const { text } = linkifyReportCitations('[d9b96b9.s1.p6].', records);
+    expect(text).toBe('[1].');
+  });
+});
 
 describe('generated report/doc content is pure markdown (no raw HTML tags)', () => {
   // The report + document renderers deliberately have no raw-HTML plugin
