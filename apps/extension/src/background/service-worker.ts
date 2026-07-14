@@ -1140,14 +1140,17 @@ async function buildChatRequest(chatId: string, projectId: string, prompt: strin
   // page-section selection, and link scoring all see real signal.
   if (needsIntentResolution(prompt, formattedHistory.length)) onStatus?.('Understanding the question…');
   const effectiveQuery = await resolveQuestionIntent(prompt, formattedHistory, pageContext?.title, signal);
-  onStatus?.('Searching your sources…');
+  if (!pageContext) onStatus?.('Searching your sources…');
 
   // ── Multi-Query Adaptive RAG ──
   // 1. Initial search with the (intent-resolved) query
   // 2. If results are sparse, expand the query using the LLM into 2-3 variants
   // 3. Search each variant and merge results
+  // Skip workspace retrieval when 📄 ON: the page wins (see the gate below), so
+  // searching the library here is wasted work — and a wasted query embed on the
+  // hot path. Chit-chat already returned above.
   let relevantChunks: any[] = [];
-  if (docIds.length > 0) {
+  if (!pageContext && docIds.length > 0) {
     relevantChunks = await searchSessionChunks(projectId, effectiveQuery, 40, docIds, embedOpts());
     console.log(`[RAG] Initial search for "${effectiveQuery.slice(0, 50)}..." returned ${relevantChunks.length} chunks`);
 
@@ -1221,7 +1224,12 @@ async function buildChatRequest(chatId: string, projectId: string, prompt: strin
   // refusal instead of searching the web. Only ground on the workspace when the
   // best chunk is GENUINELY relevant (see isConfidentMatch); otherwise fall
   // through to the web-search / general-knowledge branch below.
-  if (isConfidentMatch(relevantChunks as Array<{ rerankScore?: number }>)) {
+  // 📄 ON (pageContext present) is an explicit "answer about THIS page" signal,
+  // so the page wins outright — even a confident workspace match must not
+  // hijack it. Without this gate, an imported library doc that happens to match
+  // the keyword ("pricing") fires the citation branch and answers from the doc
+  // (inventing tiers, citing [1..14]) while ignoring the page the user attached.
+  if (!pageContext && isConfidentMatch(relevantChunks as Array<{ rerankScore?: number }>)) {
     grounded = true;
     // Build citation-anchored context (generous — favor fuller grounding over
     // "I couldn't find it" cutoffs; only fires for library-source questions).
@@ -1233,8 +1241,10 @@ async function buildChatRequest(chatId: string, projectId: string, prompt: strin
       RESPONSE_STYLE +
       `\n--- SOURCES ---\n${context}\n--- END SOURCES ---`;
   } else if (pageContext) {
-    // The user has a page open and no workspace match — they're asking ABOUT
-    // that page. Answer from it (appended below), NOT from a live web search:
+    // The user attached the current page (📄 ON) — they're asking ABOUT that
+    // page. Answer from it (appended below), NOT from a live web search and NOT
+    // from library docs (workspace grounding is intentionally skipped above so a
+    // keyword-matching imported doc can't override the page). Concretely:
     // a page-grounded question ("what is this?", "how much is their pricing?")
     // that also triggers a web search drags in unrelated hits (e.g. the pH-
     // indicator "litmus", a generic pricing guide) and pollutes the answer. If
