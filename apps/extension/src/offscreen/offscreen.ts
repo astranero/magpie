@@ -39,10 +39,18 @@ inferenceWorker.onerror = (e) => {
   workerPending.clear();
 };
 
+const WORKER_CALL_TIMEOUT_MS = 45_000;
 function callWorker<T>(msg: Record<string, unknown>): Promise<T> {
   const id = ++workerReqSeq;
   return new Promise<T>((resolve, reject) => {
-    workerPending.set(id, { resolve, reject });
+    // A stuck model load / inference must not hang the caller forever — bound it.
+    const timer = setTimeout(() => {
+      if (workerPending.delete(id)) reject(new Error('inference worker timed out'));
+    }, WORKER_CALL_TIMEOUT_MS);
+    workerPending.set(id, {
+      resolve: (v: any) => { clearTimeout(timer); resolve(v); },
+      reject: (e: any) => { clearTimeout(timer); reject(e); },
+    });
     inferenceWorker.postMessage({ id, ...msg });
   });
 }

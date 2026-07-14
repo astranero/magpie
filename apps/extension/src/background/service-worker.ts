@@ -1846,7 +1846,13 @@ async function agenticGather(
 
   for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
     const resp = await chatWithTools(messages, tools, signal);   // may throw → caller falls back
-    if (resp.toolCalls.length === 0) break;
+    if (resp.toolCalls.length === 0) {
+      // No tool calls on the very first round means the provider can't (or won't)
+      // tool-call — throw so the caller falls back to semantic selection rather
+      // than answer with zero gathered context. Later rounds legitimately stop.
+      if (round === 0 && blocks.length === 0) throw new Error('agentic: provider made no tool calls');
+      break;
+    }
     messages.push(resp.assistantMessage);
     for (const call of resp.toolCalls) {
       let result = 'error';

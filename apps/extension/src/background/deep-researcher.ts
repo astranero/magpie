@@ -420,8 +420,13 @@ export async function gatherWebSnippets(
   // instead of pulling the open web. `site:` also nudges providers that honor it.
   const onHost = (u: string): boolean => {
     if (!restrictToHost) return true;
-    try { return new URL(u).hostname.replace(/^www\./, '').endsWith(restrictToHost.replace(/^www\./, '')); }
-    catch { return false; }
+    const base = restrictToHost.replace(/^www\./, '');
+    try {
+      const h = new URL(u).hostname.replace(/^www\./, '');
+      // Exact host or a real subdomain — a plain endsWith would also match a
+      // look-alike like "notlearn.microsoft.com".
+      return h === base || h.endsWith('.' + base);
+    } catch { return false; }
   };
   if (restrictToHost) query = `site:${restrictToHost} ${query}`;
   const MAX_FETCH = 2;        // top results to actually scrape (chat wants speed)
