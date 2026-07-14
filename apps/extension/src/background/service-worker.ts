@@ -17,14 +17,14 @@ import { get as idbGet } from 'idb-keyval';
 import { runDeepResearch, generateSubQuestions, scrapeUrl, isJunkUrl, gatherWebSnippets } from './deep-researcher';
 import { harvestReferences } from '../lib/reference-harvest';
 import { needsIntentResolution, formatHistoryForIntent, parseRepoUrl, selectTreePaths, formatTreeBlock, isChitchat, isRefusalAnswer, isStructureQuestion, RepoRef } from '../lib/query-intent';
-import { selectSemantic, fetchWithinBudget, parseRouterSelection, RerankFn, LinkRef, Selection } from '../lib/context-retrieval';
+import { selectSemantic, fetchWithinBudget, parseRouterSelection, TOTAL_CTX_BUDGET, RerankFn, LinkRef, Selection } from '../lib/context-retrieval';
 import { getResearchLimits } from '../lib/research-limits';
 import { looksLikeBuildLog, extractLogHighlights } from '../lib/log-highlights';
 import { addChunksToVectorStore, searchSessionChunks, resetSessionIndex, resetAllSessionIndexes, isConfidentMatch } from '../lib/vector-store';
 import { replaceChunksForDoc } from '../lib/db';
 import { pdfUrlToBody, pdfOpfsToBody, ensureOffscreen as ensureOffscreenDoc } from '../lib/pdf-parser';
 import { setEnsureOffscreen, sendToOffscreen } from '../lib/offscreen-client';
-import { getProviderSettings, chatWithCustom, chatWithCustomStream, handleFetchCustomModels } from './llm-client';
+import { getProviderSettings, chatWithCustom, chatWithCustomStream, handleFetchCustomModels, chatWithTools, ToolDef } from './llm-client';
 import { handleSearchLibrary, handleRecallDocs } from './library-handlers';
 import { handleLinkDocument, handleUnlinkDocument, handleListDocuments, handleGetDocument, handleDeleteDocument, handleGetDocumentCount, handleUpdateDocumentSelection } from './document-handlers';
 import { handleCreateProject, handleListProjects, handleGetProject, handleUpdateProject, handleDeleteProject, handleCreateChat, handleListChats, handleDeleteChat, handleUpdateChat } from './project-handlers';
@@ -1315,8 +1315,7 @@ async function buildChatRequest(chatId: string, projectId: string, prompt: strin
     // ── Selective enrichment ──
     // Load ONLY the repo files / page links relevant to this question, under a
     // shared budget + deadline — instead of dumping the whole tree and every
-    // link. Strategy is user-toggleable ('agentic' is handled in the streaming
-    // layer; the non-stream path here selects semantically for any strategy).
+    // link. Strategy is user-toggleable (semantic | router | agentic).
     const strategy = await getPageContextStrategy();
     const repoRef = parseRepoUrl(pageContext.url);
     const tree = repoRef ? await getRepoTree(repoRef).catch(() => null) : null;
@@ -1333,25 +1332,53 @@ async function buildChatRequest(chatId: string, projectId: string, prompt: strin
       seenUrls: new Set([pageContext.url]), isJunk: isJunkUrl, max: 150,
     }).filter(r => r.kind === 'web' && r.anchorText).map(r => ({ url: r.url, anchorText: r.anchorText }));
 
-    const selection = await selectPageContext(
-      strategy, effectiveQuery, tree ? tree.paths : [], linkRefs, chatWithCustom, signal,
-    ).catch(e => { console.warn('[CTX] selection failed:', e); return { files: [], links: [] } as Selection; });
-
-    if (selection.files.length || selection.links.length) {
-      onStatus?.('Reading relevant files & links…');
+    // Semantic/router selection → budgeted fetch. Shared by the semantic path
+    // and as the fallback when agentic can't tool-call.
+    const semanticEnrich = async (): Promise<{ blocks: string[]; sources: Array<{ title: string; url: string }> }> => {
+      const selection = await selectPageContext(
+        'semantic', effectiveQuery, tree ? tree.paths : [], linkRefs, chatWithCustom, signal,
+      ).catch(e => { console.warn('[CTX] selection failed:', e); return { files: [], links: [] } as Selection; });
+      if (!selection.files.length && !selection.links.length) return { blocks: [], sources: [] };
       const items: EnrichItem[] = [
         ...(tree && repoRef ? selection.files.map(path => ({ kind: 'file' as const, path })) : []),
         ...selection.links.map(l => ({ kind: 'link' as const, url: l.url, title: l.title })),
       ];
-      const { blocks, sources } = await fetchWithinBudget(items, async (item, sig) => {
+      return fetchWithinBudget(items, async (item, sig) => {
         if (item.kind === 'file' && repoRef && tree) return fetchRepoFileBlock(repoRef, tree.branch, item.path);
         if (item.kind === 'link') return fetchLinkBlock(item.url, item.title, sig);
         return null;
       });
-      for (const b of blocks) systemPrompt += b;
-      for (const s of sources) linkedPages.push(s);
-      if (sources.length) console.log(`[CTX] followed ${sources.length} link(s): ${sources.map(s => s.url).join(', ')}`);
+    };
+
+    let enrich: { blocks: string[]; sources: Array<{ title: string; url: string }> };
+    if (strategy === 'router') {
+      // router selects, but reuses the same budgeted fetch as semantic
+      onStatus?.('Choosing what to open…');
+      const routed = await selectPageContext('router', effectiveQuery, tree ? tree.paths : [], linkRefs, chatWithCustom, signal)
+        .catch(() => ({ files: [], links: [] } as Selection));
+      const items: EnrichItem[] = [
+        ...(tree && repoRef ? routed.files.map(path => ({ kind: 'file' as const, path })) : []),
+        ...routed.links.map(l => ({ kind: 'link' as const, url: l.url, title: l.title })),
+      ];
+      enrich = items.length
+        ? await fetchWithinBudget(items, async (item, sig) => {
+            if (item.kind === 'file' && repoRef && tree) return fetchRepoFileBlock(repoRef, tree.branch, item.path);
+            if (item.kind === 'link') return fetchLinkBlock(item.url, item.title, sig);
+            return null;
+          })
+        : { blocks: [], sources: [] };
+    } else if (strategy === 'agentic') {
+      onStatus?.('Exploring the page…');
+      enrich = await agenticGather(effectiveQuery, repoRef, tree, linkRefs, signal)
+        .catch(async e => { console.warn('[CTX] agentic failed, falling back to semantic:', e); return semanticEnrich(); });
+    } else {
+      onStatus?.('Reading relevant files & links…');
+      enrich = await semanticEnrich();
     }
+
+    for (const b of enrich.blocks) systemPrompt += b;
+    for (const s of enrich.sources) linkedPages.push(s);
+    if (enrich.sources.length) console.log(`[CTX] followed ${enrich.sources.length} source(s): ${enrich.sources.map(s => s.url).join(', ')}`);
   }
 
   onStatus?.('Writing the answer…');
@@ -1636,6 +1663,94 @@ async function fetchLinkBlock(url: string, title: string, signal: AbortSignal): 
     `Title: ${t}\nURL: ${url}\n\n${body}\n--- END LINKED PAGE ---\n` +
     `Attribute claims from it in plain text — you may link it inline as [${t}](${url}). No [anchor] citations.`;
   return { block, chars: body.length, source: { title: t, url } };
+}
+
+// ── AGENTIC strategy: let the model open files/links/web on demand ──
+const MAX_TOOL_ROUNDS = 3;
+
+/**
+ * Bounded tool loop: the model decides which files/links to read (and whether to
+ * search the web) to answer, calling tools until it has enough or the round /
+ * budget cap is hit. Returns the gathered prompt blocks + sources; the normal
+ * streaming answer then runs with them appended (so citations/footer/streaming
+ * all stay intact). Throws only on a provider that can't tool-call — the caller
+ * then falls back to semantic selection.
+ */
+async function agenticGather(
+  question: string, repoRef: RepoRef | null, tree: RepoTree | null, linkRefs: LinkRef[], signal: AbortSignal,
+): Promise<{ blocks: string[]; sources: Array<{ title: string; url: string }> }> {
+  const tools: ToolDef[] = [];
+  const catalogFiles = tree && repoRef ? selectTreePaths(tree.paths.filter(p => !p.endsWith('/')), question, 6_000).selected : [];
+  if (catalogFiles.length) {
+    tools.push({ type: 'function', function: { name: 'read_file', description: 'Read the raw contents of one repository file by its exact path.', parameters: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'] } } });
+  }
+  if (linkRefs.length) {
+    tools.push({ type: 'function', function: { name: 'read_link', description: 'Fetch the readable content of one link found on the current page, by its exact URL.', parameters: { type: 'object', properties: { url: { type: 'string' } }, required: ['url'] } } });
+  }
+  const webAllowed = await isChatWebFallbackEnabled();
+  if (webAllowed) {
+    tools.push({ type: 'function', function: { name: 'search_web', description: 'Run a live web search when the page and repo cannot answer.', parameters: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'] } } });
+  }
+  if (tools.length === 0) return { blocks: [], sources: [] };
+
+  const catalogLinks = linkRefs.slice(0, 60);
+  const sys =
+    `You gather just enough context to answer a question about the web page the user is viewing. ` +
+    `Open only the FEW files/links that matter (≤4 total); search the web only if the page/repo can't answer. ` +
+    `Stop calling tools as soon as you have enough — do not over-fetch.\n` +
+    (catalogFiles.length ? `\nRepository files you may read:\n${catalogFiles.join('\n')}\n` : '') +
+    (catalogLinks.length ? `\nPage links you may read:\n${catalogLinks.map(l => `${l.anchorText || l.url} — ${l.url}`).join('\n')}\n` : '');
+  const messages: any[] = [{ role: 'system', content: sys }, { role: 'user', content: question }];
+
+  const blocks: string[] = [];
+  const sources: Array<{ title: string; url: string }> = [];
+  let used = 0;
+  const validPaths = new Set(catalogFiles);
+  const linkByUrl = new Map(linkRefs.map(l => [l.url, l]));
+
+  for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
+    const resp = await chatWithTools(messages, tools, signal);   // may throw → caller falls back
+    if (resp.toolCalls.length === 0) break;
+    messages.push(resp.assistantMessage);
+    for (const call of resp.toolCalls) {
+      let result = 'error';
+      try {
+        if (call.name === 'read_file' && repoRef && tree) {
+          const path = String(call.args?.path || '');
+          if (!validPaths.has(path)) result = 'path not in this repo';
+          else {
+            const b = await fetchRepoFileBlock(repoRef, tree.branch, path);
+            if (b && used + b.chars <= TOTAL_CTX_BUDGET) { blocks.push(b.block); used += b.chars; result = `read ${path}`; }
+            else result = b ? 'context budget full' : 'file unavailable';
+          }
+        } else if (call.name === 'read_link') {
+          const url = String(call.args?.url || '');
+          const known = linkByUrl.get(url);
+          if (!known) result = 'link not on the page';
+          else {
+            const b = await fetchLinkBlock(url, known.anchorText || url, signal);
+            if (b && used + b.chars <= TOTAL_CTX_BUDGET) { blocks.push(b.block); sources.push(b.source); used += b.chars; result = `read ${url}`; }
+            else result = b ? 'context budget full' : 'unreadable';
+          }
+        } else if (call.name === 'search_web' && webAllowed) {
+          const web = await gatherWebSnippets(String(call.args?.query || question), { signal });
+          if (web.context && used + web.context.length <= TOTAL_CTX_BUDGET) {
+            blocks.push(`\n\n--- WEB RESULTS ---\n${web.context}\n--- END WEB RESULTS ---`);
+            sources.push(...web.sources); used += web.context.length; result = 'web results added';
+          } else result = 'no useful web results';
+        } else {
+          result = 'unknown tool';
+        }
+      } catch (e) {
+        if (signal.aborted) throw e;
+        result = 'error fetching';
+      }
+      messages.push({ role: 'tool', tool_call_id: call.id, content: result });
+    }
+    if (used >= TOTAL_CTX_BUDGET) break;
+  }
+  console.log(`[CTX/agentic] gathered ${blocks.length} block(s), ${sources.length} source(s)`);
+  return { blocks, sources };
 }
 
 /**

@@ -165,6 +165,55 @@ export async function chatWithCustomStream(
   }
 }
 
+// ─────────────────────────────────────────────
+// Tool-calling (OpenAI-compatible) — for the agentic page-context strategy
+// ─────────────────────────────────────────────
+
+export interface ToolDef {
+  type: 'function';
+  function: { name: string; description: string; parameters: Record<string, unknown> };
+}
+export interface ToolCall { id: string; name: string; args: any }
+
+function safeParseArgs(raw: unknown): any {
+  if (typeof raw !== 'string') return raw ?? {};
+  try { return JSON.parse(raw); } catch { return {}; }
+}
+
+/**
+ * One tool-calling round: send messages + tool schemas, return any tool calls
+ * the model made plus its assistant message (to append verbatim to the running
+ * transcript before the tool results). Model-agnostic OpenAI shape; providers
+ * without tool support simply return no tool_calls, so the caller stops.
+ */
+export async function chatWithTools(
+  messages: any[], tools: ToolDef[], signal?: AbortSignal,
+): Promise<{ toolCalls: ToolCall[]; content: string; assistantMessage: any }> {
+  const { apiKey, endpoint, model } = await getProviderSettings();
+  if (!endpoint) throw new Error('Custom endpoint missing.');
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  if (apiKey) headers['Authorization'] = `Bearer ${apiKey}`;
+
+  const res = await fetch(endpoint, {
+    method: 'POST',
+    headers,
+    signal,
+    body: JSON.stringify({ model, messages, tools, tool_choice: 'auto', temperature: 0.2 }),
+  });
+  if (!res.ok) {
+    const errText = await res.text().catch(() => '');
+    throw new Error(`Custom provider error ${res.status}: ${errText}`);
+  }
+  const data = await res.json();
+  const msg = data.choices?.[0]?.message ?? {};
+  const toolCalls: ToolCall[] = Array.isArray(msg.tool_calls)
+    ? msg.tool_calls
+        .filter((tc: any) => tc?.function?.name)
+        .map((tc: any) => ({ id: tc.id, name: tc.function.name, args: safeParseArgs(tc.function.arguments) }))
+    : [];
+  return { toolCalls, content: msg.content || '', assistantMessage: msg };
+}
+
 export async function handleFetchCustomModels(request: Record<string, unknown>): Promise<Record<string, unknown>> {
   const url = request.url as string;
   const apiKey = request.apiKey as string;
