@@ -7,7 +7,7 @@
 // three strategies (semantic / router / agentic); network + offscreen deps are
 // injected so it stays unit-testable.
 
-import { matchFilesInTree, questionKeywords, lexicalLinkMatch, expandNavKeywords } from './query-intent';
+import { matchFilesInTree, questionKeywords, lexicalLinkMatch, expandNavKeywords, isPageMetaQuestion } from './query-intent';
 
 // ── Hard caps: the "enough to answer, not so much it's slow/noisy" contract ──
 export const MAX_FILES = 3;
@@ -16,6 +16,9 @@ export const MAX_SELECTED = 4;              // combined files + links per turn
 export const TOTAL_CTX_BUDGET = 40_000;     // chars across everything fetched
 export const FETCH_DEADLINE_MS = 8_000;     // wall-clock cap on the fetch phase
 const RERANK_MIN_SCORE = 0.5;               // ms-marco sigmoid: "more likely relevant than not"
+const LINK_RERANK_MIN_SCORE = 0.6;          // links get a HIGHER bar than files: a wrongly-followed
+                                            // link scrapes a whole page of off-topic content, so only
+                                            // follow one the reranker is genuinely confident about.
 const RERANK_MAX_CANDIDATES = 80;           // never rerank thousands of labels (bounded, OOM-safe)
 
 /** A followable link on the current page. */
@@ -68,10 +71,10 @@ async function rankBySemantic<T>(
  * strategy's job).
  *
  * Links: a question keyword (nav-expanded, so pricing → "Plans"/"Billing") on a
- * link's text/href is the obvious next hop — follow it. We deliberately do NOT
- * rerank-follow when nothing lexically matches: a question with no navigational
- * intent ("summarize this page", "what's the consensus?") would otherwise drag
- * in the nearest tangential links and pollute the answer with their content.
+ * link's text/href is the obvious next hop — follow it. If nothing lexically
+ * matches, the reranker picks the link that best fits the QUESTION — but only
+ * for a concrete topical ask (not "summarize this page") and only when it clears
+ * a confident bar, so a merely-nearest tangential link is never followed.
  */
 export async function selectSemantic(
   question: string,
@@ -92,11 +95,17 @@ export async function selectSemantic(
   }
 
   // ── Links ──
-  // Lexical only, expanded to navigational synonyms (pricing → "Plans"/"Billing").
-  // No rerank fallback on purpose — see the doc comment: following the nearest
-  // link for a non-navigational question is what polluted answers.
+  // 1) Lexical, expanded to navigational synonyms (pricing → "Plans"/"Billing").
   const linkKeywords = keywords.length ? expandNavKeywords(keywords) : keywords;
-  const picked: LinkRef[] = linkKeywords.length ? links.filter(l => lexicalLinkMatch(l, linkKeywords)) : [];
+  let picked: LinkRef[] = linkKeywords.length ? links.filter(l => lexicalLinkMatch(l, linkKeywords)) : [];
+  // 2) Smart fallback: no lexical hit → let the reranker choose the link that
+  //    best answers the QUESTION. Gated to concrete topical asks (skip page-
+  //    summary/meta) and to a confident score, so tangential links stay out.
+  if (picked.length === 0 && keywords.length && !isPageMetaQuestion(question)) {
+    picked = await rankBySemantic(
+      question, links, l => `${l.anchorText || ''} ${l.url}`, rerank, MAX_LINKS, LINK_RERANK_MIN_SCORE,
+    );
+  }
   const chosenLinks = picked.slice(0, MAX_LINKS).map(l => ({ url: l.url, title: l.anchorText || l.url }));
 
   // ── Combined cap: files first, then links up to MAX_SELECTED ──

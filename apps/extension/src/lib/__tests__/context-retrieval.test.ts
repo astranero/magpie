@@ -64,10 +64,25 @@ describe('selectSemantic — links', () => {
     expect(rerank).not.toHaveBeenCalled();
   });
 
-  it('follows NOTHING for a non-navigational / meta question (no rerank pollution)', async () => {
+  it('smart fallback: reranker picks the best link for a topical ask with no lexical hit', async () => {
+    const docs: LinkRef[] = [
+      { url: 'https://learn.ms/arm/overview', anchorText: 'ARM overview' },
+      { url: 'https://learn.ms/azure/pipelines', anchorText: 'Azure Pipelines' },
+      { url: 'https://learn.ms/arm/limits', anchorText: 'Resource group service quotas' },
+    ];
+    const sel = await selectSemantic('tell me about pipelines', [], docs, substringRerank);
+    expect(sel.links.map(l => l.url)).toEqual(['https://learn.ms/azure/pipelines']);
+  });
+
+  it('smart fallback stays quiet when no link clears the confidence bar', async () => {
+    // Nothing scores for "webhooks" → reranker returns low scores → follow none.
+    const sel = await selectSemantic('does it support webhooks', [], links, substringRerank);
+    expect(sel.links).toEqual([]);
+  });
+
+  it('is gated off for a page-summary / meta question (no rerank pollution)', async () => {
     const rerank = vi.fn(substringRerank);
-    // "consensus of this page" carries no navigational intent — must not drag in
-    // the nearest tangential link (the bug this guards against).
+    // "consensus of this page" is about the page itself — must not rerank-follow.
     const sel = await selectSemantic('what is the consensus of this page', [], links, rerank);
     expect(sel.links).toEqual([]);
     expect(rerank).not.toHaveBeenCalled();
