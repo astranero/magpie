@@ -3,7 +3,7 @@
 > Chrome MV3 extension: local-first research knowledge base with
 > citation-grounded chat and multi-agent staged deep research.
 > Component detail lives in `docs/` (STORAGE, CAPTURE, RESEARCH-PIPELINE,
-> CITATIONS, MCP, SKILLS, SECURITY, TESTING).
+> CITATIONS, CHAT-CONTEXT-ROUTING, MCP, SKILLS, SECURITY, TESTING).
 
 ## Execution contexts
 
@@ -86,3 +86,8 @@ question ──▶ hybrid retrieval (Orama BM25 + vectors, in-memory per project
    its sources as first-class documents (that's what makes citations
    permanently resolvable), but only because the user started that run;
    nothing enters the library from ambient browsing.
+5. **📄 ON means the page wins — but only when the question is about it.** The
+   intent router, selective page enrichment, location awareness, and
+   cross-window live-answer sync each have subtle invariants that were bug
+   fixes; see `docs/CHAT-CONTEXT-ROUTING.md` before editing chat routing or the
+   sidepanel sync layer.
