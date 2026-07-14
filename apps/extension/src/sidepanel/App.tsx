@@ -1,6 +1,14 @@
 import { useState, useEffect, useRef, useCallback, Fragment } from 'react';
 import { set } from 'idb-keyval';
 
+// Collision-free message ids. `Date.now()` and `Date.now()+1` for a paired
+// user+assistant bubble collide whenever the clock ticks between the two reads,
+// so the assistant's streamed deltas land in the USER bubble (answer shows up
+// inside the question). A monotonic per-mint counter guarantees distinctness
+// while staying sortable/ordered.
+let _uidSeq = 0;
+const uid = (): string => `m${Date.now().toString(36)}${(_uidSeq++).toString(36)}`;
+
 // Keep one path segment (folder or filename stem) safe across OSes.
 const sanitizeSegment = (name: string): string =>
   (name || '')
@@ -1068,7 +1076,7 @@ export default function App() {
   /** Stream a slash-command turn: labeled user message + systemPromptOverride. */
   const sendCommandOverStream = (userQuery: string, label: string, systemPrompt: string) => {
     const currentChatId = activeChatId;
-    const commandMsg: ChatMessage = { id: Date.now().toString(), role: 'user', text: `[${label}] ${userQuery}` };
+    const commandMsg: ChatMessage = { id: uid(), role: 'user', text: `[${label}] ${userQuery}` };
     setMessages(prev => ({
       ...prev,
       [currentChatId]: [...(prev[currentChatId] || []), commandMsg]
@@ -1078,7 +1086,7 @@ export default function App() {
     const port = chrome.runtime.connect({ name: 'chat-stream' });
     chatPortRef.current = port;
     let finished = false;
-    const assistantId = `${Date.now() + 1}`;
+    const assistantId = uid();
 
     const finish = () => {
       if (finished) return;
@@ -1105,7 +1113,7 @@ export default function App() {
           setMessages(prev => ({
             ...prev,
             [currentChatId]: [...(prev[currentChatId] || []), {
-              id: `${Date.now() + 2}`,
+              id: uid(),
               role: 'system' as const,
               text: (m.error as string) || 'Error — check Settings.'
             }]
@@ -1165,7 +1173,7 @@ export default function App() {
         : `Pulled ${linked.length} document${linked.length === 1 ? '' : 's'} into this workspace — now available for chat:\n\n${linked.map(d => `- **${d.title}**${d.snippet ? `\n  …${d.snippet}…` : ''}`).join('\n')}`;
       setMessages(prev => ({
         ...prev,
-        [activeChatId]: [...(prev[activeChatId] || []), { id: Date.now().toString(), role: 'system' as const, text: body }]
+        [activeChatId]: [...(prev[activeChatId] || []), { id: uid(), role: 'system' as const, text: body }]
       }));
       if (linked.length > 0) loadDocuments(activeProjectId);
       return;
@@ -1226,7 +1234,7 @@ export default function App() {
       const currentChatId = activeChatId;
       setMessages(prev => ({
         ...prev,
-        [currentChatId]: [...(prev[currentChatId] || []), { id: Date.now().toString(), role: 'user', text }]
+        [currentChatId]: [...(prev[currentChatId] || []), { id: uid(), role: 'user', text }]
       }));
       setGenerating(prev => ({ ...prev, [currentChatId]: true }));
       const res = await msg('CREATE_SKILL', { projectId: activeProjectId, chatId: currentChatId, instruction });
@@ -1236,7 +1244,7 @@ export default function App() {
         : `Skill creation failed: ${res.error || 'unknown error'}`;
       setMessages(prev => ({
         ...prev,
-        [currentChatId]: [...(prev[currentChatId] || []), { id: `${Date.now() + 1}`, role: 'system', text: body }]
+        [currentChatId]: [...(prev[currentChatId] || []), { id: uid(), role: 'system', text: body }]
       }));
       if (res.success !== false && res.cmd) loadDocuments(activeProjectId);
       return;
@@ -1265,7 +1273,7 @@ export default function App() {
       setMessages(prev => ({
         ...prev,
         [activeChatId]: [...(prev[activeChatId] || []), {
-          id: Date.now().toString(),
+          id: uid(),
           role: 'system' as const,
           text: helpText
         }]
@@ -1293,16 +1301,16 @@ export default function App() {
     // behind it instead of racing it. Show the message now with a "Queued"
     // badge; drainQueue runs it (and any others, in order) once research ends.
     if (researching[currentProjectId]) {
-      const uid = `q-${Date.now()}`;
+      const queuedId = uid();
       setMessages(prev => ({
         ...prev,
         [currentChatId]: [...(prev[currentChatId] || []), {
-          id: uid, role: 'user' as const,
+          id: queuedId, role: 'user' as const,
           text: forcePageContext ? `[📄 Current Page] ${messageText}` : messageText,
           queued: true
         }]
       }));
-      (queuedRef.current[currentChatId] ||= []).push({ id: uid, text: messageText, forcePageContext, projectId: currentProjectId });
+      (queuedRef.current[currentChatId] ||= []).push({ id: queuedId, text: messageText, forcePageContext, projectId: currentProjectId });
       return;
     }
 
@@ -1320,7 +1328,7 @@ export default function App() {
     currentChatId: string, currentProjectId: string, messageText: string,
     forcePageContext: boolean, existingUserMsgId?: string
   ): Promise<void> => new Promise<void>((resolve) => {
-    const assistantId = `${Date.now() + 1}`;
+    const assistantId = uid();
 
     if (existingUserMsgId) {
       setMessages(prev => {
@@ -1335,7 +1343,7 @@ export default function App() {
       setMessages(prev => ({
         ...prev,
         [currentChatId]: [...(prev[currentChatId] || []), {
-          id: Date.now().toString(), role: 'user' as const,
+          id: uid(), role: 'user' as const,
           text: forcePageContext ? `[📄 Current Page] ${messageText}` : messageText
         }]
       }));
@@ -1382,7 +1390,7 @@ export default function App() {
         setMessages(prev => ({
           ...prev,
           [currentChatId]: [...(prev[currentChatId] || []), {
-            id: `${Date.now() + 2}`, role: 'system' as const,
+            id: uid(), role: 'system' as const,
             text: (m.error as string) || 'Error — check Settings.'
           }]
         }));
@@ -1441,7 +1449,7 @@ export default function App() {
     setMessages(prev => ({
       ...prev,
       [currentChatId]: [...(prev[currentChatId] || []),
-        { id: Date.now().toString(), role: 'user', text: `${mode === 'deep' ? '/deepresearch' : '/research'} ${topic}` },
+        { id: uid(), role: 'user', text: `${mode === 'deep' ? '/deepresearch' : '/research'} ${topic}` },
         {
           id: planMsgId, role: 'assistant', text: '',
           plan: { topic, effectiveTopic: topic, subQuestions: [], mode, status: 'loading' }
@@ -1480,7 +1488,7 @@ export default function App() {
     const plan = planMsg.plan!;
     setMessages(prev => ({
       ...prev,
-      [currentChatId]: [...(prev[currentChatId] || []), { id: Date.now().toString(), role: 'user', text: feedback }]
+      [currentChatId]: [...(prev[currentChatId] || []), { id: uid(), role: 'user', text: feedback }]
     }));
     updateMessage(currentChatId, planMsg.id, m => ({ ...m, plan: { ...m.plan!, status: 'refining' } }));
 
@@ -1505,7 +1513,7 @@ export default function App() {
       setMessages(prev => ({
         ...prev,
         [currentChatId]: [...(prev[currentChatId] || []), {
-          id: `${Date.now() + 1}`, role: 'system',
+          id: uid(), role: 'system',
           text: `Couldn't apply that change (${res.error || 'no revision returned'}). The plan is unchanged — try rephrasing, or press Start.`
         }]
       }));
