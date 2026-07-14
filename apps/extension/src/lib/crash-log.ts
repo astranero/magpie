@@ -18,19 +18,44 @@ export interface Crumb { t: number; s: string; m: string; d?: string }
 
 let buf: Crumb[] | null = null; // in-memory mirror, lazily hydrated
 
+// chrome.storage is NOT available in every extension context — an offscreen
+// document only exposes chrome.runtime, so touching chrome.storage.local there
+// throws "Cannot read properties of undefined (reading 'local')" and, if it's at
+// module top-level, kills the whole document. Feature-detect instead of assuming.
+function localStore(): chrome.storage.StorageArea | null {
+  try { return (chrome as any)?.storage?.local ?? null; } catch { return null; }
+}
+
 async function load(): Promise<Crumb[]> {
   if (buf) return buf;
+  const store = localStore();
+  if (!store) { buf = []; return buf; }
   try {
-    const r = await chrome.storage.local.get(KEY);
+    const r = await store.get(KEY);
     buf = Array.isArray(r[KEY]) ? r[KEY] : [];
   } catch { buf = []; }
   return buf!;
+}
+
+/** Append + persist a crumb in a context that HAS chrome.storage. */
+function append(c: Crumb): void {
+  void (async () => {
+    const b = await load();
+    b.push(c);
+    if (b.length > MAX) b.splice(0, b.length - MAX);
+    try { await localStore()?.set({ [KEY]: b }); } catch { /* best-effort */ }
+  })();
 }
 
 /**
  * Record a breadcrumb. Persisted immediately (not debounced) so it survives a
  * crash in the very next operation — keep call sites COARSE (per PDF, per embed
  * batch, per research stage), not per-item, to bound storage churn.
+ *
+ * In a context without chrome.storage (the offscreen document — which is exactly
+ * where the PDF/embed/rerank crashes happen), the crumb is handed to the service
+ * worker over runtime messaging so it still gets persisted. See
+ * `installCrumbReceiver` on the SW side.
  */
 export function crumb(scope: string, msg: string, data?: unknown): void {
   const c: Crumb = { t: Date.now(), s: scope, m: msg };
@@ -39,12 +64,21 @@ export function crumb(scope: string, msg: string, data?: unknown): void {
     catch { c.d = String(data); }
     if (c.d.length > 500) c.d = c.d.slice(0, 500);
   }
-  void (async () => {
-    const b = await load();
-    b.push(c);
-    if (b.length > MAX) b.splice(0, b.length - MAX);
-    try { await chrome.storage.local.set({ [KEY]: b }); } catch { /* best-effort */ }
-  })();
+  if (localStore()) { append(c); return; }
+  try { (chrome as any)?.runtime?.sendMessage?.({ action: 'CRASH_CRUMB', crumb: c }); }
+  catch { /* nothing else we can do from here */ }
+}
+
+/** Register a receiver so crumbs forwarded from a storage-less context (the
+ *  offscreen doc) get persisted here. Call ONCE from a context WITH chrome
+ *  .storage (the service worker). No-op if messaging isn't available. */
+export function installCrumbReceiver(): void {
+  try {
+    (chrome as any)?.runtime?.onMessage?.addListener?.((req: any) => {
+      if (req?.action === 'CRASH_CRUMB' && req.crumb) append(req.crumb as Crumb);
+      // Don't return true — this is fire-and-forget, no response.
+    });
+  } catch { /* ignore */ }
 }
 
 export async function getCrashLog(): Promise<Crumb[]> {
@@ -53,7 +87,7 @@ export async function getCrashLog(): Promise<Crumb[]> {
 
 export async function clearCrashLog(): Promise<void> {
   buf = [];
-  try { await chrome.storage.local.set({ [KEY]: [] }); } catch { /* ignore */ }
+  try { await localStore()?.set({ [KEY]: [] }); } catch { /* ignore */ }
 }
 
 /** Human-readable dump (also the format the Settings "copy" button produces). */

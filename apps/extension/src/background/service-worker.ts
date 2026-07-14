@@ -24,7 +24,7 @@ import { addChunksToVectorStore, searchSessionChunks, resetSessionIndex, resetAl
 import { replaceChunksForDoc } from '../lib/db';
 import { pdfUrlToBody, pdfOpfsToBody, pdfBase64ToBody, ensureOffscreen as ensureOffscreenDoc } from '../lib/pdf-parser';
 import { setEnsureOffscreen, sendToOffscreen } from '../lib/offscreen-client';
-import { crumb, dumpCrashLog, installCrashHandlers } from '../lib/crash-log';
+import { crumb, dumpCrashLog, installCrashHandlers, installCrumbReceiver } from '../lib/crash-log';
 import { getProviderSettings, chatWithCustom, chatWithCustomStream, handleFetchCustomModels, chatWithTools, ToolDef } from './llm-client';
 import { handleSearchLibrary, handleRecallDocs } from './library-handlers';
 import { handleLinkDocument, handleUnlinkDocument, handleListDocuments, handleGetDocument, handleDeleteDocument, handleGetDocumentCount, handleUpdateDocumentSelection } from './document-handlers';
@@ -87,8 +87,20 @@ const liveChatStreams = new Map<string, string>();
 // was persisted before the previous run ended — so a reload after a crash shows
 // what the worker/offscreen was doing when it died.
 installCrashHandlers('sw');
+// The offscreen document has no chrome.storage, so it forwards its crumbs here
+// (this is where the PDF/embed/rerank crashes actually happen). Persist them.
+installCrumbReceiver();
 dumpCrashLog('[Magpie crashlog]').catch(() => {});
 crumb('sw', 'service worker started');
+
+// The offscreen doc can't read chrome.storage to learn the inference device, and
+// can't watch it for changes — so we push changes to it from here (this context
+// does have storage). See offscreen.ts SET_INFERENCE_DEVICE / GET_INFERENCE_DEVICE.
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area !== 'local' || !('inferenceDevice' in changes)) return;
+  const device = changes.inferenceDevice.newValue === 'webgpu' ? 'webgpu' : 'wasm';
+  chrome.runtime.sendMessage({ action: 'SET_INFERENCE_DEVICE', device }).catch(() => { /* offscreen not open */ });
+});
 
 // ─────────────────────────────────────────────
 // Side Panel — toggle on icon click
@@ -310,6 +322,11 @@ const messageHandlers: Record<string, MessageHandler> = {
   ENSURE_OFFSCREEN: async () => {
     await ensureOffscreen();
     return {};
+  },
+  // Offscreen has no chrome.storage — it asks us for the inference device pref.
+  GET_INFERENCE_DEVICE: async () => {
+    const r = await chrome.storage.local.get('inferenceDevice');
+    return { device: r?.inferenceDevice === 'webgpu' ? 'webgpu' : 'wasm' };
   },
   // ── Projects ──
   CREATE_PROJECT: handleCreateProject,

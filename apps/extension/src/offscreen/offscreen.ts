@@ -62,14 +62,14 @@ function spawnInferenceWorker(): void {
 }
 spawnInferenceWorker();
 
-chrome.storage.local.get('inferenceDevice').then((r: any) => {
-  if (r?.inferenceDevice === 'webgpu') { workerDevice = 'webgpu'; inferenceWorker.postMessage({ type: 'set_device', device: 'webgpu' }); }
-});
-chrome.storage.onChanged.addListener((changes, area) => {
-  if (area !== 'local' || !('inferenceDevice' in changes)) return;
-  workerDevice = changes.inferenceDevice.newValue === 'webgpu' ? 'webgpu' : 'wasm';
-  inferenceWorker.postMessage({ type: 'set_device', device: workerDevice });
-});
+// IMPORTANT: an offscreen document exposes ONLY chrome.runtime — chrome.storage
+// is undefined here, and reading it at top level throws and kills the whole doc
+// (embeds/rerank/PDF parse all die). So we ask the service worker (which DOES
+// have storage) for the device pref, and it pushes live changes to us via a
+// SET_INFERENCE_DEVICE message (handled below).
+chrome.runtime.sendMessage({ action: 'GET_INFERENCE_DEVICE' }).then((r: any) => {
+  if (r?.device === 'webgpu') { workerDevice = 'webgpu'; inferenceWorker.postMessage({ type: 'set_device', device: 'webgpu' }); }
+}).catch(() => { /* SW not ready or no handler — stay on the wasm default */ });
 
 const WORKER_CALL_TIMEOUT_MS = 45_000;
 function callWorker<T>(msg: Record<string, unknown>): Promise<T> {
@@ -346,6 +346,14 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
 
   if (request?.action === 'OFFSCREEN_HEALTH_CHECK') {
     sendResponse({ ok: true, status: 'healthy' });
+    return true;
+  }
+
+  // Service worker pushes device changes here (we can't watch chrome.storage).
+  if (request?.action === 'SET_INFERENCE_DEVICE') {
+    workerDevice = request.device === 'webgpu' ? 'webgpu' : 'wasm';
+    inferenceWorker.postMessage({ type: 'set_device', device: workerDevice });
+    sendResponse({ ok: true });
     return true;
   }
 
