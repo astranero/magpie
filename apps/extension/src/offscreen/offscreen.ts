@@ -10,18 +10,48 @@ import TurndownService from 'turndown';
 import * as pdfjsLib from 'pdfjs-dist';
 // Vite resolves this to a bundled worker file URL.
 import pdfWorkerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
-import { env, pipeline, AutoTokenizer, AutoModelForSequenceClassification } from '@huggingface/transformers';
 import { buildPageMarkdown, TextBlock } from '../lib/pdf-layout';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
 
-// Setup local WASM paths for Chrome Extensions
-if (typeof chrome !== 'undefined' && chrome.runtime?.getURL) {
-  if (env.backends?.onnx?.wasm) {
-    env.backends.onnx.wasm.wasmPaths = chrome.runtime.getURL('transformers/');
-  }
-  env.allowLocalModels = false;
+// ── Inference worker proxy ──
+// Embeddings + re-ranking run in a dedicated Worker so their ONNX inference
+// never blocks this document's main thread. The offscreen doc shares a renderer
+// process with the sidepanel, so inline inference here froze the chat UI for the
+// whole embed/rerank; the worker keeps that main thread free. `chrome.*` isn't
+// available inside a Worker, so we hand it the WASM base URL on init.
+const inferenceWorker = new Worker(new URL('./inference.worker.ts', import.meta.url), { type: 'module' });
+inferenceWorker.postMessage({ type: 'init', wasmPaths: chrome.runtime.getURL('transformers/') });
+
+let workerReqSeq = 0;
+const workerPending = new Map<number, { resolve: (v: any) => void; reject: (e: any) => void }>();
+inferenceWorker.onmessage = (e: MessageEvent<any>) => {
+  const { id, ok, error, ...rest } = e.data || {};
+  const p = workerPending.get(id);
+  if (!p) return;
+  workerPending.delete(id);
+  ok ? p.resolve(rest) : p.reject(new Error(error || 'inference worker error'));
+};
+inferenceWorker.onerror = (e) => {
+  // A worker-level failure rejects all in-flight calls rather than hanging them.
+  const err = new Error(e.message || 'inference worker crashed');
+  for (const [, p] of workerPending) p.reject(err);
+  workerPending.clear();
+};
+
+function callWorker<T>(msg: Record<string, unknown>): Promise<T> {
+  const id = ++workerReqSeq;
+  return new Promise<T>((resolve, reject) => {
+    workerPending.set(id, { resolve, reject });
+    inferenceWorker.postMessage({ id, ...msg });
+  });
 }
+
+const generateEmbeddings = (texts: string[]): Promise<number[][]> =>
+  callWorker<{ embeddings: number[][] }>({ type: 'embed', texts }).then(r => r.embeddings);
+
+const rerank = (query: string, passages: string[]): Promise<number[]> =>
+  callWorker<{ scores: number[] }>({ type: 'rerank', query, passages }).then(r => r.scores);
 
 function base64ToUint8Array(b64: string): Uint8Array {
   const binary = atob(b64);
@@ -175,153 +205,6 @@ async function parsePdfData(data: Uint8Array): Promise<{ pages: string[]; imageP
   }
 }
 
-// ── Embeddings and Re-ranking helpers ──
-
-let embedder: any = null;
-async function getEmbedder() {
-  if (!embedder) {
-    // Xenova mirror: onnx-community/all-MiniLM-L6-v2 went 401 (gated) on HF
-    // in mid-2026. Same base model + ONNX export, embeddings stay compatible.
-    embedder = await pipeline('feature-extraction', 'Xenova/all-MiniLM-L6-v2', {
-      device: 'webgpu',
-    });
-  }
-  return embedder;
-}
-
-// A std::bad_alloc from OrtRun leaves the WASM heap/session wedged — every
-// subsequent call fails too. Tear the pipeline down so the next getEmbedder()
-// rebuilds a fresh session on a clean heap instead of limping.
-async function resetEmbedder(): Promise<void> {
-  try { await embedder?.dispose?.(); } catch { /* best-effort */ }
-  embedder = null;
-}
-
-// all-MiniLM context window is 256 tokens, but the tokenizer's model_max_length
-// is the "no limit" sentinel, so the pipeline's internal truncation is a no-op.
-// A long text then tokenizes to thousands of tokens, the whole batch pads to it,
-// and OrtRun OOMs (std::bad_alloc). Cap chars so the sequence length — and thus
-// peak allocation — is actually bounded. ~1000 chars stays under 256 tokens for
-// English; the tail we drop is retrieval noise, not signal.
-const MAX_EMBED_CHARS = 1000;
-const capText = (t: string) => (t.length > MAX_EMBED_CHARS ? t.slice(0, MAX_EMBED_CHARS) : t);
-
-async function generateEmbeddings(texts: string[]): Promise<number[][]> {
-  if (texts.length === 0) return [];
-
-  // 8 caps how many capped sequences are padded together per OrtRun; throughput
-  // loss is negligible next to model inference time.
-  const MAX_BATCH_SIZE = 8;
-
-  const processBatch = async (rawBatch: string[]): Promise<number[][]> => {
-    const batchTexts = rawBatch.map(capText);
-    try {
-      const extractor = await getEmbedder();
-      const output = await extractor(batchTexts, { pooling: 'mean', normalize: true });
-      const data = output.data as Float32Array;
-      const dim = output.dims?.[1] ?? (data.length / batchTexts.length);
-      
-      // validate dimensions to prevent integer overflow
-      if (!dim || !Number.isFinite(dim) || dim <= 0 || dim > 1024) {
-        throw new Error(`Invalid embedding dimension: ${dim}`);
-      }
-      
-      // calculate expected data length with overflow protection
-      const expectedDataLength = Math.ceil(batchTexts.length * dim);
-      if (data.length !== expectedDataLength && data.length % batchTexts.length !== 0) {
-        throw new Error(`Data length mismatch: got ${data.length}, expected ${expectedDataLength}`);
-      }
-      
-      const embeddings: number[][] = [];
-      for (let i = 0; i < batchTexts.length; i++) {
-        const start = i * dim;
-        const end = start + dim;
-        
-        // bounds check to prevent overflow errors
-        if (start >= data.length || end > data.length) {
-          throw new Error(`Index out of bounds: start=${start}, end=${end}, length=${data.length}`);
-        }
-        
-        embeddings.push(Array.from(data.slice(start, end)));
-      }
-      return embeddings;
-    } catch (batchErr) {
-      // A batch OOM wedges the session — rebuild before the per-text retries,
-      // otherwise they all fail on the same poisoned heap.
-      console.warn('Batched embedding failed, resetting embedder and falling back to sequential:', batchErr);
-      await resetEmbedder();
-
-      // One text at a time bounds peak allocation to a single capped sequence.
-      // We do NOT substitute a zero vector on failure: a zero embedding has
-      // cosine 0 with every query, so it isn't just "missing" — it silently
-      // corrupts retrieval and never surfaces. Throw instead; the caller
-      // (saveDocument) then stores the chunks vector-less (keyword-searchable)
-      // and can be re-indexed later.
-      const embeddings: number[][] = [];
-      for (const text of batchTexts) {
-        try {
-          const extractor = await getEmbedder();
-          const output = await extractor(text, { pooling: 'mean', normalize: true });
-          embeddings.push(Array.from(output.data as Float32Array));
-        } catch (e) {
-          // Retry this one text once on a fresh session before giving up.
-          await resetEmbedder();
-          try {
-            const extractor = await getEmbedder();
-            const output = await extractor(text, { pooling: 'mean', normalize: true });
-            embeddings.push(Array.from(output.data as Float32Array));
-          } catch (e2) {
-            console.error('Failed to generate embedding after reset+retry:', e2);
-            throw e2;
-          }
-        }
-      }
-      return embeddings;
-    }
-  };
-  
-  // split into safe batches to avoid integer overflow
-  const embeddings: number[][] = [];
-  for (let i = 0; i < texts.length; i += MAX_BATCH_SIZE) {
-    const batch = texts.slice(i, i + MAX_BATCH_SIZE);
-    const batchEmbeddings = await processBatch(batch);
-    embeddings.push(...batchEmbeddings);
-  }
-  
-  return embeddings;
-}
-
-let tokenizer: any = null;
-let rerankerModel: any = null;
-async function getReranker() {
-  if (!tokenizer || !rerankerModel) {
-    const model_id = 'Xenova/ms-marco-MiniLM-L-6-v2';
-    tokenizer = await AutoTokenizer.from_pretrained(model_id);
-    rerankerModel = await AutoModelForSequenceClassification.from_pretrained(model_id);
-  }
-  return { tokenizer, model: rerankerModel };
-}
-
-const sigmoid = (x: number) => 1 / (1 + Math.exp(-x));
-
-async function rerank(query: string, passages: string[]): Promise<number[]> {
-  const { tokenizer, model } = await getReranker();
-  const scores: number[] = [];
-
-  const inputs = await tokenizer(Array(passages.length).fill(query), {
-    text_pair: passages,
-    padding: true,
-    truncation: true,
-  });
-
-  const { logits } = await model(inputs);
-  const data = logits.data as Float32Array;
-  for (let i = 0; i < passages.length; i++) {
-    scores.push(sigmoid(data[i]));
-  }
-  return scores;
-}
-
 chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
   if (request?.action === 'OFFSCREEN_PARSE_PDF') {
     parsePdf(request.base64 as string)
@@ -405,10 +288,5 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
   return false;
 });
 
-// F6: fire-and-forget preload of transformer models on offscreen doc creation.
-// Fetches ~30-100MB of weights in the background so the first search / capture
-// doesn't stall the message channel waiting for model init.
-Promise.all([
-  getEmbedder().catch(err => console.warn('[preload] embedder failed:', err)),
-  getReranker().catch(err => console.warn('[preload] reranker failed:', err))
-]).then(() => console.log('[preload] transformer models ready'));
+// Model preload now happens inside the inference worker (see its `init`
+// handler), fired by the postMessage above on document creation.
