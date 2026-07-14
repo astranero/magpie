@@ -738,16 +738,13 @@ async function scrapeUrlList(
   signal: AbortSignal | undefined,
   label: AgentLabel
 ): Promise<AgentOutcome> {
-  // A single gather burst must be small enough to finish — and reach the stage
-  // checkpoint — within ONE MV3 service-worker lifetime. Exhaustive's
-  // totalSourcesCap (120) let stage 1 try to scrape the whole budget at once, so
-  // the worker was recycled mid-stage before currentStage was ever written; every
-  // resume then redid the entire stage and died at the same place (the crash loop
-  // the user hit). Cap each burst — breadth still accrues across the run's rounds,
-  // and each smaller stage checkpoints, so a recycle resumes forward instead of
-  // restarting. Standard depth (cap 40) is unaffected.
-  const PER_BURST_SCRAPE_CAP = 45;
-  const cap = Math.min(activeLimits.totalSourcesCap, PER_BURST_SCRAPE_CAP);
+  // Per-STAGE source budget: totalSourcesCap is the whole-run target, spread
+  // across `rounds` stages (120 over 6 → ~20/stage), hard-capped at 25. This
+  // keeps each gather burst small enough to reach the stage checkpoint within one
+  // MV3 service-worker lifetime; breadth accrues across rounds, and a recycle
+  // resumes forward instead of restarting the stage.
+  const perStage = Math.ceil(activeLimits.totalSourcesCap / Math.max(1, activeLimits.rounds));
+  const cap = Math.min(25, Math.max(1, perStage));
   const urlList = [...new Set(urls)].filter(u => !isJunkUrl(u)).slice(0, cap);
   const sources: SourceRecord[] = [];
   const docIds: string[] = [];
