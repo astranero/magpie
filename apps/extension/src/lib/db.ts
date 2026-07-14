@@ -8,6 +8,29 @@ import { BRAND } from './brand';
 import { sendToOffscreen } from './offscreen-client';
 import { contentHasTag } from './frontmatter';
 
+// Embed chunk texts in SMALL calls, not one giant one. A big source doc (an
+// 800-page PDF → thousands of chunks) previously sent every chunk in a single
+// offscreen call: a huge serialized message + the whole result set built in the
+// worker at once → a memory spike that could OOM/crash the offscreen renderer
+// mid-research. Batching bounds per-call payload, worker memory, and time; a
+// failed batch only loses its own chunks (null), the rest still index.
+const EMBED_CALL_BATCH = 64;
+async function embedTextsBatched(texts: string[]): Promise<(number[] | null)[]> {
+  const out: (number[] | null)[] = [];
+  for (let i = 0; i < texts.length; i += EMBED_CALL_BATCH) {
+    const slice = texts.slice(i, i + EMBED_CALL_BATCH);
+    try {
+      const res: any = await sendToOffscreen({ action: 'OFFSCREEN_GET_EMBEDDINGS', texts: slice });
+      const emb: any[] = res?.ok && Array.isArray(res.embeddings) ? res.embeddings : [];
+      for (let j = 0; j < slice.length; j++) out.push(emb[j] ?? null);
+    } catch (e) {
+      console.warn(`[embed] batch ${i}-${i + slice.length} failed, chunks stored vector-less:`, e);
+      for (let j = 0; j < slice.length; j++) out.push(null);
+    }
+  }
+  return out;
+}
+
 const DB_NAME = BRAND.dbNameMain;
 const DB_VERSION = 3;
 
@@ -522,18 +545,10 @@ export async function saveDocument(
 
   const finalChunks: Chunk[] = chunks.map(chunk => ({ ...chunk, id: generateId(), docId: id }));
 
-  // Generate embeddings BEFORE opening the IDB transaction.
-  // Using robust offscreen client with auto-retry on failure.
-  try {
-    const res: any = await sendToOffscreen({ action: 'OFFSCREEN_GET_EMBEDDINGS', texts: finalChunks.map(c => c.text) });
-    if (res?.ok && Array.isArray(res.embeddings)) {
-      res.embeddings.forEach((embedding: number[], idx: number) => {
-        if (finalChunks[idx]) finalChunks[idx].embedding = embedding;
-      });
-    }
-  } catch (e) {
-    console.warn('Failed to generate embeddings in saveDocument, saving chunks without vectors', e);
-  }
+  // Generate embeddings BEFORE opening the IDB transaction — in small batches so
+  // a big document can't spike memory and crash the offscreen renderer.
+  const embs = await embedTextsBatched(finalChunks.map(c => c.text));
+  embs.forEach((embedding, idx) => { if (embedding && finalChunks[idx]) finalChunks[idx].embedding = embedding; });
 
   // Now open the transaction and write everything synchronously
   const transaction = tx(db, ['documents', 'chunks'], 'readwrite');
@@ -678,19 +693,11 @@ export async function updateDocumentContent(
   // Prepare chunks and generate embeddings BEFORE opening the IDB transaction.
   const finalChunks: Chunk[] = chunks.map(chunk => ({ ...chunk, id: generateId(), docId: id }));
 
-  try {
-    // Through the offscreen mutex (NOT raw sendMessage): a bare call here could
-    // run an ONNX batch concurrently with a research run's batch → WASM heap
-    // OOM → renderer crash. sendToOffscreen serializes + recreates on failure.
-    const res: any = await sendToOffscreen({ action: 'OFFSCREEN_GET_EMBEDDINGS', texts: finalChunks.map(c => c.text) });
-    if (res?.ok && Array.isArray(res.embeddings)) {
-      res.embeddings.forEach((embedding: number[], idx: number) => {
-        if (finalChunks[idx]) finalChunks[idx].embedding = embedding;
-      });
-    }
-  } catch (e) {
-    console.warn('Failed to generate embeddings in updateDocumentContent, saving chunks without vectors', e);
-  }
+  // Small batches through the offscreen mutex (NOT raw sendMessage): a bare call
+  // could run an ONNX batch concurrently with a research batch → WASM heap OOM;
+  // one giant call could spike memory and crash the renderer.
+  const embs = await embedTextsBatched(finalChunks.map(c => c.text));
+  embs.forEach((embedding, idx) => { if (embedding && finalChunks[idx]) finalChunks[idx].embedding = embedding; });
 
   // Now open the transaction and write everything synchronously
   const transaction = tx(db, ['documents', 'chunks'], 'readwrite');
