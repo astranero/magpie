@@ -24,12 +24,14 @@ async function getEmbedder() {
   if (!embedder) {
     // Xenova mirror: onnx-community/all-MiniLM-L6-v2 went 401 (gated) on HF in
     // mid-2026. Same base model + ONNX export, embeddings stay compatible.
-    // Prefer WebGPU; fall back to WASM if the worker has no GPU adapter.
-    try {
-      embedder = await pipeline('feature-extraction', 'Xenova/all-MiniLM-L6-v2', { device: 'webgpu' });
-    } catch {
-      embedder = await pipeline('feature-extraction', 'Xenova/all-MiniLM-L6-v2', { device: 'wasm' });
-    }
+    //
+    // WASM, not WebGPU: a heavy deep-research run embeds thousands of chunks, and
+    // the WebGPU backend accumulates GPU buffers → the GPU/renderer process OOMs
+    // and dies SILENTLY (no JS exception, nothing in the logs — the exact crash
+    // reported). WASM keeps a bounded, GC'd heap on this worker thread; combined
+    // with the char + batch caps below, allocation stays bounded. Slower per
+    // embed, but embedding is background work and stability wins.
+    embedder = await pipeline('feature-extraction', 'Xenova/all-MiniLM-L6-v2', { device: 'wasm' });
   }
   return embedder;
 }

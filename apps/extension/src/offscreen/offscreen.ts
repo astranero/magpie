@@ -237,7 +237,14 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
 
   if (request?.action === 'OFFSCREEN_PARSE_HTML') {
     try {
-      const { html, url } = request as { html: string; url: string };
+      const { html: rawHtml, url } = request as { html: string; url: string };
+      // A giant scraped page (some sites serve multi-MB HTML) expands to 5–10× in
+      // the DOM that DOMParser + Readability build on this main thread — big
+      // enough to OOM/crash the offscreen renderer mid-research. 3 MB is ample for
+      // article extraction; truncate the tail (boilerplate/comments) rather than
+      // risk the whole run.
+      const MAX_HTML = 3_000_000;
+      const html = rawHtml.length > MAX_HTML ? rawHtml.slice(0, MAX_HTML) : rawHtml;
 
       const parsed = new DOMParser().parseFromString(html, 'text/html');
 
