@@ -143,19 +143,18 @@ export default function App() {
       const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
       if (tz) chrome.storage.local.set({ araTimezone: tz });
     } catch { /* ignore */ }
-    // Adopt the active session another sidepanel instance switched to (idempotent
-    // on mount too), so two tabs/windows show the same session.
-    chrome.storage.local.get(['araActiveProjectId', 'araActiveChatId']).then((r: any) => {
+    // Adopt the active SESSION (project) another sidepanel instance switched to,
+    // so two tabs/windows show the same session. We sync the project only, not
+    // the chat id — a stale chat id from a previous session must never leak into
+    // a freshly-created one; each instance resolves the chat within the project.
+    chrome.storage.local.get(['araActiveProjectId']).then((r: any) => {
       if (typeof r.araActiveProjectId === 'string' && r.araActiveProjectId) setActiveProjectId(r.araActiveProjectId);
-      if (typeof r.araActiveChatId === 'string' && r.araActiveChatId) setActiveChatId(r.araActiveChatId);
     });
     const onChange = (changes: Record<string, any>, area: string) => {
       if (area !== 'local') return;
       if ('customSkills' in changes) loadCustomSkills().then(setCustomCommands);
       const p = changes.araActiveProjectId?.newValue;
       if (typeof p === 'string' && p) setActiveProjectId(prev => (prev === p ? prev : p));
-      const c = changes.araActiveChatId?.newValue;
-      if (typeof c === 'string' && c) setActiveChatId(prev => (prev === c ? prev : c));
     };
     chrome.storage.onChanged.addListener(onChange);
     return () => chrome.storage.onChanged.removeListener(onChange);
@@ -167,7 +166,9 @@ export default function App() {
   useEffect(() => {
     const onVis = () => {
       if (document.hidden) return;
-      if (activeChatId) loadChatHistory(activeChatId);
+      // Don't reload a chat we're mid-answer on — it would drop the streaming
+      // message / the optimistic question.
+      if (activeChatId && !streamingChatsRef.current.has(activeChatId)) loadChatHistory(activeChatId);
       if (activeProjectId) loadDocuments(activeProjectId);
       msg('GET_RESEARCH_STATUS').then((res: any) => {
         const job = res?.job;
@@ -657,7 +658,6 @@ export default function App() {
   // Load chat history whenever the active chat changes
   useEffect(() => {
     if (activeChatId) {
-      if (typeof chrome !== 'undefined' && chrome.storage) chrome.storage.local.set({ araActiveChatId: activeChatId });
       loadChatHistory(activeChatId);
     }
   }, [activeChatId]);
