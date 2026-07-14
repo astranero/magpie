@@ -7,7 +7,7 @@
 // three strategies (semantic / router / agentic); network + offscreen deps are
 // injected so it stays unit-testable.
 
-import { matchFilesInTree, questionKeywords, lexicalLinkMatch } from './query-intent';
+import { matchFilesInTree, questionKeywords, lexicalLinkMatch, expandNavKeywords } from './query-intent';
 
 // ── Hard caps: the "enough to answer, not so much it's slow/noisy" contract ──
 export const MAX_FILES = 3;
@@ -89,7 +89,9 @@ export async function selectSemantic(
   }
 
   // ── Links ──
-  let picked: LinkRef[] = keywords.length ? links.filter(l => lexicalLinkMatch(l, keywords)) : [];
+  // Expand to navigational synonyms so a pricing question follows a "Plans" link.
+  const linkKeywords = keywords.length ? expandNavKeywords(keywords) : keywords;
+  let picked: LinkRef[] = linkKeywords.length ? links.filter(l => lexicalLinkMatch(l, linkKeywords)) : [];
   if (picked.length === 0) {
     picked = await rankBySemantic(question, links, l => `${l.anchorText || ''} ${l.url}`, rerank, MAX_LINKS);
   }

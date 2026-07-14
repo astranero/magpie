@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { needsIntentResolution, formatHistoryForIntent, parseRepoUrl, selectTreePaths, formatTreeBlock, isStructureQuestion, questionKeywords } from '../query-intent';
+import { needsIntentResolution, formatHistoryForIntent, parseRepoUrl, selectTreePaths, formatTreeBlock, isStructureQuestion, questionKeywords, expandNavKeywords, isImplementationQuestion, findRepoUrlInText } from '../query-intent';
 
 describe('isStructureQuestion', () => {
   it('true for layout / file-location questions', () => {
@@ -24,6 +24,53 @@ describe('questionKeywords', () => {
   it('drops stopwords, keeps content words', () => {
     expect(questionKeywords('how much is their pricing?')).toEqual(['pricing']);
     expect(questionKeywords('what is this about')).toEqual([]);
+  });
+});
+
+describe('expandNavKeywords', () => {
+  it('pulls in nav synonyms so pricing reaches a "plans"/"billing" link', () => {
+    const out = expandNavKeywords(['pricing']);
+    expect(out).toContain('plans');
+    expect(out).toContain('billing');
+    expect(out).toContain('credits');
+  });
+  it('expands docs/api concepts too', () => {
+    expect(expandNavKeywords(['docs'])).toContain('reference');
+    expect(expandNavKeywords(['api'])).toContain('endpoint');
+  });
+  it('leaves non-nav keywords untouched', () => {
+    expect(expandNavKeywords(['authentication'])).toEqual(['authentication']);
+  });
+});
+
+describe('isImplementationQuestion', () => {
+  it('true for how-it-works / what-is-behind asks', () => {
+    for (const q of [
+      "what's behind the pricing",
+      'how does the credit system work',
+      'explain the backend',
+      'where is this implemented',
+      'what is the architecture',
+    ]) expect(isImplementationQuestion(q)).toBe(true);
+  });
+  it('false for plain factual asks', () => {
+    for (const q of ['what is this product', 'how much does it cost', 'who made this']) {
+      expect(isImplementationQuestion(q)).toBe(false);
+    }
+  });
+});
+
+describe('findRepoUrlInText', () => {
+  it('extracts the first parseable repo URL from page text', () => {
+    const md = 'Litmus is open source — see https://github.com/acme/litmus for the code.';
+    expect(findRepoUrlInText(md)).toBe('https://github.com/acme/litmus');
+  });
+  it('strips trailing punctuation', () => {
+    expect(findRepoUrlInText('code at https://github.com/acme/litmus.')).toBe('https://github.com/acme/litmus');
+  });
+  it('returns null when no repo link is present', () => {
+    expect(findRepoUrlInText('visit https://example.com/pricing for details')).toBeNull();
+    expect(findRepoUrlInText('')).toBeNull();
   });
 });
 

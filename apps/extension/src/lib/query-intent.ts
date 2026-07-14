@@ -96,6 +96,54 @@ export function lexicalLinkMatch(ref: { anchorText?: string; url: string }, keyw
   return keywords.some(k => hay.includes(k));
 }
 
+// Navigational concept groups: a "pricing" question should follow a link
+// labelled "Plans" (and vice-versa) even though the words differ. Each group is
+// a cluster of site-nav synonyms; a keyword in any group pulls in its siblings
+// so lexicalLinkMatch catches the intended next hop. Links only — expanding
+// these into FILE matching would mis-hit (a "plans" table ≠ pricing code).
+const NAV_SYNONYMS: string[][] = [
+  ['pricing', 'price', 'prices', 'cost', 'costs', 'plan', 'plans', 'tier', 'tiers', 'subscription', 'subscriptions', 'billing', 'payment', 'quote', 'credits', 'credit'],
+  ['docs', 'documentation', 'guide', 'guides', 'reference', 'manual', 'tutorial', 'tutorials'],
+  ['api', 'apis', 'sdk', 'endpoint', 'endpoints', 'developer', 'developers', 'integration', 'integrations'],
+  ['about', 'company', 'team', 'mission', 'story'],
+  ['features', 'feature', 'capabilities', 'product', 'how-it-works'],
+  ['contact', 'support', 'help', 'faq'],
+  ['download', 'install', 'getting-started', 'get-started', 'signup', 'sign-up', 'register'],
+];
+
+/** Expand question keywords with navigational synonyms for LINK matching, so a
+ *  pricing question follows a "Plans"/"Billing" link (and a docs question a
+ *  "Reference" link). No-op for keywords in no group. */
+export function expandNavKeywords(keywords: string[]): string[] {
+  const out = new Set(keywords);
+  for (const kw of keywords) {
+    for (const group of NAV_SYNONYMS) {
+      if (group.includes(kw)) for (const w of group) out.add(w);
+    }
+  }
+  return [...out];
+}
+
+/** Is the question about HOW something works / what's behind it — an
+ *  implementation ask whose real answer lives in code, not marketing copy? On a
+ *  product page that links to its repo, this is the signal to go read that repo. */
+const IMPL_RE = /\b(how\s+(do(es)?|is|are|would|can)|what'?s?\s+behind|under\s+the\s+hood|behind\s+the\s+scenes?|mechanism|implement(s|ed|ation)?|architecture|back[- ]?end|server[- ]?side|source\s+code|code\s?base|internals?|works?\s+internally)\b/i;
+export function isImplementationQuestion(q: string): boolean {
+  return IMPL_RE.test(q || '');
+}
+
+/** First repository URL embedded in page text that parseRepoUrl accepts, if any.
+ *  Lets a product/marketing page hand off implementation questions to its own
+ *  source repo. */
+export function findRepoUrlInText(text: string): string | null {
+  const urls = (text || '').match(/https?:\/\/[^\s)"'<>\]]+/g) || [];
+  for (const raw of urls) {
+    const url = raw.replace(/[.,);]+$/, '');
+    if (parseRepoUrl(url)) return url;
+  }
+  return null;
+}
+
 /** Is the question about a repo's layout / file locations (as opposed to what
  *  a specific file does)? Only for these do we inline the full file tree; other
  *  questions get file *contents* from the selector, not a path dump. */

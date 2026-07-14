@@ -16,7 +16,7 @@ import { buildFrontmatter, hasFrontmatter } from '../lib/frontmatter';
 import { get as idbGet } from 'idb-keyval';
 import { runDeepResearch, generateSubQuestions, scrapeUrl, isJunkUrl, gatherWebSnippets } from './deep-researcher';
 import { harvestReferences } from '../lib/reference-harvest';
-import { needsIntentResolution, formatHistoryForIntent, parseRepoUrl, selectTreePaths, formatTreeBlock, isChitchat, isRefusalAnswer, isStructureQuestion, RepoRef } from '../lib/query-intent';
+import { needsIntentResolution, formatHistoryForIntent, parseRepoUrl, selectTreePaths, formatTreeBlock, isChitchat, isRefusalAnswer, isStructureQuestion, isImplementationQuestion, findRepoUrlInText, RepoRef } from '../lib/query-intent';
 import { selectSemantic, fetchWithinBudget, parseRouterSelection, TOTAL_CTX_BUDGET, RerankFn, LinkRef, Selection } from '../lib/context-retrieval';
 import { getResearchLimits } from '../lib/research-limits';
 import { looksLikeBuildLog, extractLogHighlights } from '../lib/log-highlights';
@@ -1327,7 +1327,19 @@ async function buildChatRequest(chatId: string, projectId: string, prompt: strin
     // shared budget + deadline — instead of dumping the whole tree and every
     // link. Strategy is user-toggleable (semantic | router | agentic).
     const strategy = await getPageContextStrategy();
-    const repoRef = parseRepoUrl(pageContext.url);
+    // The page is usually the repo itself. But "what's behind pricing?" on a
+    // marketing page is really a CODE question — if that page links to its own
+    // source repo, follow it one hop and answer from the code, not the copy.
+    let repoRef = parseRepoUrl(pageContext.url);
+    if (!repoRef && isImplementationQuestion(effectiveQuery)) {
+      const linked = findRepoUrlInText(pageContext.markdown);
+      const linkedRef = linked ? parseRepoUrl(linked) : null;
+      if (linkedRef) {
+        repoRef = linkedRef;
+        onStatus?.('Found the source repo — reading the code…');
+        console.log(`[REPO-LINK] implementation Q on a non-repo page → following ${linked}`);
+      }
+    }
     const tree = repoRef ? await getRepoTree(repoRef).catch(() => null) : null;
 
     // The full file tree is only useful for "where do things live" questions;
