@@ -176,7 +176,9 @@ export default function App() {
       if (document.hidden) return;
       // Don't reload a chat we're mid-answer on — it would drop the streaming
       // message / the optimistic question.
-      if (activeChatId && !streamingChatsRef.current.has(activeChatId)) loadChatHistory(activeChatId);
+      if (activeChatId && !streamingChatsRef.current.has(activeChatId) && !mirrorStreamRef.current[activeChatId]) {
+        loadChatHistory(activeChatId).then(() => resumeMirror(activeChatId));
+      }
       if (activeProjectId) loadDocuments(activeProjectId);
       msg('GET_RESEARCH_STATUS').then((res: any) => {
         const job = res?.job;
@@ -697,6 +699,21 @@ export default function App() {
   // effect) means the chat id is always one that belongs to activeProjectId —
   // loadChats has already reconciled it — so the stored pair is never
   // inconsistent.
+  // If another instance is mid-answer in this chat, seed a live mirror from the
+  // in-flight text so a panel that just mounted / switched to this chat keeps
+  // streaming instead of missing the answer. No-op if we're the initiator.
+  const resumeMirror = useCallback((chatId: string) => {
+    if (!chatId || streamingChatsRef.current.has(chatId) || mirrorStreamRef.current[chatId]) return;
+    if (typeof chrome === 'undefined' || !chrome.runtime) return;
+    msg('GET_CHAT_STREAM', { chatId }).then((r: any) => {
+      if (!r?.generating || streamingChatsRef.current.has(chatId) || mirrorStreamRef.current[chatId]) return;
+      const aId = uid();
+      mirrorStreamRef.current[chatId] = aId;
+      setGenerating(prev => ({ ...prev, [chatId]: true }));
+      if (r.full) pushDelta(chatId, aId, r.full as string);
+    }).catch(() => {});
+  }, [pushDelta]);
+
   useEffect(() => {
     if (activeChatId) {
       if (typeof chrome !== 'undefined' && chrome.storage && activeProjectId) {
@@ -706,7 +723,7 @@ export default function App() {
           chrome.storage.local.set({ araActiveSession: { projectId: activeProjectId, chatId: activeChatId } });
         }
       }
-      loadChatHistory(activeChatId);
+      loadChatHistory(activeChatId).then(() => resumeMirror(activeChatId));
     }
   }, [activeChatId, activeProjectId]);
 

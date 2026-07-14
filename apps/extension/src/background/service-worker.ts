@@ -77,6 +77,10 @@ startOffscreenHealthCheck();
 // Defaults and State
 // ─────────────────────────────────────────────
 const abortControllers = new Map<string, AbortController>();
+// Accumulated answer text for chats currently streaming, keyed by chatId. Lets a
+// sidepanel that mounts mid-answer (a per-tab panel just switched to) pull the
+// in-flight text and keep streaming, instead of missing the whole answer.
+const liveChatStreams = new Map<string, string>();
 
 // ─────────────────────────────────────────────
 // Side Panel — toggle on icon click
@@ -332,6 +336,11 @@ const messageHandlers: Record<string, MessageHandler> = {
   // ── Chat ──
   CHAT_WITH_KNOWLEDGE: handleChat,
   GET_CHAT_HISTORY: handleGetChatHistory,
+  // In-flight answer for a chat (for a panel that mounts mid-stream).
+  GET_CHAT_STREAM: async (req: Record<string, unknown>) => {
+    const chatId = req.chatId as string;
+    return { generating: liveChatStreams.has(chatId), full: liveChatStreams.get(chatId) || '' };
+  },
   CLEAR_CHAT_HISTORY: handleClearChatHistory,
   CANCEL_TASK: handleCancelTask,
 
@@ -2043,6 +2052,7 @@ chrome.runtime.onConnect.addListener((port) => {
     // reload). safePost feeds this port; the broadcast feeds every mirror.
     const emitDelta = (text: string) => {
       full += text;
+      liveChatStreams.set(chatId, full);   // so a late-mounting panel can catch up
       safePost({ type: 'DELTA', text });
       chrome.runtime.sendMessage({ action: 'CHAT_DELTA', chatId, text }).catch(() => {});
     };
@@ -2150,6 +2160,7 @@ chrome.runtime.onConnect.addListener((port) => {
       interactiveDepth = Math.max(0, interactiveDepth - 1);
       clearInterval(keepAlive);
       if (abortControllers.get(chatId) === localController) abortControllers.delete(chatId);
+      liveChatStreams.delete(chatId);
       // Clear the spinner on other instances and let them pull the saved answer.
       chrome.runtime.sendMessage({ action: 'CHAT_STATE', chatId, projectId, generating: false }).catch(() => {});
     }
