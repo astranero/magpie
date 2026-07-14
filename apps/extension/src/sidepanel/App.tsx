@@ -762,8 +762,9 @@ export default function App() {
     const check = () => {
       msg('GET_RESEARCH_STATUS').then((res: any) => {
         if (!res?.success) return;
+        const liveProject = res.running ? res.job?.projectId : null;
+        let died = false;
         setResearching(prev => {
-          const liveProject = res.running ? res.job?.projectId : null;
           let changed = false;
           const next = { ...prev };
           for (const pid of Object.keys(next)) {
@@ -772,9 +773,30 @@ export default function App() {
             if (Date.now() - startedAt < GRACE_MS) continue; // still starting up
             next[pid] = false;
             changed = true;
+            died = true;
           }
           return changed ? next : prev;
         });
+        // A run that vanished without a DEEP_RESEARCH_DONE (the worker/offscreen
+        // crashed, or the panel outlived the run) leaves its plan card stuck on
+        // "Running". Flip it to a retryable 'failed' state so it doesn't hang and
+        // the user can re-run. Only one research runs at a time, so this targets
+        // the single started card.
+        if (died) {
+          setMessages(prev => {
+            let changed = false;
+            const next = { ...prev };
+            for (const cid of Object.keys(next)) {
+              const idx = next[cid].findIndex(x => x.plan && x.plan.status === 'started');
+              if (idx === -1) continue;
+              const copy = [...next[cid]];
+              copy[idx] = { ...copy[idx], plan: { ...copy[idx].plan!, status: 'failed', error: 'Research was interrupted — the worker crashed or the run was lost.' } };
+              next[cid] = copy;
+              changed = true;
+            }
+            return changed ? next : prev;
+          });
+        }
       }).catch(() => {});
     };
     const interval = window.setInterval(check, 5000);
