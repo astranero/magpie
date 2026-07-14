@@ -20,36 +20,53 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
 // process with the sidepanel, so inline inference here froze the chat UI for the
 // whole embed/rerank; the worker keeps that main thread free. `chrome.*` isn't
 // available inside a Worker, so we hand it the WASM base URL on init.
-const inferenceWorker = new Worker(new URL('./inference.worker.ts', import.meta.url), { type: 'module' });
 // Embedder device is user-selectable (Settings → Inference acceleration); default
 // WASM for stability (WebGPU can silently OOM the renderer on heavy runs). The
 // Worker can't read chrome.storage, so we read it here and hand it over on init,
 // and push changes live via set_device.
-inferenceWorker.postMessage({ type: 'init', wasmPaths: chrome.runtime.getURL('transformers/'), device: 'wasm' });
+let workerDevice: 'wasm' | 'webgpu' = 'wasm';
+let workerReqSeq = 0;
+const workerPending = new Map<number, { resolve: (v: any) => void; reject: (e: any) => void }>();
+
+// The Worker is RESPAWNABLE. If it ever dies (a WASM OOM can crash just the
+// worker thread), a `const` worker would be dead forever: every later embed/
+// rerank posts into the void and hangs 45s → the whole offscreen queue stalls
+// for minutes, which looks exactly like a frozen/crashed extension. Instead we
+// reject in-flight calls and spawn a fresh worker so the next call self-heals.
+let inferenceWorker: Worker;
+let respawns = 0;
+let respawnWindowStart = Date.now();
+function spawnInferenceWorker(): void {
+  inferenceWorker = new Worker(new URL('./inference.worker.ts', import.meta.url), { type: 'module' });
+  inferenceWorker.postMessage({ type: 'init', wasmPaths: chrome.runtime.getURL('transformers/'), device: workerDevice });
+  inferenceWorker.onmessage = (e: MessageEvent<any>) => {
+    const { id, ok, error, ...rest } = e.data || {};
+    const p = workerPending.get(id);
+    if (!p) return;
+    workerPending.delete(id);
+    ok ? p.resolve(rest) : p.reject(new Error(error || 'inference worker error'));
+  };
+  inferenceWorker.onerror = (e) => {
+    console.warn('[offscreen] inference worker crashed:', e.message);
+    for (const [, p] of workerPending) p.reject(new Error(e.message || 'inference worker crashed'));
+    workerPending.clear();
+    try { inferenceWorker.terminate(); } catch { /* already gone */ }
+    // Cap respawns so a worker that crashes on init can't storm-loop.
+    if (Date.now() - respawnWindowStart > 60_000) { respawns = 0; respawnWindowStart = Date.now(); }
+    if (++respawns <= 5) spawnInferenceWorker();
+    else console.error('[offscreen] inference worker crashed too many times — giving up until reload');
+  };
+}
+spawnInferenceWorker();
+
 chrome.storage.local.get('inferenceDevice').then((r: any) => {
-  if (r?.inferenceDevice === 'webgpu') inferenceWorker.postMessage({ type: 'set_device', device: 'webgpu' });
+  if (r?.inferenceDevice === 'webgpu') { workerDevice = 'webgpu'; inferenceWorker.postMessage({ type: 'set_device', device: 'webgpu' }); }
 });
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area !== 'local' || !('inferenceDevice' in changes)) return;
-  const device = changes.inferenceDevice.newValue === 'webgpu' ? 'webgpu' : 'wasm';
-  inferenceWorker.postMessage({ type: 'set_device', device });
+  workerDevice = changes.inferenceDevice.newValue === 'webgpu' ? 'webgpu' : 'wasm';
+  inferenceWorker.postMessage({ type: 'set_device', device: workerDevice });
 });
-
-let workerReqSeq = 0;
-const workerPending = new Map<number, { resolve: (v: any) => void; reject: (e: any) => void }>();
-inferenceWorker.onmessage = (e: MessageEvent<any>) => {
-  const { id, ok, error, ...rest } = e.data || {};
-  const p = workerPending.get(id);
-  if (!p) return;
-  workerPending.delete(id);
-  ok ? p.resolve(rest) : p.reject(new Error(error || 'inference worker error'));
-};
-inferenceWorker.onerror = (e) => {
-  // A worker-level failure rejects all in-flight calls rather than hanging them.
-  const err = new Error(e.message || 'inference worker crashed');
-  for (const [, p] of workerPending) p.reject(err);
-  workerPending.clear();
-};
 
 const WORKER_CALL_TIMEOUT_MS = 45_000;
 function callWorker<T>(msg: Record<string, unknown>): Promise<T> {
