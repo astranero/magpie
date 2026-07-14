@@ -16,7 +16,8 @@ import { buildFrontmatter, hasFrontmatter } from '../lib/frontmatter';
 import { get as idbGet } from 'idb-keyval';
 import { runDeepResearch, generateSubQuestions, scrapeUrl, isJunkUrl, gatherWebSnippets } from './deep-researcher';
 import { harvestReferences } from '../lib/reference-harvest';
-import { needsIntentResolution, formatHistoryForIntent, parseRepoUrl, selectTreePaths, formatTreeBlock, matchFilesInTree, isChitchat, isRefusalAnswer, RepoRef } from '../lib/query-intent';
+import { needsIntentResolution, formatHistoryForIntent, parseRepoUrl, selectTreePaths, formatTreeBlock, isChitchat, isRefusalAnswer, isStructureQuestion, RepoRef } from '../lib/query-intent';
+import { selectSemantic, fetchWithinBudget, parseRouterSelection, RerankFn, LinkRef, Selection } from '../lib/context-retrieval';
 import { getResearchLimits } from '../lib/research-limits';
 import { looksLikeBuildLog, extractLogHighlights } from '../lib/log-highlights';
 import { addChunksToVectorStore, searchSessionChunks, resetSessionIndex, resetAllSessionIndexes, isConfidentMatch } from '../lib/vector-store';
@@ -1298,19 +1299,6 @@ async function buildChatRequest(chatId: string, projectId: string, prompt: strin
       `You may answer from the current page. Attribute such claims in plain text, e.g. "according to the page you're viewing". ` +
       `NEVER use [anchor] citations for current-page content — anchors are only for library sources.`;
 
-    // Independent enrichments run in PARALLEL — they were sequential, and
-    // their summed latency was most of the silent "Thinking…" gap:
-    //   repo tree, repo file contents, second-hop link expansion.
-    onStatus?.('Following relevant links…');
-    const [treeBlock, fileBlocks, linked] = await Promise.all([
-      buildRepoTreeBlock(pageContext.url, effectiveQuery).catch(e => { console.warn('[REPO-TREE] skipped:', e); return null; }),
-      buildRepoFileBlocks(pageContext.url, effectiveQuery).catch(e => { console.warn('[REPO-FILE] skipped:', e); return null; }),
-      expandRelevantLinks(pageContext, effectiveQuery).catch(e => { console.warn('[LINK-EXPAND] skipped:', e); return [] as PageContext[]; })
-    ]);
-
-    if (treeBlock) systemPrompt += treeBlock;
-    if (fileBlocks) systemPrompt += fileBlocks;
-
     // Build/pipeline logs: guarantee the error/failure lines reach the model
     // even when the page is huge — retrieval selection can miss them.
     if (looksLikeBuildLog(pageContext.markdown)) {
@@ -1324,22 +1312,45 @@ async function buildChatRequest(chatId: string, projectId: string, prompt: strin
       }
     }
 
-    for (const l of linked) {
-      // Raw slice, not selectPageMarkdown: retrieval-selecting each followed
-      // page re-embeds it through the offscreen model (serialized, slow) for
-      // little gain — the budget already caps size. Cheap prefix keeps the turn
-      // responsive; the lead of a followed sub-page (e.g. a pricing page) holds
-      // the answer.
-      const lmd = l.markdown.slice(0, LINKED_PAGE_BUDGET);
-      systemPrompt +=
-        `\n\n--- LINKED PAGE (followed from the current page because it looked relevant to the question; NOT saved) ---\n` +
-        `Title: ${l.title}\nURL: ${l.url}\n\n${lmd}\n` +
-        `--- END LINKED PAGE ---\n` +
-        `Attribute claims from it in plain text — you may link it inline as [${l.title}](${l.url}). No [anchor] citations.`;
-      linkedPages.push({ title: l.title, url: l.url });
+    // ── Selective enrichment ──
+    // Load ONLY the repo files / page links relevant to this question, under a
+    // shared budget + deadline — instead of dumping the whole tree and every
+    // link. Strategy is user-toggleable ('agentic' is handled in the streaming
+    // layer; the non-stream path here selects semantically for any strategy).
+    const strategy = await getPageContextStrategy();
+    const repoRef = parseRepoUrl(pageContext.url);
+    const tree = repoRef ? await getRepoTree(repoRef).catch(() => null) : null;
+
+    // The full file tree is only useful for "where do things live" questions;
+    // otherwise file CONTENTS come from the selector, not a path dump.
+    if (tree && repoRef && isStructureQuestion(effectiveQuery)) {
+      const { selected, truncated } = selectTreePaths(tree.paths, effectiveQuery);
+      systemPrompt += formatTreeBlock(repoRef, selected, truncated);
+      console.log(`[REPO-TREE] structure question — inlined ${selected.length}/${tree.paths.length} paths`);
     }
-    if (linked.length > 0) {
-      console.log(`[LINK-EXPAND] Inlined ${linked.length} linked page(s): ${linked.map(l => l.url).join(', ')}`);
+
+    const linkRefs: LinkRef[] = harvestReferences([pageContext.markdown], {
+      seenUrls: new Set([pageContext.url]), isJunk: isJunkUrl, max: 150,
+    }).filter(r => r.kind === 'web' && r.anchorText).map(r => ({ url: r.url, anchorText: r.anchorText }));
+
+    const selection = await selectPageContext(
+      strategy, effectiveQuery, tree ? tree.paths : [], linkRefs, chatWithCustom, signal,
+    ).catch(e => { console.warn('[CTX] selection failed:', e); return { files: [], links: [] } as Selection; });
+
+    if (selection.files.length || selection.links.length) {
+      onStatus?.('Reading relevant files & links…');
+      const items: EnrichItem[] = [
+        ...(tree && repoRef ? selection.files.map(path => ({ kind: 'file' as const, path })) : []),
+        ...selection.links.map(l => ({ kind: 'link' as const, url: l.url, title: l.title })),
+      ];
+      const { blocks, sources } = await fetchWithinBudget(items, async (item, sig) => {
+        if (item.kind === 'file' && repoRef && tree) return fetchRepoFileBlock(repoRef, tree.branch, item.path);
+        if (item.kind === 'link') return fetchLinkBlock(item.url, item.title, sig);
+        return null;
+      });
+      for (const b of blocks) systemPrompt += b;
+      for (const s of sources) linkedPages.push(s);
+      if (sources.length) console.log(`[CTX] followed ${sources.length} link(s): ${sources.map(s => s.url).join(', ')}`);
     }
   }
 
@@ -1474,22 +1485,10 @@ async function getRepoTree(ref: RepoRef): Promise<RepoTree | null> {
   return tree;
 }
 
-async function buildRepoTreeBlock(pageUrl: string, question: string): Promise<string | null> {
-  const ref = parseRepoUrl(pageUrl);
-  if (!ref) return null;
-  const tree = await getRepoTree(ref);
-  if (!tree) return null;
-
-  const { selected, truncated } = selectTreePaths(tree.paths, question);
-  console.log(`[REPO-TREE] ${ref.provider}:${ref.label}: ${tree.paths.length} paths, inlined ${selected.length}${truncated ? ' (truncated)' : ''}`);
-  return formatTreeBlock(ref, selected, truncated);
-}
-
-// ── Repo file contents — read the specific files a question names ──
+// ── Repo file contents — fetch the raw text of a selected file ──
 
 const repoFileCache = new Map<string, { text: string; ts: number }>();
 const REPO_FILE_MAX_CHARS = 14_000;       // per file
-const REPO_FILES_TOTAL_BUDGET = 48_000;   // across ALL files named in one question
 
 async function fetchRepoFileRaw(ref: RepoRef, branch: string, path: string): Promise<string | null> {
   const encPath = path.split('/').map(encodeURIComponent).join('/');
@@ -1514,55 +1513,6 @@ async function fetchRepoFileRaw(ref: RepoRef, branch: string, path: string): Pro
   return res.text();
 }
 
-/**
- * When the question names files that exist in the repo tree ("what does
- * agent.json contain?"), fetch their raw contents and inline them — the tree
- * alone can locate a file but never describe it.
- */
-async function buildRepoFileBlocks(pageUrl: string, question: string): Promise<string | null> {
-  const ref = parseRepoUrl(pageUrl);
-  if (!ref) return null;
-  const tree = await getRepoTree(ref);
-  if (!tree) return null;
-
-  // Ask about "agent.json" that lives in three places → inline ALL of them,
-  // not just one. Fetch every match IN PARALLEL (a sequential loop turned each
-  // extra file into another network round-trip of latency), then inline within
-  // a shared budget so many files can't blow the context window.
-  const matches = matchFilesInTree(tree.paths, question);
-  if (matches.length === 0) return null;
-
-  const fetched = await Promise.all(matches.map(async (path) => {
-    const cacheKey = `${ref.provider}:${ref.label}@${tree.branch}:${path}`;
-    let entry = repoFileCache.get(cacheKey);
-    if (!entry || Date.now() - entry.ts > REPO_TREE_TTL_MS) {
-      const text = await fetchRepoFileRaw(ref, tree.branch, path).catch(() => null);
-      if (!text) return null;
-      entry = { text, ts: Date.now() };
-      repoFileCache.set(cacheKey, entry);
-    }
-    return { path, text: entry.text };
-  }));
-
-  let out = '';
-  let usedTotal = 0;
-  for (const f of fetched) {
-    if (!f) continue;
-    if (usedTotal >= REPO_FILES_TOTAL_BUDGET) break;   // keep the whole set bounded
-    const perFile = Math.min(REPO_FILE_MAX_CHARS, REPO_FILES_TOTAL_BUDGET - usedTotal);
-    const truncated = f.text.length > perFile;
-    const body = truncated ? f.text.slice(0, perFile) : f.text;
-    usedTotal += body.length;
-    const ext = f.path.split('.').pop() || '';
-    out +=
-      `\n\n--- REPOSITORY FILE: ${f.path} (${ref.label}; fetched from the ${ref.provider} API; NOT saved) ---\n` +
-      '```' + ext + '\n' + body + (truncated ? '\n… (file truncated)' : '') + '\n```\n' +
-      `--- END FILE ---`;
-    console.log(`[REPO-FILE] Inlined ${f.path} (${f.text.length} chars${truncated ? ', truncated' : ''})`);
-  }
-  return out || null;
-}
-
 // ─────────────────────────────────────────────
 // Ephemeral link expansion — second-hop context, never saved
 // ─────────────────────────────────────────────
@@ -1573,104 +1523,119 @@ async function buildRepoFileBlocks(pageUrl: string, question: string): Promise<s
 // TTL cache only, nothing touches IndexedDB or the vector store, and the
 // model must not fake [anchor] citations for it.
 
-const LINK_EXPANSION_MAX = 3;
-const LINK_EXPANSION_MIN_SCORE = 0.5;   // reranker sigmoid — “more likely relevant than not”
-// Hub/TOC pages (docs indexes, link directories) carry almost no answer text
-// of their own — the value is entirely behind the links. Fetch more of them,
-// with a slightly softer gate.
-const HUB_EXPANSION_MAX = 6;
-const HUB_MIN_SCORE = 0.4;
-const LINKED_PAGE_BUDGET = 8_000;       // chars per linked page in the prompt
-const LINK_FETCH_TIMEOUT_MS = 8_000;    // interactive chat — bound the wait per followed link
+const LINKED_PAGE_BUDGET = 8_000;       // chars per followed link in the prompt
 
-// Words that carry no link-targeting signal, so a question keyword-matching a
-// page link doesn't fire on "what/this/page/about/…". Lets an obvious ask
-// ("how much is their pricing?") map straight to a "Pricing" link with no
-// reranker round-trip.
-const LINK_STOPWORDS = new Set([
-  'what', 'this', 'that', 'page', 'tell', 'about', 'how', 'much', 'many', 'does',
-  'their', 'they', 'them', 'the', 'and', 'for', 'are', 'was', 'were', 'with',
-  'from', 'into', 'your', 'you', 'have', 'has', 'can', 'could', 'would', 'should',
-  'which', 'when', 'where', 'who', 'why', 'use', 'using', 'get', 'got', 'its',
-  'more', 'info', 'information', 'give', 'show', 'explain', 'describe', 'current',
-  'site', 'website', 'here', 'there', 'any', 'all', 'some', 'these', 'those',
-]);
-function questionKeywords(q: string): string[] {
-  return [...new Set(q.toLowerCase().match(/[a-z][a-z-]{2,}/g) || [])].filter(w => !LINK_STOPWORDS.has(w));
-}
-function lexicalLinkMatch(ref: { anchorText?: string; url: string }, keywords: string[]): boolean {
-  const hay = `${ref.anchorText || ''} ${ref.url}`.toLowerCase();
-  return keywords.some(k => hay.includes(k));
+// ─────────────────────────────────────────────
+// Selective page-context enrichment (files · links) — strategy-driven
+// ─────────────────────────────────────────────
+// Instead of dumping the repo tree + every link, load only what THIS question
+// needs. Strategies are user-toggleable; all share the fetch plumbing below.
+
+type PageCtxStrategy = 'semantic' | 'router' | 'agentic';
+async function getPageContextStrategy(): Promise<PageCtxStrategy> {
+  try {
+    const s = await chrome.storage.local.get(['pageContextStrategy']);
+    return s.pageContextStrategy === 'router' || s.pageContextStrategy === 'agentic' ? s.pageContextStrategy : 'semantic';
+  } catch { return 'semantic'; }
 }
 
-/** Link-dominated page: many links, little prose between them. */
-function isHubPage(markdown: string): boolean {
-  const linkCount = (markdown.match(/\]\(https?:\/\//g) || []).length;
-  if (linkCount < 25) return false;
-  const prose = markdown.replace(/\[([^\]]*)\]\([^)]*\)/g, '$1');
-  return linkCount / Math.max(1, prose.split(/\s+/).length) > 0.04; // ≥1 link per ~25 words
-}
+/** Offscreen cross-encoder as a plain RerankFn for the selector. */
+const offscreenRerank: RerankFn = async (query, passages) => {
+  try {
+    const res: any = await sendToOffscreen({ action: 'OFFSCREEN_RERANK', query, passages }, undefined, embedOpts());
+    return res?.ok && Array.isArray(res.scores) ? res.scores : null;
+  } catch { return null; }
+};
 
-async function expandRelevantLinks(pageCtx: PageContext, question: string): Promise<PageContext[]> {
-  // Only markdown links with real anchor text are scoreable; bare DOIs/arXiv
-  // ids on a page are literature plumbing, not conversational leads.
-  const refs = harvestReferences([pageCtx.markdown], {
-    seenUrls: new Set([pageCtx.url]),
-    isJunk: isJunkUrl,
-    max: 150
-  }).filter(r => r.kind === 'web' && r.anchorText);
-  if (refs.length === 0) return [];
+/**
+ * ROUTER strategy: one small LLM call picks which files/links to open. Shows a
+ * bounded catalog (relevant paths via selectTreePaths + link labels); the reply
+ * is validated against that catalog so a hallucinated path never becomes a fetch.
+ * Returns null on any failure so the caller falls back to semantic selection.
+ */
+async function selectRouter(
+  question: string, filePaths: string[], links: LinkRef[],
+  llmChat: (sys: string, hist: any[], user: string, signal?: AbortSignal) => Promise<string>,
+  signal: AbortSignal,
+): Promise<Selection | null> {
+  const catalogFiles = filePaths.length
+    ? selectTreePaths(filePaths.filter(p => !p.endsWith('/')), question, 6_000).selected
+    : [];
+  const catalogLinks = links.slice(0, 60);
+  if (catalogFiles.length === 0 && catalogLinks.length === 0) return { files: [], links: [] };
 
-  const hub = isHubPage(pageCtx.markdown);
-  const minScore = hub ? HUB_MIN_SCORE : LINK_EXPANSION_MIN_SCORE;
-  const maxLinks = hub ? HUB_EXPANSION_MAX : LINK_EXPANSION_MAX;
-
-  // FAST PATH — a question keyword lands directly on a link's text or href
-  // ("pricing" → a "Pricing" nav link). These are the obvious next hops the
-  // user means, so follow them straight away and skip the reranker round-trip
-  // (which is serialized behind the offscreen mutex and was a big chunk of the
-  // per-turn latency). The reranker is only the fallback for phrasings that
-  // don't lexically match any link (synonyms, conceptual asks).
-  const keywords = questionKeywords(question);
-  const lexical = keywords.length ? refs.filter(r => lexicalLinkMatch(r, keywords)) : [];
-
-  let chosen: typeof refs;
-  if (lexical.length > 0) {
-    chosen = lexical.slice(0, maxLinks);
-    console.log(`[LINK-EXPAND] Lexical match on [${keywords.join(', ')}] — following ${chosen.length} link(s), no rerank`);
-  } else {
-    let ranked = refs;
-    try {
-      const res: any = await sendToOffscreen({
-        action: 'OFFSCREEN_RERANK',
-        query: question,
-        passages: refs.map(r => r.anchorText!)
-      }, undefined, embedOpts());
-      if (!res?.ok || !Array.isArray(res.scores)) return [];
-      ranked = refs
-        .map((r, i) => ({ r, score: res.scores[i] ?? 0 }))
-        .filter(x => x.score >= minScore)
-        .sort((a, b) => b.score - a.score)
-        .map(x => x.r);
-    } catch {
-      return []; // no scorer → no expansion (never fetch unscored links)
-    }
-    if (hub && ranked.length > 0) {
-      console.log(`[LINK-EXPAND] Hub page detected (${refs.length} links) — following up to ${maxLinks}`);
-    }
-    chosen = ranked.slice(0, maxLinks);
+  const sys =
+    `You choose which extra sources to open to answer a question about a web page. ` +
+    `Pick ONLY what's needed — at most 3 files and 2 links, fewer is better, none if the page/your knowledge already suffices. ` +
+    `Reply with ONLY a JSON object: {"files": [<exact paths>], "links": [<exact urls>], "web": <true|false>}. No prose.`;
+  const user =
+    `Question: ${question}\n\n` +
+    (catalogFiles.length ? `Repository files:\n${catalogFiles.join('\n')}\n\n` : '') +
+    (catalogLinks.length ? `Page links (title — url):\n${catalogLinks.map(l => `${l.anchorText || l.url} — ${l.url}`).join('\n')}\n` : '');
+  try {
+    const raw = await llmChat(sys, [], user, signal);
+    return parseRouterSelection(raw, catalogFiles, catalogLinks);
+  } catch (e) {
+    console.warn('[CTX] router LLM selection failed:', e);
+    return null;
   }
-  const results = await Promise.allSettled(chosen.map(async ref => {
-    const cached = pageContextCache.get(ref.url);
-    if (cached && Date.now() - cached.ts < PAGE_CONTEXT_TTL_MS) return cached.ctx;
-    const scraped = await scrapeUrl(ref.url, AbortSignal.timeout(LINK_FETCH_TIMEOUT_MS));
-    if (!scraped?.markdown) throw new Error('unreadable');
-    const ctx: PageContext = { title: scraped.title || ref.url, url: ref.url, markdown: scraped.markdown };
-    // Same cache page context uses → selectPageMarkdown reuses chunk embeddings
-    pageContextCache.set(ref.url, { ctx, ts: Date.now() });
-    return ctx;
-  }));
-  return results.filter((r): r is PromiseFulfilledResult<PageContext> => r.status === 'fulfilled').map(r => r.value);
+}
+
+/** Pick the files/links to load for a page turn, per the active strategy.
+ *  'agentic' is driven from the streaming layer; reaching here under it (the
+ *  non-stream path) falls back to semantic selection. */
+async function selectPageContext(
+  strategy: PageCtxStrategy, question: string, filePaths: string[], links: LinkRef[],
+  llmChat: (sys: string, hist: any[], user: string, signal?: AbortSignal) => Promise<string>,
+  signal: AbortSignal,
+): Promise<Selection> {
+  const files = filePaths.filter(p => !p.endsWith('/'));
+  if (strategy === 'router') {
+    const routed = await selectRouter(question, filePaths, links, llmChat, signal);
+    if (routed) return routed;   // else fall through to semantic
+  }
+  return selectSemantic(question, files, links, offscreenRerank);
+}
+
+type EnrichItem = { kind: 'file'; path: string } | { kind: 'link'; url: string; title: string };
+
+/** Fetch + format one repo file for the prompt (cached, per-file capped). */
+async function fetchRepoFileBlock(ref: RepoRef, branch: string, path: string): Promise<{ block: string; chars: number } | null> {
+  const cacheKey = `${ref.provider}:${ref.label}@${branch}:${path}`;
+  let entry = repoFileCache.get(cacheKey);
+  if (!entry || Date.now() - entry.ts > REPO_TREE_TTL_MS) {
+    const text = await fetchRepoFileRaw(ref, branch, path).catch(() => null);
+    if (!text) return null;
+    entry = { text, ts: Date.now() };
+    repoFileCache.set(cacheKey, entry);
+  }
+  const truncated = entry.text.length > REPO_FILE_MAX_CHARS;
+  const body = truncated ? entry.text.slice(0, REPO_FILE_MAX_CHARS) : entry.text;
+  const ext = path.split('.').pop() || '';
+  const block =
+    `\n\n--- REPOSITORY FILE: ${path} (${ref.label}; fetched from the ${ref.provider} API; NOT saved) ---\n` +
+    '```' + ext + '\n' + body + (truncated ? '\n… (file truncated)' : '') + '\n```\n--- END FILE ---';
+  return { block, chars: body.length };
+}
+
+/** Fetch + format one followed link for the prompt (cached, budget-sliced). */
+async function fetchLinkBlock(url: string, title: string, signal: AbortSignal): Promise<{ block: string; chars: number; source: { title: string; url: string } } | null> {
+  let md: string, t: string;
+  const cached = pageContextCache.get(url);
+  if (cached && Date.now() - cached.ts < PAGE_CONTEXT_TTL_MS) {
+    md = cached.ctx.markdown; t = cached.ctx.title;
+  } else {
+    const scraped = await scrapeUrl(url, signal).catch(() => null);
+    if (!scraped?.markdown) return null;
+    md = scraped.markdown; t = scraped.title || title;
+    pageContextCache.set(url, { ctx: { title: t, url, markdown: md }, ts: Date.now() });
+  }
+  const body = md.slice(0, LINKED_PAGE_BUDGET);
+  const block =
+    `\n\n--- LINKED PAGE (followed from the current page because it looked relevant; NOT saved) ---\n` +
+    `Title: ${t}\nURL: ${url}\n\n${body}\n--- END LINKED PAGE ---\n` +
+    `Attribute claims from it in plain text — you may link it inline as [${t}](${url}). No [anchor] citations.`;
+  return { block, chars: body.length, source: { title: t, url } };
 }
 
 /**

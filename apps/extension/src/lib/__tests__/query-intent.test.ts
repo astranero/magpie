@@ -1,5 +1,31 @@
 import { describe, it, expect } from 'vitest';
-import { needsIntentResolution, formatHistoryForIntent, parseRepoUrl, selectTreePaths, formatTreeBlock } from '../query-intent';
+import { needsIntentResolution, formatHistoryForIntent, parseRepoUrl, selectTreePaths, formatTreeBlock, isStructureQuestion, questionKeywords } from '../query-intent';
+
+describe('isStructureQuestion', () => {
+  it('true for layout / file-location questions', () => {
+    for (const q of [
+      'where is the config file',
+      'what files are in the src folder',
+      'show me the repo structure',
+      'how is the project organized',
+      'list the directories',
+    ]) expect(isStructureQuestion(q)).toBe(true);
+  });
+  it('false for content / conceptual questions', () => {
+    for (const q of [
+      'what does this project do',
+      'how does authentication work',
+      'explain the caching logic',
+    ]) expect(isStructureQuestion(q)).toBe(false);
+  });
+});
+
+describe('questionKeywords', () => {
+  it('drops stopwords, keeps content words', () => {
+    expect(questionKeywords('how much is their pricing?')).toEqual(['pricing']);
+    expect(questionKeywords('what is this about')).toEqual([]);
+  });
+});
 
 describe('needsIntentResolution', () => {
   it('never triggers on the first message of a chat', () => {

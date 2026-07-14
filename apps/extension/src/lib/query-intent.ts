@@ -67,6 +67,43 @@ export function isMessageQuery(prompt: string): boolean {
   return /\b(e-?mails?|inbox|messages?|gmail|who\s+(emailed|wrote|sent)|unread|my\s+mail)\b/i.test(prompt || '');
 }
 
+// ─────────────────────────────────────────────
+// Page-context selection helpers (links / repo files)
+// ─────────────────────────────────────────────
+
+/** Words carrying no link/file-targeting signal, so a keyword match doesn't
+ *  fire on "what/this/page/about/…". Lets "how much is their pricing?" map
+ *  straight onto a "Pricing" link with no reranker round-trip. */
+const LINK_STOPWORDS = new Set([
+  'what', 'this', 'that', 'page', 'tell', 'about', 'how', 'much', 'many', 'does',
+  'their', 'they', 'them', 'the', 'and', 'for', 'are', 'was', 'were', 'with',
+  'from', 'into', 'your', 'you', 'have', 'has', 'can', 'could', 'would', 'should',
+  'which', 'when', 'where', 'who', 'why', 'use', 'using', 'get', 'got', 'its',
+  'more', 'info', 'information', 'give', 'show', 'explain', 'describe', 'current',
+  'site', 'website', 'here', 'there', 'any', 'all', 'some', 'these', 'those',
+  'work', 'works', 'like', 'want', 'need', 'find', 'look', 'inside', 'within',
+]);
+
+/** Content words from a question, for lexically matching link/file labels. */
+export function questionKeywords(q: string): string[] {
+  return [...new Set((q || '').toLowerCase().match(/[a-z][a-z-]{2,}/g) || [])].filter(w => !LINK_STOPWORDS.has(w));
+}
+
+/** True when a question keyword lands on a link's anchor text or its URL —
+ *  the obvious "next hop" the user means (pricing → a Pricing link). */
+export function lexicalLinkMatch(ref: { anchorText?: string; url: string }, keywords: string[]): boolean {
+  const hay = `${ref.anchorText || ''} ${ref.url}`.toLowerCase();
+  return keywords.some(k => hay.includes(k));
+}
+
+/** Is the question about a repo's layout / file locations (as opposed to what
+ *  a specific file does)? Only for these do we inline the full file tree; other
+ *  questions get file *contents* from the selector, not a path dump. */
+const STRUCTURE_RE = /\b(where\s+(is|are|do|does|can)|file\s*tree|directory|directories|folders?|structure|layout|organi[sz]ed|architecture|list\s+(the\s+)?(files?|dirs?|folders?|modules?)|what\s+files?|which\s+files?|repo\s+(structure|layout|contents?))\b/i;
+export function isStructureQuestion(q: string): boolean {
+  return STRUCTURE_RE.test(q || '');
+}
+
 /**
  * Did the model refuse a workspace-grounded turn for lack of sources? Tight
  * patterns matching the citation-branch refusal shapes ("This information was

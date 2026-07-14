@@ -54,15 +54,18 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   const [s2ApiKey, setS2ApiKey] = useState('');
   // Chat web-search fallback — default ON; only an explicit false disables it.
   const [webFallback, setWebFallback] = useState(true);
+  // How chat gathers extra detail from the open page (repo files / links).
+  const [pageCtxStrategy, setPageCtxStrategy] = useState<'semantic' | 'router' | 'agentic'>('semantic');
   useEffect(() => {
     if (typeof chrome === 'undefined' || !chrome.storage) return;
-    chrome.storage.local.get(['researchDepth', 'contextTokens', 's2ApiKey', 'sourceQuality', 'academicDepth', 'chatWebFallback']).then(r => {
+    chrome.storage.local.get(['researchDepth', 'contextTokens', 's2ApiKey', 'sourceQuality', 'academicDepth', 'chatWebFallback', 'pageContextStrategy']).then(r => {
       if (r.researchDepth === 'deep' || r.researchDepth === 'exhaustive') setResearchDepth(r.researchDepth);
       if (r.sourceQuality === 'high') setSourceQuality('high');
       if (r.academicDepth === 'abstract') setAcademicDepth('abstract');
       if (r.contextTokens) setContextTokens(String(r.contextTokens));
       if (r.s2ApiKey) setS2ApiKey(r.s2ApiKey);
       setWebFallback(r.chatWebFallback !== false);
+      if (r.pageContextStrategy === 'router' || r.pageContextStrategy === 'agentic') setPageCtxStrategy(r.pageContextStrategy);
     });
   }, []);
   const saveResearchSetting = (patch: Record<string, unknown>) => {
@@ -303,6 +306,23 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           >
             <span className={`absolute top-0.5 w-4 h-4 bg-background transition-all ${webFallback ? 'right-0.5' : 'left-0.5'}`} />
           </button>
+        </div>
+
+        <div className="space-y-1.5">
+          <label className="text-xs font-medium">Page context — gathering extra detail</label>
+          <Select value={pageCtxStrategy} onValueChange={(v) => { setPageCtxStrategy(v as any); saveResearchSetting({ pageContextStrategy: v }); }}>
+            <SelectTrigger className="w-full rounded-lg">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent className="border border-border rounded-lg shadow-card">
+              <SelectItem value="semantic" className="font-mono text-xs">Semantic — rank &amp; load only relevant files/links (fastest)</SelectItem>
+              <SelectItem value="router" className="font-mono text-xs">Router — a quick model call picks what to open (+1 step)</SelectItem>
+              <SelectItem value="agentic" className="font-mono text-xs">Agentic — the model opens files/links/web on demand (strong models)</SelectItem>
+            </SelectContent>
+          </Select>
+          <p className="text-[10px] text-muted-foreground font-mono leading-normal">
+            When you chat about an open page (a repo, a product site), how the assistant decides which files or sub-pages to open. Semantic is fast and reliable; Router and Agentic reason more but add model calls. Falls back to Semantic if a smarter mode fails.
+          </p>
         </div>
       </Section>
 
