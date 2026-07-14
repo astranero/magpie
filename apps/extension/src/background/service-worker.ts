@@ -1325,7 +1325,12 @@ async function buildChatRequest(chatId: string, projectId: string, prompt: strin
     }
 
     for (const l of linked) {
-      const lmd = (await selectPageMarkdown(l, effectiveQuery)).slice(0, LINKED_PAGE_BUDGET);
+      // Raw slice, not selectPageMarkdown: retrieval-selecting each followed
+      // page re-embeds it through the offscreen model (serialized, slow) for
+      // little gain — the budget already caps size. Cheap prefix keeps the turn
+      // responsive; the lead of a followed sub-page (e.g. a pricing page) holds
+      // the answer.
+      const lmd = l.markdown.slice(0, LINKED_PAGE_BUDGET);
       systemPrompt +=
         `\n\n--- LINKED PAGE (followed from the current page because it looked relevant to the question; NOT saved) ---\n` +
         `Title: ${l.title}\nURL: ${l.url}\n\n${lmd}\n` +
@@ -1576,7 +1581,27 @@ const LINK_EXPANSION_MIN_SCORE = 0.5;   // reranker sigmoid — “more likely r
 const HUB_EXPANSION_MAX = 6;
 const HUB_MIN_SCORE = 0.4;
 const LINKED_PAGE_BUDGET = 8_000;       // chars per linked page in the prompt
-const LINK_FETCH_TIMEOUT_MS = 15_000;
+const LINK_FETCH_TIMEOUT_MS = 8_000;    // interactive chat — bound the wait per followed link
+
+// Words that carry no link-targeting signal, so a question keyword-matching a
+// page link doesn't fire on "what/this/page/about/…". Lets an obvious ask
+// ("how much is their pricing?") map straight to a "Pricing" link with no
+// reranker round-trip.
+const LINK_STOPWORDS = new Set([
+  'what', 'this', 'that', 'page', 'tell', 'about', 'how', 'much', 'many', 'does',
+  'their', 'they', 'them', 'the', 'and', 'for', 'are', 'was', 'were', 'with',
+  'from', 'into', 'your', 'you', 'have', 'has', 'can', 'could', 'would', 'should',
+  'which', 'when', 'where', 'who', 'why', 'use', 'using', 'get', 'got', 'its',
+  'more', 'info', 'information', 'give', 'show', 'explain', 'describe', 'current',
+  'site', 'website', 'here', 'there', 'any', 'all', 'some', 'these', 'those',
+]);
+function questionKeywords(q: string): string[] {
+  return [...new Set(q.toLowerCase().match(/[a-z][a-z-]{2,}/g) || [])].filter(w => !LINK_STOPWORDS.has(w));
+}
+function lexicalLinkMatch(ref: { anchorText?: string; url: string }, keywords: string[]): boolean {
+  const hay = `${ref.anchorText || ''} ${ref.url}`.toLowerCase();
+  return keywords.some(k => hay.includes(k));
+}
 
 /** Link-dominated page: many links, little prose between them. */
 function isHubPage(markdown: string): boolean {
@@ -1600,27 +1625,41 @@ async function expandRelevantLinks(pageCtx: PageContext, question: string): Prom
   const minScore = hub ? HUB_MIN_SCORE : LINK_EXPANSION_MIN_SCORE;
   const maxLinks = hub ? HUB_EXPANSION_MAX : LINK_EXPANSION_MAX;
 
-  let ranked = refs;
-  try {
-    const res: any = await sendToOffscreen({
-      action: 'OFFSCREEN_RERANK',
-      query: question,
-      passages: refs.map(r => r.anchorText!)
-    }, undefined, embedOpts());
-    if (!res?.ok || !Array.isArray(res.scores)) return [];
-    ranked = refs
-      .map((r, i) => ({ r, score: res.scores[i] ?? 0 }))
-      .filter(x => x.score >= minScore)
-      .sort((a, b) => b.score - a.score)
-      .map(x => x.r);
-  } catch {
-    return []; // no scorer → no expansion (never fetch unscored links)
-  }
+  // FAST PATH — a question keyword lands directly on a link's text or href
+  // ("pricing" → a "Pricing" nav link). These are the obvious next hops the
+  // user means, so follow them straight away and skip the reranker round-trip
+  // (which is serialized behind the offscreen mutex and was a big chunk of the
+  // per-turn latency). The reranker is only the fallback for phrasings that
+  // don't lexically match any link (synonyms, conceptual asks).
+  const keywords = questionKeywords(question);
+  const lexical = keywords.length ? refs.filter(r => lexicalLinkMatch(r, keywords)) : [];
 
-  if (hub && ranked.length > 0) {
-    console.log(`[LINK-EXPAND] Hub page detected (${refs.length} links) — following up to ${maxLinks}`);
+  let chosen: typeof refs;
+  if (lexical.length > 0) {
+    chosen = lexical.slice(0, maxLinks);
+    console.log(`[LINK-EXPAND] Lexical match on [${keywords.join(', ')}] — following ${chosen.length} link(s), no rerank`);
+  } else {
+    let ranked = refs;
+    try {
+      const res: any = await sendToOffscreen({
+        action: 'OFFSCREEN_RERANK',
+        query: question,
+        passages: refs.map(r => r.anchorText!)
+      }, undefined, embedOpts());
+      if (!res?.ok || !Array.isArray(res.scores)) return [];
+      ranked = refs
+        .map((r, i) => ({ r, score: res.scores[i] ?? 0 }))
+        .filter(x => x.score >= minScore)
+        .sort((a, b) => b.score - a.score)
+        .map(x => x.r);
+    } catch {
+      return []; // no scorer → no expansion (never fetch unscored links)
+    }
+    if (hub && ranked.length > 0) {
+      console.log(`[LINK-EXPAND] Hub page detected (${refs.length} links) — following up to ${maxLinks}`);
+    }
+    chosen = ranked.slice(0, maxLinks);
   }
-  const chosen = ranked.slice(0, maxLinks);
   const results = await Promise.allSettled(chosen.map(async ref => {
     const cached = pageContextCache.get(ref.url);
     if (cached && Date.now() - cached.ts < PAGE_CONTEXT_TTL_MS) return cached.ctx;
