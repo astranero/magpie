@@ -84,11 +84,13 @@ const PlanCard: React.FC<PlanCardProps> = ({ msgId, plan, onStart, onCancel }) =
         <span className={`text-[11px] font-medium px-2 py-0.5 rounded-full ${
           plan.status === 'started' ? 'bg-primary/10 text-primary' :
           plan.status === 'cancelled' ? 'bg-muted text-muted-foreground' :
+          plan.status === 'failed' ? 'bg-red-500/15 text-red-600 dark:text-red-400' :
           isBusy ? 'bg-primary/10 text-primary animate-pulse motion-reduce:animate-none' :
           'bg-highlight/15 text-amber-700 dark:text-highlight'
         }`}>
           {plan.status === 'started' ? 'Running' :
            plan.status === 'cancelled' ? 'Cancelled' :
+           plan.status === 'failed' ? 'Failed' :
            plan.status === 'loading' ? 'Planning…' :
            plan.status === 'refining' ? 'Revising…' : 'Draft'}
         </span>
@@ -142,6 +144,29 @@ const PlanCard: React.FC<PlanCardProps> = ({ msgId, plan, onStart, onCancel }) =
                   </li>
                 ))}
               </ol>
+            )}
+
+            {plan.status === 'failed' && (
+              <div className="border-t border-border/60 pt-2.5 space-y-2">
+                <div className="text-[11px] text-red-600 dark:text-red-400 leading-snug break-words">
+                  Research failed{plan.error ? `: ${plan.error}` : ''}. Nothing was saved — retry to run the same plan again.
+                </div>
+                <div className="flex gap-2">
+                  <Button
+                    className="flex-1 h-8 text-xs font-semibold rounded-lg"
+                    onClick={() => onStart?.(msgId, plan)}
+                  >
+                    Retry {plan.mode === 'deep' ? 'deep research' : 'research'}
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    className="h-8 text-xs font-medium rounded-lg text-muted-foreground hover:text-foreground"
+                    onClick={() => onCancel?.(msgId)}
+                  >
+                    Dismiss
+                  </Button>
+                </div>
+              </div>
             )}
 
             {isPending && (

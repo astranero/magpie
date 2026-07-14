@@ -59,11 +59,13 @@ export interface ResearchPlan {
   effectiveTopic: string;
   subQuestions: string[];
   mode: 'quick' | 'deep';
-  status: 'loading' | 'draft' | 'refining' | 'started' | 'cancelled';
+  status: 'loading' | 'draft' | 'refining' | 'started' | 'cancelled' | 'failed';
   /** Gather rounds this run will make (1 = quick single pass). */
   stages?: number;
   /** Rough end-to-end expectation shown on the card. */
   estMinutes?: number;
+  /** Why the run failed — shown on the card with a Retry button. */
+  error?: string;
 }
 
 export interface ResolvedCitation {

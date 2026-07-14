@@ -417,6 +417,21 @@ export default function App() {
         if (now - (doneGuardRef.current[m.projectId] || 0) < 4000) return;
         doneGuardRef.current[m.projectId] = now;
 
+        // On failure, flip the started plan card to a retryable 'failed' state
+        // (the plan — topic + sub-questions — is preserved on the card, so Retry
+        // just re-runs it). On success/cancel the report/history load handles it.
+        if (m.error && !m.cancelled && m.chatId) {
+          setMessages(prev => {
+            const list = prev[m.chatId] || [];
+            const idx = [...list].reverse().findIndex(x => x.plan && x.plan.status === 'started');
+            if (idx === -1) return prev;
+            const realIdx = list.length - 1 - idx;
+            const copy = [...list];
+            copy[realIdx] = { ...copy[realIdx], plan: { ...copy[realIdx].plan!, status: 'failed', error: String(m.error) } };
+            return { ...prev, [m.chatId]: copy };
+          });
+        }
+
         // The persisted, fully-rendered report lands here (not streamed live).
         if (m.chatId) loadChatHistory(m.chatId);
         loadDocuments(m.projectId);
@@ -745,7 +760,7 @@ export default function App() {
         // history reload (chat switch, research completion) doesn't eat a
         // draft the user is still negotiating.
         const pendingPlans = (prev[chatId] || []).filter(
-          m => m.plan && (m.plan.status === 'draft' || m.plan.status === 'refining' || m.plan.status === 'loading')
+          m => m.plan && (m.plan.status === 'draft' || m.plan.status === 'refining' || m.plan.status === 'loading' || m.plan.status === 'failed')
         );
         // Empty history → keep the array empty and let ChatView show its
         // onboarding card. (A synthetic "welcome" system message used to live
