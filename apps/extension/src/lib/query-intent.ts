@@ -134,7 +134,7 @@ export function isImplementationQuestion(q: string): boolean {
 
 /** Is the question location- or "near me"-dependent (weather, local info)? Used
  *  to decide whether to inject the user's place into a web search query. */
-const LOCATION_RE = /\b(weather|forecast|temperature|climate|humidity|rain|snow|sunny|near\s?me|nearby|around\s+here|local(?:ly)?|closest|nearest|restaurants?|cafes?|coffee|bars?|hotels?|traffic|directions|things\s+to\s+do|open\s+now|gas\s+prices?|my\s+area)\b/i;
+const LOCATION_RE = /\b(weather|forecast|temperature|climate|humidity|rain(?:ing|y)?|snow(?:ing|y)?|sunny|cold|hot|warm|chilly|freezing|near\s?me|nearby|around\s+here|local(?:ly)?|closest|nearest|restaurants?|cafes?|coffee|bars?|hotels?|traffic|directions|things\s+to\s+do|open\s+now|gas\s+prices?|my\s+area)\b/i;
 export function isLocationDependent(q: string): boolean {
   return LOCATION_RE.test(q || '');
 }

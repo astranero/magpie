@@ -102,7 +102,7 @@ describe('intent router heuristics', () => {
 
 describe('location awareness', () => {
   it('isLocationDependent: true for weather / near-me / local asks', () => {
-    for (const q of ['what is the weather like today', 'coffee near me', 'best restaurants nearby', 'traffic right now']) {
+    for (const q of ['what is the weather like today', 'is today cold', 'coffee near me', 'best restaurants nearby', 'traffic right now']) {
       expect(isLocationDependent(q)).toBe(true);
     }
   });

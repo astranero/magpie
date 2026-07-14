@@ -1107,6 +1107,9 @@ async function isChatWebFallbackEnabled(): Promise<boolean> {
  * Fails OPEN to the page — the user did attach it.
  */
 async function isQuestionAboutPage(q: string, page: PageContext, signal: AbortSignal): Promise<boolean> {
+  // Weather / "near me" / local asks are about the world, not the open page —
+  // route them out even if the page happens to contain a matching word.
+  if (isLocationDependent(q)) return false;
   if (mentionsPageDeixis(q)) return true;
   if (overlapsPage(q, `${page.title} ${page.markdown.slice(0, 4000)}`)) return true;
   try {
