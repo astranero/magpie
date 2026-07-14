@@ -1506,10 +1506,23 @@ async function buildChatRequest(chatId: string, projectId: string, prompt: strin
  */
 function linkedPagesFooter(pages: Array<{ title: string; url: string }>): string {
   if (pages.length === 0) return '';
-  const items = pages
-    .map(p => `[${(p.title || p.url).replace(/[\[\]]/g, '')}](${p.url.replace(/\(/g, '%28').replace(/\)/g, '%29')})`)
-    .join(' · ');
-  return `\n\n---\n🔗 *Also read for this answer:* ${items}`;
+  // Concise provenance, not a reading list: dedupe by URL, cap at 3, and prefer
+  // a short label. Web-search titles are long and noisy ("Helsinki, Uusimaa,
+  // Finland Hourly Weather | AccuWeather") — collapse those to the site name;
+  // short anchor titles from followed on-page links (e.g. "Pricing") stay as-is.
+  const seen = new Set<string>();
+  const items: string[] = [];
+  for (const p of pages) {
+    if (seen.has(p.url)) continue;
+    seen.add(p.url);
+    let host = '';
+    try { host = new URL(p.url).hostname.replace(/^www\./, ''); } catch { /* keep title */ }
+    const t = (p.title || '').trim();
+    const label = (t && t.length <= 40 ? t : (host || t || p.url)).replace(/[\[\]]/g, '');
+    items.push(`[${label}](${p.url.replace(/\(/g, '%28').replace(/\)/g, '%29')})`);
+    if (items.length >= 3) break;
+  }
+  return `\n\n---\n*Sources:* ${items.join(' · ')}`;
 }
 
 // ─────────────────────────────────────────────
