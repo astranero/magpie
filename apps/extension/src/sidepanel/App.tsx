@@ -196,6 +196,9 @@ export default function App() {
   const [researchLogs, setResearchLogs] = useState<Record<string, string[]>>({});
   const msgEnd = useRef<HTMLDivElement>(null);
   const chatPortRef = useRef<chrome.runtime.Port | null>(null);
+  // Chats THIS instance is actively streaming — so a CHAT_STATE broadcast from
+  // the background (which echoes to us too) doesn't fight our own live stream.
+  const streamingChatsRef = useRef<Set<string>>(new Set());
 
   // F3: buffer streamed deltas + flush once per animation frame.
   // Prevents per-token setMessages storms during long responses.
@@ -410,6 +413,14 @@ export default function App() {
     trySilentAuth();
 
     const messageListener = (m: any) => {
+      if (m.action === 'CHAT_STATE') {
+        // Another instance is (or just finished) answering in this chat. Mirror
+        // its spinner; on finish, pull the saved answer. Ignore our own stream.
+        if (streamingChatsRef.current.has(m.chatId)) return;
+        setGenerating(prev => ({ ...prev, [m.chatId]: !!m.generating }));
+        loadChatHistory(m.chatId);
+        return;
+      }
       if (m.action === 'DEEP_RESEARCH_DELTA') {
         // Report tokens are intentionally NOT rendered live. Re-parsing the
         // whole growing markdown report every flush saturated the main thread
@@ -1407,9 +1418,11 @@ export default function App() {
       }));
     }
     setGenerating(prev => ({ ...prev, [currentChatId]: true }));
+    streamingChatsRef.current.add(currentChatId);
 
     if (typeof chrome === 'undefined' || !chrome.runtime?.connect) {
       setGenerating(prev => ({ ...prev, [currentChatId]: false }));
+      streamingChatsRef.current.delete(currentChatId);
       resolve();
       return;
     }
@@ -1421,6 +1434,7 @@ export default function App() {
     const finish = () => {
       if (finished) return;
       finished = true;
+      streamingChatsRef.current.delete(currentChatId);
       // A disconnect without DONE must still clear the streaming flag or the
       // blinking cursor sticks forever.
       finalizeStreamingMessage(currentChatId, assistantId);

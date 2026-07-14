@@ -2020,6 +2020,11 @@ chrome.runtime.onConnect.addListener((port) => {
         provider: 'custom'
       });
 
+      // Tell OTHER sidepanel instances a question is in flight for this chat, so
+      // they show the same "thinking" spinner (the live token stream stays on the
+      // initiating port; they reload the answer on CHAT_STATE:false).
+      chrome.runtime.sendMessage({ action: 'CHAT_STATE', chatId, projectId, generating: true }).catch(() => {});
+
       await chatWithCustomStream(systemPrompt, formattedHistory, prompt, localController.signal, (delta) => {
         full += delta;
         safePost({ type: 'DELTA', text: delta });
@@ -2095,6 +2100,8 @@ chrome.runtime.onConnect.addListener((port) => {
       interactiveDepth = Math.max(0, interactiveDepth - 1);
       clearInterval(keepAlive);
       if (abortControllers.get(chatId) === localController) abortControllers.delete(chatId);
+      // Clear the spinner on other instances and let them pull the saved answer.
+      chrome.runtime.sendMessage({ action: 'CHAT_STATE', chatId, projectId, generating: false }).catch(() => {});
     }
   });
 });
