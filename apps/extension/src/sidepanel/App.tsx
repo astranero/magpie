@@ -212,6 +212,9 @@ export default function App() {
   // doesn't re-publish the same value (chrome.storage.set fires onChanged even
   // when the value is unchanged).
   const lastSessionJsonRef = useRef<string>('');
+  // When another instance is answering, this maps chatId → the local assistant
+  // message id we're streaming its broadcast tokens into (live mirror).
+  const mirrorStreamRef = useRef<Record<string, string>>({});
 
   // F3: buffer streamed deltas + flush once per animation frame.
   // Prevents per-token setMessages storms during long responses.
@@ -427,11 +430,37 @@ export default function App() {
 
     const messageListener = (m: any) => {
       if (m.action === 'CHAT_STATE') {
-        // Another instance is (or just finished) answering in this chat. Mirror
-        // its spinner; on finish, pull the saved answer. Ignore our own stream.
+        // Another instance is (or just finished) answering in this chat — mirror
+        // it LIVE. Ignore our own stream (we render it via the port).
         if (streamingChatsRef.current.has(m.chatId)) return;
-        setGenerating(prev => ({ ...prev, [m.chatId]: !!m.generating }));
-        loadChatHistory(m.chatId);
+        if (m.generating) {
+          // Show the question now and open a local assistant message that the
+          // CHAT_DELTA broadcasts will stream into.
+          mirrorStreamRef.current[m.chatId] = uid();
+          setMessages(prev => ({
+            ...prev,
+            [m.chatId]: [...(prev[m.chatId] || []), { id: uid(), role: 'user' as const, text: (m.prompt as string) || '' }],
+          }));
+          setGenerating(prev => ({ ...prev, [m.chatId]: true }));
+        } else {
+          const aId = mirrorStreamRef.current[m.chatId];
+          if (aId) finalizeStreamingMessage(m.chatId, aId);
+          delete mirrorStreamRef.current[m.chatId];
+          setGenerating(prev => ({ ...prev, [m.chatId]: false }));
+          loadChatHistory(m.chatId); // reconcile the mirrored answer with the saved one
+        }
+        return;
+      }
+      if (m.action === 'CHAT_DELTA') {
+        if (streamingChatsRef.current.has(m.chatId)) return; // our own stream renders via the port
+        const aId = mirrorStreamRef.current[m.chatId];
+        if (aId) pushDelta(m.chatId, aId, (m.text as string) || '');
+        return;
+      }
+      if (m.action === 'CHAT_RESET') {
+        if (streamingChatsRef.current.has(m.chatId)) return;
+        const aId = mirrorStreamRef.current[m.chatId];
+        if (aId) resetStreamingMessage(m.chatId, aId);
         return;
       }
       if (m.action === 'DEEP_RESEARCH_DELTA') {

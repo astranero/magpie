@@ -2038,6 +2038,15 @@ chrome.runtime.onConnect.addListener((port) => {
     const localController = controller;
     let full = '';
 
+    // Emit a token to the initiating port AND broadcast it so other sidepanel
+    // instances of the same chat render the answer LIVE (not just spinner → final
+    // reload). safePost feeds this port; the broadcast feeds every mirror.
+    const emitDelta = (text: string) => {
+      full += text;
+      safePost({ type: 'DELTA', text });
+      chrome.runtime.sendMessage({ action: 'CHAT_DELTA', chatId, text }).catch(() => {});
+    };
+
     // Keep the MV3 worker alive for the whole turn. Context assembly (intent
     // call, retrieval, link scrapes) and a slow provider's time-to-first-token
     // are silent gaps; a >30s gap with no chrome API activity evicts the worker
@@ -2067,15 +2076,12 @@ chrome.runtime.onConnect.addListener((port) => {
         provider: 'custom'
       });
 
-      // Tell OTHER sidepanel instances a question is in flight for this chat, so
-      // they show the same "thinking" spinner (the live token stream stays on the
-      // initiating port; they reload the answer on CHAT_STATE:false).
-      chrome.runtime.sendMessage({ action: 'CHAT_STATE', chatId, projectId, generating: true }).catch(() => {});
+      // Tell OTHER sidepanel instances a question is in flight for this chat so
+      // they mirror it live: `prompt` lets them show the question immediately,
+      // then CHAT_DELTA broadcasts stream the answer, CHAT_STATE:false ends it.
+      chrome.runtime.sendMessage({ action: 'CHAT_STATE', chatId, projectId, generating: true, prompt }).catch(() => {});
 
-      await chatWithCustomStream(systemPrompt, formattedHistory, prompt, localController.signal, (delta) => {
-        full += delta;
-        safePost({ type: 'DELTA', text: delta });
-      });
+      await chatWithCustomStream(systemPrompt, formattedHistory, prompt, localController.signal, emitDelta);
 
       // RELIABLE NET: the score gate can still let a workspace-grounded turn
       // reach a refusal (reranker unavailable, or a keyword chunk that squeaks
@@ -2094,6 +2100,7 @@ chrome.runtime.onConnect.addListener((port) => {
 
         if (web.context) {
           safePost({ type: 'RESET' });   // clear the refusal from the panel
+          chrome.runtime.sendMessage({ action: 'CHAT_RESET', chatId }).catch(() => {}); // and from mirrors
           full = '';
           const webSys =
             (place ? `The user is in ${place}; answer for that location and do NOT ask them which city. ` : '') +
@@ -2101,10 +2108,7 @@ chrome.runtime.onConnect.addListener((port) => {
             `Answer like a sharp, helpful friend: lead with the direct answer in natural, plain language, then just enough detail. ` +
             `Don't clutter the prose with [W#] tags — the sources are shown as links below. Use only what the excerpts support; if they don't answer it, say so plainly.` +
             `\n--- WEB RESULTS ---\n${web.context}\n--- END WEB RESULTS ---`;
-          await chatWithCustomStream(webSys, [], prompt, localController.signal, (delta) => {
-            full += delta;
-            safePost({ type: 'DELTA', text: delta });
-          });
+          await chatWithCustomStream(webSys, [], prompt, localController.signal, emitDelta);
           linkedPages = web.sources; // footer below now points at the web sources
         }
       }
@@ -2113,8 +2117,7 @@ chrome.runtime.onConnect.addListener((port) => {
       // final delta so it renders live AND lands in the saved message.
       const footer = linkedPagesFooter(linkedPages);
       if (footer && full.trim()) {
-        full += footer;
-        safePost({ type: 'DELTA', text: footer });
+        emitDelta(footer);
       }
 
       if (full.trim()) {
