@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { needsIntentResolution, formatHistoryForIntent, parseRepoUrl, selectTreePaths, formatTreeBlock, isStructureQuestion, questionKeywords, expandNavKeywords, isImplementationQuestion, findRepoUrlInText, isPageMetaQuestion } from '../query-intent';
+import { needsIntentResolution, formatHistoryForIntent, parseRepoUrl, selectTreePaths, formatTreeBlock, isStructureQuestion, questionKeywords, expandNavKeywords, isImplementationQuestion, findRepoUrlInText, isPageMetaQuestion, mentionsPageDeixis, overlapsPage } from '../query-intent';
 
 describe('isStructureQuestion', () => {
   it('true for layout / file-location questions', () => {
@@ -76,6 +76,27 @@ describe('isPageMetaQuestion', () => {
       'how much is their pricing',
       'does it support webhooks',
     ]) expect(isPageMetaQuestion(q)).toBe(false);
+  });
+});
+
+describe('intent router heuristics', () => {
+  it('mentionsPageDeixis: true for explicit page/site references', () => {
+    for (const q of ['what is this project', 'summarize the documentation', 'how does this tool work', 'pricing on this site']) {
+      expect(mentionsPageDeixis(q)).toBe(true);
+    }
+  });
+  it('mentionsPageDeixis: false for bare pronouns / general questions', () => {
+    // "it" is expletive here — must not read as a page reference.
+    for (const q of ['is it cold today', 'what time is it', 'are they open now']) {
+      expect(mentionsPageDeixis(q)).toBe(false);
+    }
+  });
+
+  it('overlapsPage: true when a keyword is on the page, false for off-topic asks', () => {
+    const page = 'Litmus — AI market validation for startup ideas. Pricing is credit-based.';
+    expect(overlapsPage('what can you say about pricing', page)).toBe(true);
+    expect(overlapsPage('is today cold', page)).toBe(false);
+    expect(overlapsPage('what about this', page)).toBe(false); // only stopwords → no overlap
   });
 });
 

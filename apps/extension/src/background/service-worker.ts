@@ -16,7 +16,7 @@ import { buildFrontmatter, hasFrontmatter } from '../lib/frontmatter';
 import { get as idbGet } from 'idb-keyval';
 import { runDeepResearch, generateSubQuestions, scrapeUrl, isJunkUrl, gatherWebSnippets } from './deep-researcher';
 import { harvestReferences } from '../lib/reference-harvest';
-import { needsIntentResolution, formatHistoryForIntent, parseRepoUrl, selectTreePaths, formatTreeBlock, isChitchat, isRefusalAnswer, isStructureQuestion, isImplementationQuestion, findRepoUrlInText, isPageMetaQuestion, questionKeywords, RepoRef } from '../lib/query-intent';
+import { needsIntentResolution, formatHistoryForIntent, parseRepoUrl, selectTreePaths, formatTreeBlock, isChitchat, isRefusalAnswer, isStructureQuestion, isImplementationQuestion, findRepoUrlInText, isPageMetaQuestion, questionKeywords, mentionsPageDeixis, overlapsPage, RepoRef } from '../lib/query-intent';
 import { selectSemantic, fetchWithinBudget, parseRouterSelection, TOTAL_CTX_BUDGET, RerankFn, LinkRef, Selection } from '../lib/context-retrieval';
 import { getResearchLimits } from '../lib/research-limits';
 import { looksLikeBuildLog, extractLogHighlights } from '../lib/log-highlights';
@@ -1098,6 +1098,30 @@ async function isChatWebFallbackEnabled(): Promise<boolean> {
 }
 
 /** Build the RAG system prompt + formatted history for a chat turn. */
+/**
+ * Intent router for an attached page (📄 ON): is this question actually ABOUT
+ * the page, or an unrelated general question ("is it cold today?") that only
+ * dead-ends if forced through the page path? Instant heuristics decide the
+ * common cases (explicit page reference, or a keyword shared with the page);
+ * only a genuinely ambiguous question costs one cheap classification call.
+ * Fails OPEN to the page — the user did attach it.
+ */
+async function isQuestionAboutPage(q: string, page: PageContext, signal: AbortSignal): Promise<boolean> {
+  if (mentionsPageDeixis(q)) return true;
+  if (overlapsPage(q, `${page.title} ${page.markdown.slice(0, 4000)}`)) return true;
+  try {
+    const sys =
+      `You are an intent router. The user is viewing a web page titled "${page.title}". ` +
+      `Decide whether their question is about THIS page (its subject, site, or content) or is an unrelated general question ` +
+      `— weather, math, world facts, another website, personal chit-chat. Reply with exactly one word: PAGE or OTHER.`;
+    const ans = await chatWithCustom(sys, [], q, signal);
+    return !/\bOTHER\b/i.test(ans);
+  } catch (e) {
+    if (signal.aborted) throw e;
+    return true; // provider hiccup — honor the attached page rather than drop it
+  }
+}
+
 async function buildChatRequest(chatId: string, projectId: string, prompt: string, signal: AbortSignal, pageContext?: PageContext | null, onStatus?: (s: string) => void): Promise<{ systemPrompt: string; formattedHistory: Array<{ role: string; content: string }>; linkedPages: Array<{ title: string; url: string }>; grounded: boolean }> {
   // Get all documents for this project
   const allDocs = await listDocuments(projectId);
@@ -1140,17 +1164,25 @@ async function buildChatRequest(chatId: string, projectId: string, prompt: strin
   // page-section selection, and link scoring all see real signal.
   if (needsIntentResolution(prompt, formattedHistory.length)) onStatus?.('Understanding the question…');
   const effectiveQuery = await resolveQuestionIntent(prompt, formattedHistory, pageContext?.title, signal);
-  if (!pageContext) onStatus?.('Searching your sources…');
+
+  // Intent router: an attached page only wins when the question is actually
+  // about it. "is it cold today?" with a docs page open must NOT be forced
+  // through the page path (→ "the page doesn't cover weather"); route it to the
+  // normal workspace/web/general pipeline instead.
+  const usePage = !!pageContext && await isQuestionAboutPage(effectiveQuery, pageContext, signal);
+  if (pageContext && !usePage) console.log('[ROUTER] question is not about the open page — routing to workspace/web/general');
+  if (!usePage) onStatus?.('Searching your sources…');
 
   // ── Multi-Query Adaptive RAG ──
   // 1. Initial search with the (intent-resolved) query
   // 2. If results are sparse, expand the query using the LLM into 2-3 variants
   // 3. Search each variant and merge results
-  // Skip workspace retrieval when 📄 ON: the page wins (see the gate below), so
-  // searching the library here is wasted work — and a wasted query embed on the
-  // hot path. Chit-chat already returned above.
+  // Skip workspace retrieval when the page wins (usePage): searching the library
+  // is then wasted work — and a wasted query embed on the hot path. When the
+  // router sent an off-page question here (usePage false), we DO want retrieval.
+  // Chit-chat already returned above.
   let relevantChunks: any[] = [];
-  if (!pageContext && docIds.length > 0) {
+  if (!usePage && docIds.length > 0) {
     relevantChunks = await searchSessionChunks(projectId, effectiveQuery, 40, docIds, embedOpts());
     console.log(`[RAG] Initial search for "${effectiveQuery.slice(0, 50)}..." returned ${relevantChunks.length} chunks`);
 
@@ -1229,7 +1261,7 @@ async function buildChatRequest(chatId: string, projectId: string, prompt: strin
   // hijack it. Without this gate, an imported library doc that happens to match
   // the keyword ("pricing") fires the citation branch and answers from the doc
   // (inventing tiers, citing [1..14]) while ignoring the page the user attached.
-  if (!pageContext && isConfidentMatch(relevantChunks as Array<{ rerankScore?: number }>)) {
+  if (!usePage && isConfidentMatch(relevantChunks as Array<{ rerankScore?: number }>)) {
     grounded = true;
     // Build citation-anchored context (generous — favor fuller grounding over
     // "I couldn't find it" cutoffs; only fires for library-source questions).
@@ -1240,9 +1272,10 @@ async function buildChatRequest(chatId: string, projectId: string, prompt: strin
       `\nCRITICAL ANTI-HALLUCINATION RULE: If the answer cannot be found in the provided sources, you MUST say "I cannot answer this based on the provided sources." DO NOT rely on external knowledge.\n` +
       RESPONSE_STYLE +
       `\n--- SOURCES ---\n${context}\n--- END SOURCES ---`;
-  } else if (pageContext) {
-    // The user attached the current page (📄 ON) — they're asking ABOUT that
-    // page. Answer from it (appended below), NOT from a live web search and NOT
+  } else if (usePage) {
+    // The user attached the current page (📄 ON) AND the router judged the
+    // question to be about it — answer from it (appended below), NOT from a live
+    // web search and NOT
     // from library docs (workspace grounding is intentionally skipped above so a
     // keyword-matching imported doc can't override the page). Concretely:
     // a page-grounded question ("what is this?", "how much is their pricing?")
@@ -1298,7 +1331,7 @@ async function buildChatRequest(chatId: string, projectId: string, prompt: strin
   // Web-fallback sources render as the same clickable footer as auto-followed
   // links (streamed as a final delta + saved with the message).
   if (webSources.length) linkedPages.push(...webSources);
-  if (pageContext) {
+  if (pageContext && usePage) {
     onStatus?.('Reading the page…');
     // Long pages switch to per-question retrieval (see selectPageMarkdown)
     const md = await selectPageMarkdown(pageContext, effectiveQuery);

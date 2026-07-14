@@ -132,6 +132,24 @@ export function isImplementationQuestion(q: string): boolean {
   return IMPL_RE.test(q || '');
 }
 
+// Strong page-referential phrases ("this project", "the docs", "on this site").
+// Deliberately NOT bare pronouns — "is it cold today?" uses "it" expletively and
+// must not be mistaken for a page question.
+const PAGE_DEIXIS_RE = /\b(this|these|those)\s+(page|site|website|project|repo|repository|article|paper|docs?|documentation|company|product|tool|app|platform|framework|library|service|codebase|dataset)\b|\bthe\s+(page|site|website|repo|repository|article|documentation|codebase)\b|\bon\s+this\s+(page|site)\b/i;
+/** Does the question explicitly refer to the page/site the user is viewing? */
+export function mentionsPageDeixis(q: string): boolean {
+  return PAGE_DEIXIS_RE.test(q || '');
+}
+
+/** Does the question share a content keyword with the page (title + body sample)?
+ *  A cheap "is this plausibly about the page" signal for the intent router. */
+export function overlapsPage(q: string, pageText: string): boolean {
+  const kw = questionKeywords(q);
+  if (!kw.length) return false;
+  const hay = (pageText || '').toLowerCase();
+  return kw.some(k => hay.includes(k));
+}
+
 /** Is the question ABOUT the current page itself (summarize / overview / gist /
  *  "what's the consensus of this page") rather than a topic to go look up? These
  *  must never trigger link-following or a forward search — the answer is the
