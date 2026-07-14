@@ -134,7 +134,7 @@ async function parsePdfOpfs(opfsName: string): Promise<{ pages: string[]; imageP
 // proceedings, a scanned book) buffers entirely in memory here and, with pdf.js
 // structures on top, can OOM the offscreen renderer. Cap it: skip oversize PDFs
 // (the run continues with its other sources) rather than risk the whole process.
-const MAX_PDF_URL_MB = 75;
+const MAX_PDF_URL_MB = 50;
 
 async function parsePdfUrl(url: string): Promise<{ pages: string[]; imagePages: { index: number; dataUrl: string }[]; bytes: number }> {
   let sizeMb = 0;

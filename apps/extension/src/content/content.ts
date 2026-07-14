@@ -76,7 +76,11 @@ function bufToBase64(buf: ArrayBuffer): string {
   return btoa(binary);
 }
 
-const MAX_PDF_BYTES = 40 * 1024 * 1024;
+// base64 transfer inflates ~1.33× and copies the bytes several times (fetch
+// buffer → binary string → btoa → message). Keep the ceiling modest so a large
+// PDF can't OOM the page renderer while encoding. Bigger PDFs → use Import PDF
+// (streams to OPFS, no base64).
+const MAX_PDF_BYTES = 25 * 1024 * 1024;
 async function extractPdf(preferred?: string): Promise<Record<string, unknown>> {
   const url = preferred || findPdfUrl();
   if (!url) return { ok: false, error: 'no PDF found on this page' };
@@ -87,14 +91,21 @@ async function extractPdf(preferred?: string): Promise<Record<string, unknown>> 
     return { ok: false, error: `fetch failed: ${e?.message || e}` };
   }
   if (!res.ok) return { ok: false, error: `HTTP ${res.status}` };
-  const buf = await res.arrayBuffer();
   const ct = res.headers.get('content-type') || '';
+  // Reject by Content-Length BEFORE reading the body into memory — a huge PDF
+  // must never be fully buffered (that's what OOM-crashed the renderer).
+  const len = Number(res.headers.get('content-length') || 0);
+  if (len > MAX_PDF_BYTES) {
+    try { await res.body?.cancel(); } catch { /* ignore */ }
+    return { ok: false, error: `PDF too large to capture inline (${Math.round(len / 1024 / 1024)} MB) — use Import PDF` };
+  }
+  const buf = await res.arrayBuffer();
   const head = String.fromCharCode(...new Uint8Array(buf.slice(0, 5)));
   if (!ct.includes('application/pdf') && !head.startsWith('%PDF')) {
     return { ok: false, error: `not a PDF (got ${ct || 'unknown type'} — likely a login/paywall page)` };
   }
-  if (buf.byteLength > MAX_PDF_BYTES) {
-    return { ok: false, error: `PDF too large to capture inline (${Math.round(buf.byteLength / 1024 / 1024)} MB)` };
+  if (buf.byteLength > MAX_PDF_BYTES) {   // Content-Length can lie / be absent
+    return { ok: false, error: `PDF too large to capture inline (${Math.round(buf.byteLength / 1024 / 1024)} MB) — use Import PDF` };
   }
   return { ok: true, base64: bufToBase64(buf), url, title: document.title };
 }
