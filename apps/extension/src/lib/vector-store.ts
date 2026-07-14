@@ -1,6 +1,17 @@
 import { create, insert, search as oramaSearch } from '@orama/orama';
 import { Chunk, listDocuments, getChunksForDocs } from './db';
 import { sendToOffscreen } from './offscreen-client';
+import { crumb } from './crash-log';
+
+// Hard ceiling on how many chunks the IN-MEMORY index holds per session. A deep
+// research run indexes every scraped source's chunks live (some PDFs alone are
+// 500+ chunks); unbounded, the Orama store — full text + a 384-float vector + a
+// BM25 index per chunk — grew until it OOM-killed the whole MV3 service worker
+// mid-gather (the confirmed crash: dies at ~source 30-40 regardless of URL). The
+// chunks remain in IndexedDB (keyword/vector searchable after a capped
+// rehydrate), so this only bounds the heap, matching the rehydrate cap below.
+const MAX_SESSION_CHUNKS = 2000;
+const sessionChunkCount = new Map<string, number>();
 
 // ─────────────────────────────────────────────
 // Session Vector Store (Orama BM25)
@@ -97,8 +108,10 @@ async function _ensureProjectIndexedInner(projectId: string, maxChunks: number):
   const chunks = await getChunksForDocs(missing);
 
   // Index ALL chunks (not just one per doc), capped at maxChunks
-  const toInsert = chunks.slice(0, maxChunks);
+  const cur = sessionChunkCount.get(projectId) ?? 0;
+  const toInsert = chunks.slice(0, Math.max(0, maxChunks - cur));
   await insertChunks(db, toInsert);
+  sessionChunkCount.set(projectId, cur + toInsert.length);
   // Mark all docs as indexed (even if some chunks were cut by the cap)
   missing.forEach(docId => indexed.add(docId));
 }
@@ -114,8 +127,24 @@ export async function addChunksToVectorStore(sessionId: string, chunks: Chunk[])
 
   // Skip docs already indexed (e.g. rehydrated before this call landed)
   const newChunks = chunks.filter(c => !c.docId || !indexed.has(c.docId));
-  await insertChunks(db, newChunks);
+
+  // Bound the in-memory heap: once the session index is full, stop inserting.
+  // The chunks are already persisted in IndexedDB by saveDocument, so they stay
+  // searchable (capped rehydrate); this just stops the OOM that killed the worker.
+  const cur = sessionChunkCount.get(sessionId) ?? 0;
+  const room = Math.max(0, MAX_SESSION_CHUNKS - cur);
+  const toInsert = newChunks.slice(0, room);
+  await insertChunks(db, toInsert);
+  sessionChunkCount.set(sessionId, cur + toInsert.length);
+  // Mark ALL new docs indexed even if capped — don't retry them next call.
   newChunks.forEach(c => { if (c.docId) indexed.add(c.docId); });
+  if (toInsert.length < newChunks.length) {
+    crumb('vector', 'session index full — capped', { at: cur + toInsert.length, dropped: newChunks.length - toInsert.length });
+  } else if (cur + toInsert.length >= MAX_SESSION_CHUNKS - 200 || (cur >> 9) !== ((cur + toInsert.length) >> 9)) {
+    // Log the running total near the cap / every ~512 chunks so a crash shows how
+    // large the store was (confirms the cumulative-memory cause).
+    crumb('vector', 'session chunks', { n: cur + toInsert.length });
+  }
 }
 
 export async function searchSessionChunks(
@@ -308,12 +337,14 @@ export async function searchLibrary(query: string, limit: number = 8): Promise<L
 export function resetAllSessionIndexes(): void {
   sessionVectorDBs.clear();
   indexedDocIds.clear();
+  sessionChunkCount.clear();
 }
 
 /** New captures/deletions must invalidate the library-wide index too. */
 export function resetLibraryIndex(): void {
   sessionVectorDBs.delete(LIBRARY_SESSION);
   indexedDocIds.delete(LIBRARY_SESSION);
+  sessionChunkCount.delete(LIBRARY_SESSION);
 }
 
 /**
@@ -325,6 +356,7 @@ export function resetLibraryIndex(): void {
 export function resetSessionIndex(sessionId: string): void {
   sessionVectorDBs.delete(sessionId);
   indexedDocIds.delete(sessionId);
+  sessionChunkCount.delete(sessionId);
 }
 
 /**
