@@ -143,18 +143,21 @@ export default function App() {
       const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
       if (tz) chrome.storage.local.set({ araTimezone: tz });
     } catch { /* ignore */ }
-    // Adopt the active SESSION (project) another sidepanel instance switched to,
-    // so two tabs/windows show the same session. We sync the project only, not
-    // the chat id — a stale chat id from a previous session must never leak into
-    // a freshly-created one; each instance resolves the chat within the project.
-    chrome.storage.local.get(['araActiveProjectId']).then((r: any) => {
-      if (typeof r.araActiveProjectId === 'string' && r.araActiveProjectId) setActiveProjectId(r.araActiveProjectId);
-    });
+    // Adopt the active session another sidepanel instance switched to, so two
+    // windows show the same project AND chat. Stored as ONE pair so the chat id
+    // can never be applied without its project — that inconsistency was what
+    // leaked a stale chat into a freshly-created session. loadChats corrects an
+    // adopted chat that isn't in the project.
+    const adopt = (s: any) => {
+      if (!s || typeof s !== 'object') return;
+      if (typeof s.projectId === 'string' && s.projectId) setActiveProjectId(prev => (prev === s.projectId ? prev : s.projectId));
+      if (typeof s.chatId === 'string' && s.chatId) setActiveChatId(prev => (prev === s.chatId ? prev : s.chatId));
+    };
+    chrome.storage.local.get(['araActiveSession']).then((r: any) => adopt(r.araActiveSession));
     const onChange = (changes: Record<string, any>, area: string) => {
       if (area !== 'local') return;
       if ('customSkills' in changes) loadCustomSkills().then(setCustomCommands);
-      const p = changes.araActiveProjectId?.newValue;
-      if (typeof p === 'string' && p) setActiveProjectId(prev => (prev === p ? prev : p));
+      if ('araActiveSession' in changes) adopt(changes.araActiveSession?.newValue);
     };
     chrome.storage.onChanged.addListener(onChange);
     return () => chrome.storage.onChanged.removeListener(onChange);
@@ -646,21 +649,24 @@ export default function App() {
   useEffect(() => {
     if (activeProjectId) {
       set('ara-active-project-id', activeProjectId).catch(console.error);
-      // Mirror the active session through chrome.storage.local so a second
-      // sidepanel instance (another tab/window) follows it — chrome.storage
-      // fires onChanged across contexts; idb-keyval does not.
-      if (typeof chrome !== 'undefined' && chrome.storage) chrome.storage.local.set({ araActiveProjectId: activeProjectId });
       loadDocuments(activeProjectId);
       loadChats(activeProjectId);
     }
   }, [activeProjectId]);
 
-  // Load chat history whenever the active chat changes
+  // Load chat history whenever the active chat changes, and publish the active
+  // session pair so other windows follow. Writing here (not in the project
+  // effect) means the chat id is always one that belongs to activeProjectId —
+  // loadChats has already reconciled it — so the stored pair is never
+  // inconsistent.
   useEffect(() => {
     if (activeChatId) {
+      if (typeof chrome !== 'undefined' && chrome.storage && activeProjectId) {
+        chrome.storage.local.set({ araActiveSession: { projectId: activeProjectId, chatId: activeChatId } });
+      }
       loadChatHistory(activeChatId);
     }
-  }, [activeChatId]);
+  }, [activeChatId, activeProjectId]);
 
   // Self-healing "researching" flag: DEEP_RESEARCH_DONE broadcasts can be
   // missed (panel closed, other window asleep), which left the field-log
