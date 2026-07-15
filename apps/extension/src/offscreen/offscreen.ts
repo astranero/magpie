@@ -424,6 +424,11 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
 
   if (request?.action === 'OFFSCREEN_PARSE_HTML') {
     const { html: rawHtml, url } = request as { html: string; url: string };
+    // Diagnostic: which URLs actually reach the HTML parser. If a dl.acm.org/etc.
+    // Cloudflare page ever shows here, the scrapeUrl fast-path was bypassed — but on
+    // this build it shouldn't, and parsing is linkedom-in-worker + pre-stripped, so
+    // no <script>/<link> ever reaches a browser DOMParser (no CSP/preload spam).
+    crumb('offscreen', 'parse html', { url: url.slice(0, 70) });
     // Cheap string-only pre-processing stays on the main thread; the heap-heavy DOM
     // build (DOMParser + Readability + Turndown) runs in the parse WORKER isolate so
     // it can't grow this main isolate toward its V8-cap OOM. Fall back to an inline

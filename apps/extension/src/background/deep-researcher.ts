@@ -855,18 +855,14 @@ async function scrapeUrlList(
   signal: AbortSignal | undefined,
   label: AgentLabel
 ): Promise<AgentOutcome> {
-  // Per-STAGE source cap: 12 (or the depth's total, whichever is smaller). The
-  // offscreen renderer's MAIN-thread heap grows ~65-90 MB per indexed source from
-  // HTML/PDF parsing. recreateOffscreen() between stages now genuinely CLOSES the
-  // doc (crumb `recreate: closed stillThere:false` confirms it), but mid-SW-life
-  // closeDocument only PARTIALLY reclaims — measured floor ~1.0-1.2 GB between
-  // stages vs 122 MB at a cold (SW-restart) start; a full reset needs a real SW
-  // restart. So the run must survive several stages within one SW life on partial
-  // reclaims. Each partial reclaim removes ~half a stage's growth, so 12 × ~90 MB
-  // added onto a ~1.2 GB floor peaks ~2.1 GB — a safe margin under the ~2.7 GB
-  // crash ceiling even when 3 stages share one SW life (cap 15 peaked 2.45 GB in
-  // stage 2 alone — too close). Still ~72 sources over a 6-stage deep run.
-  const cap = Math.min(12, activeLimits.totalSourcesCap);
+  // Per-STAGE source cap. Raised 12 → 20 now that HTML parsing runs in its OWN
+  // worker isolate (parse.worker.ts) — the ~40-90 MB/source DOM no longer grows the
+  // offscreen MAIN thread, which was the isolate that OOM-crashed the renderer. So a
+  // stage can index more sources without the main heap climbing. The mid-stage +
+  // stage-top heap guards still backstop: if the parse worker ever fails and falls
+  // back to inline main-thread parsing, they cut the stage / reload before the
+  // ceiling. 20 × 6 stages ≈ 120 web sources over a deep run, plus followed refs.
+  const cap = Math.min(20, activeLimits.totalSourcesCap);
   const urlList = [...new Set(urls)].filter(u => !isJunkUrl(u)).slice(0, cap);
   const sources: SourceRecord[] = [];
   const docIds: string[] = [];
