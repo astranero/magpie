@@ -52,3 +52,28 @@ test('research command renders an in-chat plan card that can be cancelled', asyn
 
   await page.close();
 });
+
+// /academic shares the plan-card negotiation surface but must announce its own
+// mode — papers-only — in the card label and button. Guards the third mode's
+// UI wiring (command routing → plan.sourceMode → PlanCard).
+test('academic command renders an Academic Research plan card', async () => {
+  const page = await context.newPage();
+  await page.goto(`chrome-extension://${extensionId}/sidepanel.html`);
+  await page.getByRole('button', { name: /chat/i }).click();
+
+  const input = page.locator('#chat-input');
+  await input.fill('/academic transformer interpretability');
+  await input.press('Enter');
+
+  await expect(page.getByText('/academic transformer interpretability')).toBeVisible({ timeout: 8000 });
+  await expect(page.getByText(/Academic Research\s*·\s*Plan/i)).toBeVisible({ timeout: 15000 });
+
+  const startBtn = page.getByRole('button', { name: /start academic research/i });
+  await expect(startBtn).toBeVisible({ timeout: 15000 });
+
+  await page.getByRole('button', { name: /^cancel$/i }).click();
+  await expect(page.getByText('Cancelled')).toBeVisible({ timeout: 5000 });
+  await expect(startBtn).not.toBeVisible();
+
+  await page.close();
+});

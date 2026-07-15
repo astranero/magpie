@@ -37,6 +37,7 @@ import {
   normalizeSection,
   stripLeadingTitle,
   reflectOnStage,
+  planStageAgents,
   SourceRecord,
 } from '../deep-researcher';
 
@@ -551,5 +552,24 @@ describe('reflectOnStage', () => {
     const llm = vi.fn().mockResolvedValue(JSON.stringify(fin));
     const r = await reflectOnStage(8, 8, 't', subQs, 'brief', null, llm);
     expect(r!.queries).toEqual([]);
+  });
+});
+
+describe('planStageAgents (source-mode agent routing)', () => {
+  it('auto: web every stage; academic/news/MCP on stage 1 only', () => {
+    expect(planStageAgents(1, 'auto', true)).toEqual({ web: true, academic: true, news: true, mcp: true });
+    expect(planStageAgents(2, 'auto', true)).toEqual({ web: true, academic: false, news: false, mcp: false });
+    expect(planStageAgents(8, 'auto', true)).toEqual({ web: true, academic: false, news: false, mcp: false });
+  });
+
+  it('auto: academic gated on the topic being scholarly', () => {
+    expect(planStageAgents(1, 'auto', false).academic).toBe(false);
+    expect(planStageAgents(1, 'auto', false).web).toBe(true);
+  });
+
+  it('academic: academic agent EVERY stage, nothing else — regardless of the topic gate', () => {
+    for (const stage of [1, 2, 5, 8]) {
+      expect(planStageAgents(stage, 'academic', false)).toEqual({ web: false, academic: true, news: false, mcp: false });
+    }
   });
 });

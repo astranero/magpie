@@ -16,6 +16,9 @@ export interface QueuedResearch {
   chatId?: string;
   topic: string;
   mode: 'quick' | 'deep';
+  /** Source corpus for the parked run — 'academic' keeps /academic papers-only
+   *  through the queue. Absent = 'auto'. */
+  sourceMode?: 'auto' | 'academic';
   queuedAt: number;
 }
 

@@ -54,6 +54,13 @@ describe('research-queue', () => {
     expect(await getResearchQueue()).toEqual([]);
   });
 
+  it('sourceMode survives the enqueue → dequeue round trip (/academic stays papers-only when parked)', async () => {
+    await enqueueResearch({ ...item('papers'), sourceMode: 'academic' });
+    await enqueueResearch(item('plain'));
+    expect((await dequeueResearch())?.sourceMode).toBe('academic');
+    expect((await dequeueResearch())?.sourceMode).toBeUndefined();
+  });
+
   it('empty queue reads as [] (no stored key)', async () => {
     expect(await getResearchQueue()).toEqual([]);
     expect(await dequeueResearch()).toBeNull();

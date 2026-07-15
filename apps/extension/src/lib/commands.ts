@@ -24,6 +24,8 @@ export interface SlashCommand {
   systemPrompt?: string;
   /** research-kind only. */
   mode?: 'quick' | 'deep';
+  /** research-kind only: 'academic' = papers-only corpus (/academic). */
+  sourceMode?: 'auto' | 'academic';
 }
 
 export const SLASH_COMMANDS: SlashCommand[] = [
@@ -35,6 +37,9 @@ export const SLASH_COMMANDS: SlashCommand[] = [
   },
   {
     cmd: '/deepresearch', desc: 'Multi-agent: web + academic + news', takesArg: true, kind: 'research', mode: 'deep'
+  },
+  {
+    cmd: '/academic', desc: 'Papers-only deep research: Semantic Scholar · CrossRef · arXiv · HuggingFace', takesArg: true, kind: 'research', mode: 'deep', sourceMode: 'academic'
   },
   {
     cmd: '/analyze', desc: 'Analyze all workspace sources', takesArg: false, kind: 'builtin'

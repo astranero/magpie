@@ -57,6 +57,18 @@ describe('paletteEntries', () => {
     const entries = paletteEntries('/comp');
     expect(entries.some(c => c.cmd === '/compare')).toBe(true);
   });
+
+  it('/academic is a research command: deep pipeline + papers-only source mode', () => {
+    const entries = paletteEntries('/acad');
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toMatchObject({ cmd: '/academic', kind: 'research', mode: 'deep', sourceMode: 'academic', takesArg: true });
+  });
+
+  it('the other research commands carry no sourceMode (auto corpus)', () => {
+    const research = paletteEntries('/').filter(c => c.kind === 'research' && c.cmd !== '/academic');
+    expect(research.length).toBeGreaterThan(0);
+    expect(research.every(c => c.sourceMode === undefined)).toBe(true);
+  });
 });
 
 describe('buildHelpText', () => {
@@ -64,5 +76,6 @@ describe('buildHelpText', () => {
     const helpText = buildHelpText([customSkillToCommand(rawSkill)]);
     expect(helpText).toContain('/competitors');
     expect(helpText).toContain('/research');
+    expect(helpText).toContain('/academic');
   });
 });

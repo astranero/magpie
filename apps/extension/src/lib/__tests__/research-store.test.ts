@@ -159,3 +159,20 @@ describe('SOTA checkpoint fields round-trip (outline / drafts / docIds / spec)',
     expect(job.sectionDrafts).toEqual({ s1: '## H\n\ndraft text' });
   });
 });
+
+describe('sourceMode checkpointing (/academic must survive resume)', () => {
+  it('startJob persists sourceMode; later merge-patches keep it', async () => {
+    await researchStore.startJob({ projectId: 'p', topic: 't', effectiveTopic: 't', mode: 'deep', sourceMode: 'academic' });
+    expect((await researchStore.getJob())?.sourceMode).toBe('academic');
+
+    await researchStore.updateJob({ phase: 'gathering', currentStage: 1 });
+    const job = (await researchStore.getJob())!;
+    expect(job.sourceMode).toBe('academic');
+    expect(job.mode).toBe('deep');
+  });
+
+  it('jobs without sourceMode read back as undefined (auto — older checkpoints)', async () => {
+    mockStorage.set(researchStore.JOB_KEY, makeJob({ mode: 'deep' }));
+    expect((await researchStore.getJob())?.sourceMode).toBeUndefined();
+  });
+});

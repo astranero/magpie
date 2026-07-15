@@ -2421,10 +2421,13 @@ async function handlePreviewDeepResearch(request: Record<string, unknown>): Prom
   // expectation: quick = one gather pass; deep = N staged rounds by depth.
   const limits = await getResearchLimits();
   const mode = (request.mode as string) === 'deep' ? 'deep' : 'quick';
-  const stages = mode === 'deep' ? limits.rounds : 1;
-  const estMinutes = mode === 'deep' ? Math.max(8, stages * 6) : 4;
+  // /academic runs the full staged deep pipeline over a papers-only corpus.
+  const sourceMode = (request.sourceMode as string) === 'academic' ? 'academic' : 'auto';
+  const isStaged = mode === 'deep' || sourceMode === 'academic';
+  const stages = isStaged ? limits.rounds : 1;
+  const estMinutes = isStaged ? Math.max(8, stages * 6) : 4;
 
-  return { effectiveTopic, subQuestions, stages, estMinutes };
+  return { effectiveTopic, subQuestions, stages, estMinutes, sourceMode };
 }
 
 /**
@@ -2523,7 +2526,7 @@ Return ONLY the JSON.`;
   const skills: Array<{ cmd: string; desc: string; systemPrompt: string }> =
     Array.isArray(s.customSkills) ? s.customSkills : [];
   const taken = new Set(skills.map(sk => sk.cmd));
-  const BUILTINS = new Set(['/page', '/research', '/deepresearch', '/analyze', '/recall', '/compare', '/timeline', '/challenge', '/connect', '/extract', '/brief', '/clear', '/help', '/create-skill']);
+  const BUILTINS = new Set(['/page', '/research', '/deepresearch', '/academic', '/analyze', '/recall', '/compare', '/timeline', '/challenge', '/connect', '/extract', '/brief', '/clear', '/help', '/create-skill']);
   let finalCmd = cmd;
   let n = 2;
   while (taken.has(finalCmd) || BUILTINS.has(finalCmd)) finalCmd = `${cmd}-${n++}`;
@@ -2572,8 +2575,8 @@ async function isResearchActive(): Promise<boolean> {
 
 /** Resolve the topic, checkpoint + mark the job active, and run it. Shared by the
  *  direct-start path and the queue drainer. */
-async function startResearchRun(params: { projectId: string; chatId?: string; topic: string; mode: 'quick' | 'deep' }): Promise<Record<string, unknown>> {
-  const { projectId, chatId, topic, mode } = params;
+async function startResearchRun(params: { projectId: string; chatId?: string; topic: string; mode: 'quick' | 'deep'; sourceMode?: 'auto' | 'academic' }): Promise<Record<string, unknown>> {
+  const { projectId, chatId, topic, mode, sourceMode = 'auto' } = params;
   const chatFn = (s: string, u: string) => chatWithCustom(s, [], u);
   let effectiveTopic = topic;
   try {
@@ -2583,9 +2586,9 @@ async function startResearchRun(params: { projectId: string; chatId?: string; to
   }
   // Checkpoint so a worker/browser death can resume it; mark active BEFORE running
   // so resumePendingResearch only resumes jobs that actually started.
-  await startResearchJob({ projectId, chatId, topic, effectiveTopic, mode }).catch(() => {});
+  await startResearchJob({ projectId, chatId, topic, effectiveTopic, mode, sourceMode }).catch(() => {});
   await markJobActive().catch(() => {});
-  return executeResearch({ projectId, chatId, topic, effectiveTopic, mode });
+  return executeResearch({ projectId, chatId, topic, effectiveTopic, mode, sourceMode });
 }
 
 // One research run at a time (the job checkpoint is a singleton). Rather than
@@ -2613,15 +2616,17 @@ function scheduleQueueDrain(): void { setTimeout(() => { void drainResearchQueue
 async function handleDeepResearch(request: Record<string, unknown>): Promise<Record<string, unknown>> {
   const { projectId, topic, chatId } = request;
   const mode = (request.mode as 'quick' | 'deep') || 'quick';
+  const sourceMode = (request.sourceMode as string) === 'academic' ? 'academic' as const : 'auto' as const;
   if (!projectId || !topic) throw new Error('projectId and topic are required');
 
   // Persist the command in chat first so it shows in the conversation whether it
   // starts now or gets queued.
   if (chatId) {
+    const cmd = sourceMode === 'academic' ? '/academic' : mode === 'deep' ? '/deepresearch' : '/research';
     await saveChatMessage({
       chatId: chatId as string,
       role: 'user',
-      text: `${mode === 'deep' ? '/deepresearch' : '/research'} ${topic}`,
+      text: `${cmd} ${topic}`,
       timestamp: new Date().toISOString(),
       provider: 'custom'
     });
@@ -2635,7 +2640,8 @@ async function handleDeepResearch(request: Record<string, unknown>): Promise<Rec
       projectId: projectId as string,
       chatId: chatId as string | undefined,
       topic: topic as string,
-      mode
+      mode,
+      sourceMode
     });
     if (chatId) {
       await saveChatMessage({
@@ -2654,7 +2660,8 @@ async function handleDeepResearch(request: Record<string, unknown>): Promise<Rec
     projectId: projectId as string,
     chatId: chatId as string | undefined,
     topic: topic as string,
-    mode
+    mode,
+    sourceMode
   });
 }
 
@@ -2664,6 +2671,7 @@ interface ResearchParams {
   topic: string;
   effectiveTopic: string;
   mode: 'quick' | 'deep';
+  sourceMode?: 'auto' | 'academic';
 }
 
 // A single LLM call may not run forever: a stalled connection (provider
@@ -2694,7 +2702,7 @@ function deadlineSignal(parent: AbortSignal, ms: number): { signal: AbortSignal;
 }
 
 /** Run (or resume) a research job. Job checkpoint must already exist. */
-async function executeResearch({ projectId, chatId, topic, effectiveTopic, mode }: ResearchParams): Promise<Record<string, unknown>> {
+async function executeResearch({ projectId, chatId, topic, effectiveTopic, mode, sourceMode = 'auto' }: ResearchParams): Promise<Record<string, unknown>> {
   const controller = new AbortController();
   abortControllers.set(projectId, controller);
   const signal = controller.signal;
@@ -2794,7 +2802,7 @@ async function executeResearch({ projectId, chatId, topic, effectiveTopic, mode 
   // failure reason, or a failed run renders as "✓ complete".
   let doneError: string | undefined;
   try {
-    const result = await runDeepResearch(projectId, effectiveTopic, chatFn, onProgress, signal, mode, synthesisFn);
+    const result = await runDeepResearch(projectId, effectiveTopic, chatFn, onProgress, signal, mode, synthesisFn, undefined, sourceMode);
 
     // Persist the synthesis as an assistant message — this is what keeps
     // the chat session intact after research finishes.
@@ -2805,7 +2813,7 @@ async function executeResearch({ projectId, chatId, topic, effectiveTopic, mode 
       await saveChatMessage({
         chatId,
         role: 'assistant',
-        text: `## Deep Research: ${headingTopic}\n\n${interpretedNote}${result.synthesis}`,
+        text: `## ${sourceMode === 'academic' ? 'Academic Research' : 'Deep Research'}: ${headingTopic}\n\n${interpretedNote}${result.synthesis}`,
         timestamp: new Date().toISOString(),
         provider: 'custom'
       });
@@ -2918,7 +2926,8 @@ async function resumePendingResearch(): Promise<void> {
       chatId: job.chatId,
       topic: job.topic,
       effectiveTopic: job.effectiveTopic,
-      mode: job.mode
+      mode: job.mode,
+      sourceMode: job.sourceMode
     });
   } catch (e) {
     console.warn('Research resume failed', e);

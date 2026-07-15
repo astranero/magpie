@@ -1,8 +1,13 @@
 # Research Pipeline
 
-`/research` (quick, web-only + academic fallback) and `/deepresearch`
-(staged multi-agent). Both live in `background/deep-researcher.ts`,
-orchestrated by `executeResearch` in the service worker.
+Three commands: `/research` (quick, web-only + academic fallback),
+`/deepresearch` (staged multi-agent), and `/academic` (the same staged
+pipeline over a **papers-only corpus**). All live in
+`background/deep-researcher.ts`, orchestrated by `executeResearch` in the
+service worker. `/academic` is the deep pipeline plus a
+`sourceMode: 'auto' | 'academic'` switch threaded command → service worker →
+`runDeepResearch`; the per-stage agent routing itself is pure
+(`planStageAgents`).
 
 ## Plan negotiation (before any run)
 
@@ -70,6 +75,29 @@ Web discovery prefers user-linked search APIs (Tavily/Brave/Serper) and
 falls back to the DDG scrape chain (direct → Jina-proxied → `site:`-stripped
 retry). Quick mode falls back to academic search when web discovery returns
 nothing.
+
+## Academic mode (`/academic`)
+
+The full staged pipeline above (reflect/outline co-evolution, sectioned
+synthesis, audit), with the corpus swapped:
+
+- **Papers only**: Semantic Scholar + CrossRef + arXiv + HuggingFace. No web
+  scraping, no news, no MCP. The `isAcademicQuery` topic gate is bypassed —
+  the command IS the intent.
+- **The academic agent runs EVERY stage** (auto mode runs it stage 1 only),
+  driven by the reflect queries: stage 1 searches the topic + first queries,
+  later stages search what the outline's thin sections still need (≤3 query
+  strings per stage — S2 rate-limits keyless callers).
+- **Source quality is forced `high`** regardless of the saved setting.
+- **Reference harvesting follows arXiv/DOI citations only** — harvested web
+  links are dropped, and DOI scrapes are labeled ACADEMIC.
+- **Fails honestly**: fewer than 5 papers after stage 1 aborts the run with a
+  clear chat message pointing at `/deepresearch` — no silent web fallback.
+- **The evaluator is told the corpus is papers-only** (`evaluateReport`
+  corpus hint) so it doesn't dock coverage for missing web/news/industry
+  sources.
+- `sourceMode` is **checkpointed** in the research job and the research
+  queue, so crash-resume and queued runs keep the papers-only rules.
 
 ## Quality pipeline (audit)
 

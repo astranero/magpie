@@ -41,6 +41,14 @@ const MAX_EMBED_CHARS = 60_000;
 let activeLimits: ResearchLimits = RESEARCH_LIMITS.standard;
 let activeQuality: SourceQuality = 'all';
 let activeAcademicDepth: AcademicDepth = 'abstract';
+let activeSourceMode: ResearchSourceMode = 'auto';
+
+/**
+ * Where a run is allowed to gather from. 'auto' is the classic mix (web +
+ * academic + news + MCP); 'academic' (/academic) is a papers-only corpus —
+ * Semantic Scholar / CrossRef / arXiv / HuggingFace, nothing else.
+ */
+export type ResearchSourceMode = 'auto' | 'academic';
 
 /**
  * Shared citation contract with normal chat (lib/citations.ts): every chunk
@@ -1341,7 +1349,17 @@ async function runAcademicAgent(
   topic: string,
   onProgress: (s: string) => void,
   signal?: AbortSignal,
-  llmChatFn?: LlmChatFn
+  llmChatFn?: LlmChatFn,
+  opts?: {
+    /** Search strings for the paper APIs (default: just the topic). Capped at
+     *  3 per call — each fans out to all three APIs, and Semantic Scholar
+     *  rate-limits keyless callers hard. */
+    queries?: string[];
+    /** false skips the crash-resume cache restore — stages ≥2 of an /academic
+     *  run (stage 1 already restored it; restoring again would re-count old
+     *  papers as this stage's new docs). Default true. */
+    restoreCache?: boolean;
+  }
 ): Promise<AgentOutcome> {
   const papers: AcademicPaper[] = [];
 
@@ -1351,7 +1369,7 @@ async function runAcademicAgent(
   const cachedSources: SourceRecord[] = [];
   const cachedDocIds: string[] = [];
   const cachedTitles = new Set<string>();
-  try {
+  if (opts?.restoreCache !== false) try {
     // Fast path: docs already linked to the project — no IDB writes needed
     const existingDocs = await listDocuments(projectId);
     const urlToDocId = new Map(existingDocs.map(d => [d.url, d.id]));
@@ -1399,28 +1417,33 @@ async function runAcademicAgent(
     }
   } catch { /* cache is best-effort */ }
 
-  onProgress('[ACADEMIC] Searching Semantic Scholar…');
-  try {
-    papers.push(...await searchSemanticScholar(topic, signal));
-  } catch (e: any) {
-    onProgress(`[ACADEMIC] Semantic Scholar unavailable (${e.message}) — continuing`);
-  }
-
-  if (signal?.aborted) throw new Error('AbortError');
-  onProgress('[ACADEMIC] Searching HuggingFace papers…');
-  try {
-    papers.push(...await searchHuggingFacePapers(topic, signal));
-  } catch (e: any) {
-    onProgress(`[ACADEMIC] HuggingFace papers unavailable (${e.message}) — continuing`);
-  }
-
-  if (activeLimits.crossrefRows > 0) {
+  const searchQueries = (opts?.queries?.length ? opts.queries : [topic]).slice(0, 3);
+  for (const q of searchQueries) {
+    const qLabel = searchQueries.length > 1 ? `: "${q.slice(0, 70)}"` : '…';
     if (signal?.aborted) throw new Error('AbortError');
-    onProgress('[ACADEMIC] Searching CrossRef…');
+    onProgress(`[ACADEMIC] Searching Semantic Scholar${qLabel}`);
     try {
-      papers.push(...await searchCrossRef(topic, activeLimits.crossrefRows, signal));
+      papers.push(...await searchSemanticScholar(q, signal));
     } catch (e: any) {
-      onProgress(`[ACADEMIC] CrossRef unavailable (${e.message}) — continuing`);
+      onProgress(`[ACADEMIC] Semantic Scholar unavailable (${e.message}) — continuing`);
+    }
+
+    if (signal?.aborted) throw new Error('AbortError');
+    onProgress(`[ACADEMIC] Searching HuggingFace papers${qLabel}`);
+    try {
+      papers.push(...await searchHuggingFacePapers(q, signal));
+    } catch (e: any) {
+      onProgress(`[ACADEMIC] HuggingFace papers unavailable (${e.message}) — continuing`);
+    }
+
+    if (activeLimits.crossrefRows > 0) {
+      if (signal?.aborted) throw new Error('AbortError');
+      onProgress(`[ACADEMIC] Searching CrossRef${qLabel}`);
+      try {
+        papers.push(...await searchCrossRef(q, activeLimits.crossrefRows, signal));
+      } catch (e: any) {
+        onProgress(`[ACADEMIC] CrossRef unavailable (${e.message}) — continuing`);
+      }
     }
   }
 
@@ -1709,11 +1732,16 @@ export async function runDeepResearch(
   signal?: AbortSignal,
   mode: 'quick' | 'deep' = 'quick',
   synthesisFn?: SynthesisStreamFn,
-  evaluatorFn?: (sys: string, user: string) => Promise<string>
+  evaluatorFn?: (sys: string, user: string) => Promise<string>,
+  sourceMode: ResearchSourceMode = 'auto'
 ): Promise<{ synthesis: string, sources: string[] }> {
   activeLimits = await getResearchLimits();
   activeQuality = await getSourceQuality();
   activeAcademicDepth = await getAcademicDepth();
+  activeSourceMode = sourceMode;
+  // /academic is a papers-only corpus: authority filtering is the point, so
+  // the saved source-quality setting is overridden, not consulted.
+  if (sourceMode === 'academic') activeQuality = 'high';
 
   // Reset the offscreen renderer at the START of every run/resume SEGMENT. The
   // offscreen document SURVIVES a service-worker restart (ensureOffscreen's
@@ -1730,17 +1758,22 @@ export async function runDeepResearch(
   // 'standard' (6 URLs/query, 5 queries, 2 rounds) — too thin for a deep run —
   // so floor a deep run at the 'deep' caps (10/7/4) even when the setting is
   // standard. /research (quick) still honours the setting as-is.
-  if (mode === 'deep' && depth === 'standard') {
+  // /academic always runs the full staged pipeline, so it gets the same floor.
+  const runsDeep = mode === 'deep' || sourceMode === 'academic';
+  if (runsDeep && depth === 'standard') {
     activeLimits = RESEARCH_LIMITS.deep;
     onProgress('[PLANNING] Deep run — using deep source limits (10 URLs/query, 7 queries, 6 rounds)');
   } else if (depth !== 'standard') {
     onProgress(`[PLANNING] Research depth: ${depth}`);
   }
+  if (sourceMode === 'academic') {
+    onProgress('[PLANNING] Academic mode: papers only (Semantic Scholar · CrossRef · arXiv · HuggingFace) — no web or news agents');
+  }
   if (activeQuality === 'high') onProgress('[PLANNING] Source quality: high-authority only');
   if (activeAcademicDepth === 'abstract') onProgress('[PLANNING] Academic papers: abstracts only');
   else onProgress('[PLANNING] Academic papers: full text');
 
-  if (mode === 'deep') {
+  if (runsDeep) {
     return runDeeperResearch(projectId, topic, llmChatFn, onProgress, signal, synthesisFn, evaluatorFn);
   }
 
@@ -1864,14 +1897,16 @@ async function followReferences(
   refs: HarvestedRef[],
   budget: number,
   onProgress: (s: string) => void,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  academicOnly = false // /academic: arXiv/DOI citations only, web refs dropped
 ): Promise<AgentOutcome> {
   const sources: SourceRecord[] = [];
   const docIds: string[] = [];
+  const outcomeLabel: AgentLabel = academicOnly ? 'ACADEMIC' : 'WEB';
   const { citations, web } = partitionRefs(refs);
-  const scoredWeb = await scoreWebRefs(topic, web);
+  const scoredWeb = academicOnly ? [] : await scoreWebRefs(topic, web);
   const chosen = [...citations, ...scoredWeb].slice(0, budget);
-  if (chosen.length === 0) return { label: 'WEB', sources, docIds };
+  if (chosen.length === 0) return { label: outcomeLabel, sources, docIds };
 
   onProgress(`[REFS] Following ${chosen.length} reference(s) from sources (${citations.length} arXiv/DOI, ${scoredWeb.length} web)`);
   for (const ref of chosen) {
@@ -1889,19 +1924,21 @@ async function followReferences(
           continue;
         }
       }
-      // DOI or web: scrape it (scrapeUrl handles the DOI→S2 fallback)
+      // DOI or web: scrape it (scrapeUrl handles the DOI→S2 fallback). In
+      // academic-only mode everything that reaches here is a DOI — a paper —
+      // so it's labeled ACADEMIC, not WEB.
       const scraped = await scrapeUrl(ref.url, signal);
       if (scraped?.markdown) {
-        const refDocId = await indexResearchDoc(projectId, scraped.title || ref.url, ref.url, scraped.markdown, 'WEB');
+        const refDocId = await indexResearchDoc(projectId, scraped.title || ref.url, ref.url, scraped.markdown, outcomeLabel);
         docIds.push(refDocId);
-        sources.push({ url: ref.url, title: scraped.title || ref.url, label: 'WEB', docId: refDocId, tier: sourceTier(ref.url) });
+        sources.push({ url: ref.url, title: scraped.title || ref.url, label: outcomeLabel, docId: refDocId, tier: sourceTier(ref.url) });
         onProgress(`[REFS] ✓ ${ref.url}`);
       }
     } catch {
       onProgress(`[REFS] ✗ ${ref.url}`);
     }
   }
-  return { label: 'WEB', sources, docIds };
+  return { label: outcomeLabel, sources, docIds };
 }
 
 /**
@@ -1969,14 +2006,15 @@ export function weightedEvalScore(dims: unknown): number | null {
 async function evaluateReport(
   topic: string,
   report: string,
-  llmChatFn: (sys: string, user: string) => Promise<string>
+  llmChatFn: (sys: string, user: string) => Promise<string>,
+  corpusHint?: string
 ): Promise<EvaluationResult | null> {
   const sys =
     `You are an expert research auditor and peer reviewer. Your role is to find flaws.
 Do NOT be polite or skew positive. Be highly skeptical and objective.
 
 Evaluate the research report below on: "${topic}"
-
+${corpusHint ? `\n${corpusHint}\n` : ''}
 Score each dimension 0-10 SEPARATELY (do not average them yourself):
 - coverage: does it address the topic fully, or leave major angles untouched?
 - evidence: are claims supported by citations, or asserted without basis? Are [anchor_id] citations present and evenly distributed?
@@ -2209,7 +2247,8 @@ async function evaluateAndRefine(
   sourceContext: string,
   llmChatFn: LlmChatFn,
   evaluatorFn: LlmChatFn,
-  onProgress: (s: string) => void
+  onProgress: (s: string) => void,
+  corpusHint?: string
 ): Promise<string> {
   // Keep revising until the report scores well or we hit the pass cap. A single
   // pass often only nudges a 4-5/10 (the auditor flags depth/scope gaps a thin
@@ -2231,7 +2270,7 @@ async function evaluateAndRefine(
   let current = stripModelBibliography(synthesis);
   crumb('eval', 'evaluate start', {});
   onProgress(`[EVALUATING] Running quality evaluation on report…`);
-  let ev = await evaluateReport(topic, current, evaluatorFn).catch(() => null);
+  let ev = await evaluateReport(topic, current, evaluatorFn, corpusHint).catch(() => null);
   if (!ev) return current;
   onProgress(`[EVALUATING] Verdict: ${label(ev)} (${ev.score}/10) — ${ev.recommendation}`);
 
@@ -2245,7 +2284,7 @@ async function evaluateAndRefine(
     if (revised === current) break;           // revision made no change — stop
     current = revised;
     revisedAny = true;
-    const next = await evaluateReport(topic, current, evaluatorFn).catch(() => null);
+    const next = await evaluateReport(topic, current, evaluatorFn, corpusHint).catch(() => null);
     if (!next) break;                          // can't re-audit — keep the revision
     ev = next;
     onProgress(`[EVALUATING] Post-revision verdict: ${label(ev)} (${ev.score}/10)`);
@@ -2810,6 +2849,32 @@ ${EPISTEMIC_RULES}`;
   }
 }
 
+/**
+ * Which discovery agents run in a given stage — pure, so the routing is
+ * unit-testable apart from the network-heavy agents themselves.
+ * - auto: web every stage; academic / news / MCP on stage 1 only (re-querying
+ *   them burns rate limits), academic additionally gated on the topic being
+ *   genuinely scholarly.
+ * - academic (/academic): the academic agent EVERY stage, driven by the
+ *   reflect queries — papers are the whole corpus, nothing else runs. The
+ *   user's explicit command overrides the isAcademicQuery topic gate.
+ */
+export function planStageAgents(
+  stage: number,
+  sourceMode: ResearchSourceMode,
+  topicIsAcademic: boolean
+): { web: boolean; academic: boolean; news: boolean; mcp: boolean } {
+  if (sourceMode === 'academic') {
+    return { web: false, academic: true, news: false, mcp: false };
+  }
+  return {
+    web: true,
+    academic: stage === 1 && topicIsAcademic,
+    news: stage === 1,
+    mcp: stage === 1
+  };
+}
+
 async function runDeeperResearch(
   projectId: string,
   topic: string,
@@ -2916,22 +2981,30 @@ async function runDeeperResearch(
     onProgress(`[STAGE ${stage}/${rounds}] Gathering: ${stageQueries.length} quer${stageQueries.length === 1 ? 'y' : 'ies'}…`);
 
     // ── Gather ────────────────────────────────────────────────────────────
-    const stageJobs: Promise<AgentOutcome>[] = [
-      runWebAgent(projectId, stageQueries, onProgress, signal, 'WEB')
-    ];
-    // Academic / news / MCP run once (stage 1 only) — re-querying burns rate limits
-    if (stage === 1) {
-      stageJobs.push(
-        runMcpAgent(projectId, topic, onProgress, signal),
-        runNewsAgent(projectId, topic, onProgress, signal)
-      );
+    // Agent routing is pure (planStageAgents): auto = web every stage +
+    // academic/news/MCP on stage 1; academic mode = the academic agent every
+    // stage, steered by the reflect queries, with everything else off.
+    const agentPlan = planStageAgents(stage, activeSourceMode, isAcademicQuery(topic));
+    const stageJobs: Promise<AgentOutcome>[] = [];
+    if (agentPlan.web) stageJobs.push(runWebAgent(projectId, stageQueries, onProgress, signal, 'WEB'));
+    if (agentPlan.mcp) stageJobs.push(runMcpAgent(projectId, topic, onProgress, signal));
+    if (agentPlan.news) stageJobs.push(runNewsAgent(projectId, topic, onProgress, signal));
+    if (agentPlan.academic) {
+      // Auto mode keeps the classic single topic query (stage 1 only).
+      // Academic mode fans out: stage 1 anchors on the topic + first queries,
+      // later stages chase whatever the reflect step says the outline needs.
+      stageJobs.push(runAcademicAgent(projectId, topic, onProgress, signal, llmChatFn,
+        activeSourceMode === 'academic'
+          ? {
+              queries: stage === 1 ? [topic, ...stageQueries] : stageQueries,
+              restoreCache: stage === 1
+            }
+          : undefined
+      ));
+    } else if (stage === 1 && activeSourceMode === 'auto') {
       // Academic papers only for genuinely scholarly topics — on practical or
       // consumer topics they return off-topic CS papers (often garbled PDFs).
-      if (isAcademicQuery(topic)) {
-        stageJobs.push(runAcademicAgent(projectId, topic, onProgress, signal, llmChatFn));
-      } else {
-        onProgress('[ACADEMIC] Skipped — topic is practical, not scholarly (web/news only)');
-      }
+      onProgress('[ACADEMIC] Skipped — topic is practical, not scholarly (web/news only)');
     }
 
     const outcomes = await Promise.allSettled(stageJobs);
@@ -2950,6 +3023,18 @@ async function runDeeperResearch(
       }
     }
 
+    // /academic fails honestly: a papers-only report needs a real paper base.
+    // Bail with a clear message instead of silently degrading — there is no
+    // web fallback in this mode by design.
+    if (activeSourceMode === 'academic' && stage === 1) {
+      const paperCount = new Set(stageDocIds).size;
+      if (paperCount < 5) {
+        throw new Error(
+          `Only ${paperCount} academic paper(s) found — this topic doesn't have enough academic coverage for a papers-only report. Try /deepresearch instead, which adds web and news sources.`
+        );
+      }
+    }
+
     // Link-following: chase references found inside the stage's sources
     if (stageDocIds.length > 0) {
       const evidenceChunks = await searchSessionChunks(projectId, topic, 20, stageDocIds);
@@ -2957,7 +3042,10 @@ async function runDeeperResearch(
       const refs = harvestReferences(evidenceChunks.map(c => c.text), { seenUrls, isJunk: isJunkUrl });
       if (refs.length > 0) {
         const refBudget = Math.max(2, Math.floor(activeLimits.urlsPerQuery / 3));
-        const refOutcome = await followReferences(projectId, topic, refs, refBudget, onProgress, signal);
+        const refOutcome = await followReferences(
+          projectId, topic, refs, refBudget, onProgress, signal,
+          activeSourceMode === 'academic' // papers-only: arXiv/DOI refs, no web links
+        );
         if (refOutcome.docIds.length > 0) {
           agents.push(refOutcome);
           recordQuality(refOutcome);
@@ -3217,7 +3305,10 @@ async function runDeeperResearch(
         .join('\n\n---\n\n');
   }
   synthesis = await evaluateAndRefine(
-    topic, synthesis, revisionContext, llmChatFn, evaluatorFn ?? llmChatFn, onProgress
+    topic, synthesis, revisionContext, llmChatFn, evaluatorFn ?? llmChatFn, onProgress,
+    activeSourceMode === 'academic'
+      ? 'CORPUS NOTE: this run was papers-only BY DESIGN (/academic — Semantic Scholar, CrossRef, arXiv, HuggingFace). Do NOT penalize the absence of web, news, industry, or market sources; judge coverage against the academic literature only.'
+      : undefined
   );
 
   await saveSynthesisReport(projectId, topic, synthesis, allSources, 'deep');

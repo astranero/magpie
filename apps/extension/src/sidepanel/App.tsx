@@ -1487,6 +1487,18 @@ export default function App() {
       return;
     }
 
+    // /academic — the deep pipeline over a papers-only corpus (no web/news)
+    if (text.toLowerCase().startsWith('/academic ')) {
+      const topic = text.slice('/academic '.length).trim();
+      if (!topic) {
+        showToast('error', 'Please provide a topic after /academic');
+        return;
+      }
+      setInput('');
+      await startDeepResearchCommand(topic, 'deep', 'academic');
+      return;
+    }
+
     if (text.toLowerCase().startsWith('/research ')) {
       const topic = text.slice(10).trim();
       if (!topic) {
@@ -1716,25 +1728,26 @@ export default function App() {
    * chat. The user refines the plan by talking to it (normal input while a
    * draft is pending), then starts it from the card.
    */
-  const startDeepResearchCommand = async (topic: string, mode: 'quick' | 'deep' = 'quick') => {
+  const startDeepResearchCommand = async (topic: string, mode: 'quick' | 'deep' = 'quick', sourceMode: 'auto' | 'academic' = 'auto') => {
     if (!activeProjectId || !activeChatId) return;
     const currentChatId = activeChatId;
     const planMsgId = `plan-${Date.now()}`;
+    const cmd = sourceMode === 'academic' ? '/academic' : mode === 'deep' ? '/deepresearch' : '/research';
 
     setMessages(prev => ({
       ...prev,
       [currentChatId]: [...(prev[currentChatId] || []),
-        { id: uid(), role: 'user', text: `${mode === 'deep' ? '/deepresearch' : '/research'} ${topic}` },
+        { id: uid(), role: 'user', text: `${cmd} ${topic}` },
         {
           id: planMsgId, role: 'assistant', text: '',
-          plan: { topic, effectiveTopic: topic, subQuestions: [], mode, status: 'loading' }
+          plan: { topic, effectiveTopic: topic, subQuestions: [], mode, sourceMode, status: 'loading' }
         }
       ]
     }));
 
     try {
       const preview = await msg('PREVIEW_DEEP_RESEARCH', {
-        projectId: activeProjectId, chatId: currentChatId, topic, mode
+        projectId: activeProjectId, chatId: currentChatId, topic, mode, sourceMode
       });
       updateMessage(currentChatId, planMsgId, m => ({
         ...m,
@@ -1816,7 +1829,8 @@ export default function App() {
       projectId: activeProjectId,
       chatId: activeChatId,
       topic: plan.effectiveTopic,
-      mode: plan.mode
+      mode: plan.mode,
+      sourceMode: plan.sourceMode ?? 'auto'
     }).catch(() => {});
     // All state updates happen in the DEEP_RESEARCH_DONE and DEEP_RESEARCH_LOG handlers
   };

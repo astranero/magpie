@@ -114,6 +114,21 @@ test('command: /deepresearch previews a plan card with sub-questions, cancellabl
   await expect(page.getByText(/Cancelled/i).first()).toBeVisible({ timeout: 10000 });
 });
 
+test('command: /academic previews an Academic Research plan card, cancellable', async () => {
+  const page = await chatPage();
+
+  await sendChat(page, '/academic sparse autoencoders for LLM interpretability');
+
+  // Same negotiation surface as /deepresearch, but the card must announce the
+  // papers-only mode before the run starts.
+  await page.getByText(/Planning…|Academic Research/i).first().waitFor({ timeout: 30000 });
+  const cancel = page.getByRole('button', { name: /cancel/i }).first();
+  await cancel.waitFor({ timeout: 90000 });
+  await expect(page.getByText(/Academic Research\s*·\s*Plan/i).first()).toBeVisible();
+  await cancel.click();
+  await expect(page.getByText(/Cancelled/i).first()).toBeVisible({ timeout: 10000 });
+});
+
 test('vision config: IMPORT_LOCAL_IMAGES describes an image via the vision model', async () => {
   const page = await chatPage();
   const projectId = await activeProjectId(page);

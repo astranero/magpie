@@ -59,6 +59,8 @@ export interface ResearchPlan {
   effectiveTopic: string;
   subQuestions: string[];
   mode: 'quick' | 'deep';
+  /** 'academic' = papers-only corpus (/academic). Absent = 'auto'. */
+  sourceMode?: 'auto' | 'academic';
   status: 'loading' | 'draft' | 'refining' | 'started' | 'cancelled' | 'failed';
   /** Gather rounds this run will make (1 = quick single pass). */
   stages?: number;

@@ -20,6 +20,9 @@ export interface ResearchJob {
   topic: string;
   effectiveTopic: string;
   mode: 'quick' | 'deep';
+  /** Source corpus: 'academic' = papers-only (/academic). Checkpointed so a
+   *  resumed run keeps its corpus rules. Absent = 'auto' (older jobs). */
+  sourceMode?: 'auto' | 'academic';
   startedAt: string;
   phase: 'planning' | 'gathering' | 'synthesizing';
   subQuestions?: string[];
