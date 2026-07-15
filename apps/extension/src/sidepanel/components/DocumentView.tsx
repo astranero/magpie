@@ -1,12 +1,20 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import ReactMarkdown, { defaultUrlTransform } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import remarkMath from 'remark-math';
 import rehypeKatex from 'rehype-katex';
-import { LocalDocument } from '../types';
+import { LocalDocument, ResolvedCitation } from '../types';
 import { Button } from '@/components/ui/button';
 import { ArrowLeft, ExternalLink } from 'lucide-react';
 import { splitFrontmatter, parseFrontmatterFields } from '../../lib/frontmatter';
+
+// Same inline anchor format the chat renderer uses: [d3ab01.s1.p2] / [d3.s0.p1.0].
+// A research report's body carries these; some are pre-linkified to [[n](url)] by
+// linkifyReportCitations (known sources), but any whose docShortId wasn't in the
+// report's `sources` array stay raw. This regex catches the raw ones so we can turn
+// them into clickable chips that jump to the exact source chunk — resolved straight
+// from the chunk store, so it works even when the source list is incomplete.
+const CITATION_REGEX = /\[([a-z]\w{1,8}\.s\d+\.p\d+(?:\.\d+)?)\]/g;
 
 interface DocumentViewProps {
   document: LocalDocument | null;
@@ -15,13 +23,38 @@ interface DocumentViewProps {
   timeAgo: (iso: string) => string;
   /** Open an external http(s) link as an in-panel preview instead of a tab. */
   onOpenExternalLink?: (url: string) => void;
+  /** Jump to a source document at a specific chunk (citation chips). */
+  onOpenDocument?: (docId: string, anchorId?: string) => void;
+  /** Resolve [anchor] markers to their source doc/chunk via the chunk store. */
+  resolveCitations?: (text: string) => Promise<ResolvedCitation[]>;
 }
 
-/** Shared markdown link renderer: in-panel preview by default, real tab on
- *  Cmd/Ctrl-click. Falls back to target=_blank when no handler is wired. */
-function makeMdComponents(onOpenExternalLink?: (url: string) => void) {
+/** Shared markdown link renderer: `#cite:` anchors become chunk-jump chips;
+ *  http(s) links open in-panel by default, real tab on Cmd/Ctrl-click. Falls
+ *  back to target=_blank when no handler is wired. */
+function makeMdComponents(
+  onOpenExternalLink?: (url: string) => void,
+  citations?: Map<string, ResolvedCitation>,
+  onOpenDocument?: (docId: string, anchorId?: string) => void,
+) {
   return {
     a: ({ href, children, ...props }: any) => {
+      // Internal citation chip — jump to the exact chunk the claim came from.
+      if (typeof href === 'string' && href.startsWith('#cite:')) {
+        const anchor = href.slice(6);
+        const cite = citations?.get(anchor);
+        return (
+          <button
+            type="button"
+            className="inline-flex items-center justify-center px-1.5 mx-0.5 text-[10px] font-mono font-bold rounded bg-primary/10 text-primary border border-primary/30 cursor-pointer hover:bg-primary/20 transition-colors no-underline align-super focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1"
+            aria-label={cite ? `Citation ${String(children)}: ${cite.docTitle}${cite.sectionPath ? ` — ${cite.sectionPath}` : ''}` : `Source: ${anchor}`}
+            title={cite ? `${cite.docTitle}${cite.sectionPath ? ` — ${cite.sectionPath}` : ''}\n\nClick to view source` : `Source: ${anchor}`}
+            onClick={() => cite?.docId && onOpenDocument?.(cite.docId, anchor)}
+          >
+            {children}
+          </button>
+        );
+      }
       if (href && /^https?:\/\//i.test(href) && onOpenExternalLink) {
         return (
           <a
@@ -69,8 +102,9 @@ export const DocumentView: React.FC<DocumentViewProps> = ({
   onBack,
   timeAgo,
   onOpenExternalLink,
+  onOpenDocument,
+  resolveCitations,
 }) => {
-  const mdComponents = makeMdComponents(onOpenExternalLink);
   const [highlight, setHighlight] = useState<ChunkHighlight | null>(null);
   const [citeCopied, setCiteCopied] = useState(false);
   const highlightRef = useRef<HTMLDivElement>(null);
@@ -153,6 +187,54 @@ export const DocumentView: React.FC<DocumentViewProps> = ({
   // render regardless of branch, else opening a doc (null→present) changes
   // the hook count → React #310 → white panel.
   const [showRaw, setShowRaw] = React.useState(false);
+
+  // ── Inline citation chips ──────────────────────────────────────────────
+  // A research report's body carries [anchor] markers. DocumentView had no
+  // resolver (only ChatView did), so they rendered as dead raw text and links
+  // opened the external page instead of the extracted chunk. Resolve them here
+  // the same way — DB-backed, so a chip works even when the report's own
+  // sources list is missing that doc.
+  const [citations, setCitations] = useState<Map<string, ResolvedCitation>>(new Map());
+
+  // The text we scan for citations: the frontmatter-stripped body. Computed
+  // here (not from the later `body`) so the hooks below run before any return.
+  const citeBody = useMemo(
+    () => (document?.content ? splitFrontmatter(document.content).body : ''),
+    [document]
+  );
+
+  // Number anchors by first appearance (matches the chat renderer's scheme).
+  const anchorOrder = useMemo(() => {
+    const order: string[] = [];
+    const re = new RegExp(CITATION_REGEX.source, 'g');
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(citeBody)) !== null) {
+      if (!order.includes(m[1])) order.push(m[1]);
+    }
+    return order;
+  }, [citeBody]);
+
+  // Resolve raw anchors to source doc/chunk (debounced so it settles once).
+  useEffect(() => {
+    if (!resolveCitations || anchorOrder.length === 0) { setCitations(new Map()); return; }
+    let alive = true;
+    const timer = setTimeout(() => {
+      resolveCitations(citeBody).then(list => {
+        if (alive) setCitations(new Map(list.map(c => [c.anchorId, c])));
+      }).catch(() => {});
+    }, 150);
+    return () => { alive = false; clearTimeout(timer); };
+  }, [citeBody, anchorOrder.length, resolveCitations]);
+
+  const mdComponents = makeMdComponents(onOpenExternalLink, citations, onOpenDocument);
+
+  // Turn raw [anchor] markers into numbered #cite links our renderer makes into
+  // clickable chips. Unknown anchors (not seen during numbering) are left as-is.
+  const linkifyAnchors = (s: string): string =>
+    s.replace(CITATION_REGEX, (full, anchor: string) => {
+      const n = anchorOrder.indexOf(anchor);
+      return n >= 0 ? `[${n + 1}](#cite:${anchor})` : full;
+    });
 
   if (!document) {
     return (
@@ -252,7 +334,7 @@ export const DocumentView: React.FC<DocumentViewProps> = ({
            urlTransform={(url) => url.startsWith('data:image/') ? url : defaultUrlTransform(url)}
            components={mdComponents}
          >
-           {contentToRender}
+           {showRaw ? contentToRender : linkifyAnchors(contentToRender)}
          </ReactMarkdown>
       );
     }
@@ -279,7 +361,7 @@ export const DocumentView: React.FC<DocumentViewProps> = ({
               urlTransform={(url) => url.startsWith('data:image/') ? url : defaultUrlTransform(url)}
               components={mdComponents}
             >
-              {highlight.text}
+              {linkifyAnchors(highlight.text)}
             </ReactMarkdown>
           </div>
           <ReactMarkdown
@@ -288,7 +370,7 @@ export const DocumentView: React.FC<DocumentViewProps> = ({
             urlTransform={(url) => url.startsWith('data:image/') ? url : defaultUrlTransform(url)}
             components={mdComponents}
           >
-            {fullText}
+            {linkifyAnchors(fullText)}
           </ReactMarkdown>
         </>
       );
@@ -311,7 +393,7 @@ export const DocumentView: React.FC<DocumentViewProps> = ({
             urlTransform={(url) => url.startsWith('data:image/') ? url : defaultUrlTransform(url)}
             components={mdComponents}
           >
-            {before}
+            {linkifyAnchors(before)}
           </ReactMarkdown>
         )}
         <div
@@ -327,7 +409,7 @@ export const DocumentView: React.FC<DocumentViewProps> = ({
             urlTransform={(url) => url.startsWith('data:image/') ? url : defaultUrlTransform(url)}
             components={mdComponents}
           >
-            {highlighted}
+            {linkifyAnchors(highlighted)}
           </ReactMarkdown>
         </div>
         {after && (
@@ -337,7 +419,7 @@ export const DocumentView: React.FC<DocumentViewProps> = ({
             urlTransform={(url) => url.startsWith('data:image/') ? url : defaultUrlTransform(url)}
             components={mdComponents}
           >
-            {after}
+            {linkifyAnchors(after)}
           </ReactMarkdown>
         )}
       </>

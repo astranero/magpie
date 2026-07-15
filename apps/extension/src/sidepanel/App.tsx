@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback, Fragment } from 'react';
-import { set } from 'idb-keyval';
+import { get, set } from 'idb-keyval';
 
 // Collision-free message ids. `Date.now()` and `Date.now()+1` for a paired
 // user+assistant bubble collide whenever the clock ticks between the two reads,
@@ -63,7 +63,22 @@ async function resolveCitations(text: string): Promise<ResolvedCitation[]> {
 // ══════════════════════════════════════════════
 
 export default function App() {
-  const [view, setView] = useState<View>('lore');
+  // Chat is the first-run default; after that the panel reopens on whatever
+  // view it was closed in (restored below — 'document' is transient, so its
+  // return view is what gets remembered instead).
+  const [view, setView] = useState<View>('chat');
+
+  // Restore the last view once on mount, then persist every stable change.
+  useEffect(() => {
+    get('ara-last-view').then((v) => {
+      if (v === 'lore' || v === 'chat' || v === 'settings') setView(v);
+    }).catch(() => {});
+  }, []);
+  useEffect(() => {
+    if (view === 'lore' || view === 'chat' || view === 'settings') {
+      set('ara-last-view', view).catch(() => {});
+    }
+  }, [view]);
 
 // Brand import moved to top level, removing here due to TS import rule
   const [tabInfo, setTabInfo] = useState<TabInfo | null>(null);
@@ -559,15 +574,17 @@ export default function App() {
       }
     }).catch(() => {});
 
-    // Lifecycle port: tells the worker this window's panel is open, so the
-    // toolbar icon can toggle open/close reliably.
+    // Lifecycle port: tells the worker this TAB's panel is open, so the
+    // toolbar icon can toggle open/close reliably. The panel is tab-scoped,
+    // and at mount its own tab is the active one — query it for the id.
     let lifecyclePort: chrome.runtime.Port | null = null;
-    if (typeof chrome !== 'undefined' && chrome.runtime?.connect && chrome.windows) {
-      chrome.windows.getCurrent((w) => {
-        if (typeof w?.id !== 'number') return;
+    if (typeof chrome !== 'undefined' && chrome.runtime?.connect && chrome.tabs?.query) {
+      chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+        const tabId = tabs?.[0]?.id;
+        if (typeof tabId !== 'number') return;
         try {
           lifecyclePort = chrome.runtime.connect({ name: 'sidepanel-lifecycle' });
-          lifecyclePort.postMessage({ type: 'OPEN', windowId: w.id });
+          lifecyclePort.postMessage({ type: 'OPEN', tabId });
         } catch { /* worker asleep — toggle degrades gracefully */ }
       });
     }
@@ -901,6 +918,26 @@ export default function App() {
     }
   };
 
+  // Open a document (optionally at a chunk anchor). The GLOBAL doc list ships
+  // WITHOUT its markdown body (that unbounded payload was OOMing the panel), so
+  // hydrate the full doc via GET_DOCUMENT unless the bounded project list already
+  // carries it. Upsert the hydrated copy into globalDocuments so DocumentView —
+  // which reads from that state — shows the full body.
+  const openDocById = async (docId: string, anchorId?: string | null, returnView?: 'lore' | 'chat') => {
+    const inProject = documents.find(d => d.id === docId);
+    if (!inProject?.content) {
+      const res = await msg('GET_DOCUMENT', { docId });
+      if (res.success && res.document) {
+        const full = res.document as LocalDocument;
+        setGlobalDocuments(prev => [...prev.filter(d => d.id !== docId), full]);
+      }
+    }
+    if (returnView) docReturnViewRef.current = returnView;
+    setActiveDocumentId(docId);
+    setHighlightAnchorId(anchorId || null);
+    setView('document');
+  };
+
   const linkDocument = async (docId: string) => {
     if (!activeProjectId) return;
     await msg('LINK_DOCUMENT', { projectId: activeProjectId, docId });
@@ -1160,12 +1197,18 @@ export default function App() {
     loadDocuments(activeProjectId);
   };
 
-  const downloadDoc = (doc: LocalDocument) => {
-    if (!doc.content) {
+  const downloadDoc = async (doc: LocalDocument) => {
+    // The global doc list ships frontmatter-only (heap), so never trust the list
+    // copy's body — always pull the full markdown from the store for download.
+    let content = doc.content || '';
+    const res = await msg('GET_DOCUMENT', { docId: doc.id });
+    const fullContent = res.success ? (res.document as LocalDocument | undefined)?.content : undefined;
+    if (fullContent) content = fullContent;
+    if (!content) {
       showToast('error', 'Content not available for download.');
       return;
     }
-    const blob = new Blob([doc.content], { type: 'text/markdown' });
+    const blob = new Blob([content], { type: 'text/markdown' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
@@ -1856,20 +1899,7 @@ export default function App() {
               importPdfFiles={importPdfFiles}
               importImageFiles={importImageFiles}
               timeAgo={timeAgo}
-              onDocumentClick={async (id, anchorId) => {
-                docReturnViewRef.current = 'lore';
-                // Search hits can point at docs outside the loaded lists
-                const exists = documents.find(d => d.id === id) || globalDocuments.find(d => d.id === id);
-                if (!exists) {
-                  const res = await msg('GET_DOCUMENT', { docId: id });
-                  if (res.success && res.document) {
-                    setGlobalDocuments(prev => [...prev, res.document as LocalDocument]);
-                  }
-                }
-                setActiveDocumentId(id);
-                setHighlightAnchorId(anchorId || null);
-                setView('document');
-              }}
+              onDocumentClick={(id, anchorId) => openDocById(id, anchorId, 'lore')}
             />
           </div>
 
@@ -1884,6 +1914,8 @@ export default function App() {
               }}
               timeAgo={timeAgo}
               onOpenExternalLink={openLinkInTab}
+              resolveCitations={resolveCitations}
+              onOpenDocument={(docId, anchorId) => openDocById(docId, anchorId)}
             />
           )}
 
@@ -1915,20 +1947,7 @@ export default function App() {
               onCancelPlan={cancelResearchPlan}
               onOpenExternalLink={openLinkInTab}
 
-              onOpenDocument={async (docId, anchorId) => {
-                // If doc is not in current lists, fetch it to globalDocuments so DocumentView can display it
-                const exists = documents.find(d => d.id === docId) || globalDocuments.find(d => d.id === docId);
-                if (!exists) {
-                  const res = await msg('GET_DOCUMENT', { docId });
-                  if (res.success && res.document) {
-                    setGlobalDocuments(prev => [...prev, res.document as LocalDocument]);
-                  }
-                }
-                docReturnViewRef.current = 'chat';
-                setActiveDocumentId(docId);
-                setHighlightAnchorId(anchorId || null);
-                setView('document');
-              }}
+              onOpenDocument={(docId, anchorId) => openDocById(docId, anchorId, 'chat')}
             />
           </div>
 

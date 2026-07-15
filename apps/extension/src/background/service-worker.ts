@@ -105,50 +105,62 @@ chrome.storage.onChanged.addListener((changes, area) => {
 });
 
 // ─────────────────────────────────────────────
-// Side Panel — toggle on icon click
+// Side Panel — PER-TAB, toggled on icon click
 // ─────────────────────────────────────────────
-// State is driven by a lifecycle port the sidepanel opens on mount (see
-// App.tsx), so the map stays accurate even when the user closes the panel
-// with its own X button.
+// Each tab owns its panel state: off by default, opened by clicking the icon on
+// THAT tab, and Chrome natively hides/re-shows it as you switch away/back. The
+// global default is disabled so fresh tabs never inherit an open panel.
+//
+// Open-state is driven by a lifecycle port the sidepanel opens on mount (see
+// App.tsx), keyed by tabId. The icon click only ever happens on the ACTIVE tab —
+// where an open panel is visible and its port connected — so the map is accurate
+// exactly where the toggle decision is made (hidden tabs may read stale; they
+// re-report on re-show, when their panel document remounts).
 const sidePanelOpen = new Map<number, boolean>();
+
+// Disable the global default panel (manifest default_path) so the panel is
+// per-tab opt-in. Runs at every SW start — idempotent, and per-tab options
+// set below override this default.
+chrome.sidePanel?.setOptions({ enabled: false }).catch(() => {});
 
 chrome.action.onClicked.addListener((tab) => {
   // NOTE: sidePanel.open() must be called synchronously inside this handler.
   // Any `await` before it drops the user-gesture context and Chrome rejects
   // the call ("may only be called in response to a user gesture").
-  if (!chrome.sidePanel || !tab.windowId) return;
-  const windowId = tab.windowId;
-  const isOpen = sidePanelOpen.get(windowId) ?? false;
+  if (!chrome.sidePanel || typeof tab.id !== 'number') return;
+  const tabId = tab.id;
+  const isOpen = sidePanelOpen.get(tabId) ?? false;
 
   if (isOpen) {
-    // Close by disabling the side panel, then re-arm for the next open.
+    // Close THIS tab's panel by disabling its tab-scoped options.
     // No gesture needed here, so promises are fine.
-    sidePanelOpen.set(windowId, false);
-    chrome.sidePanel.setOptions({ tabId: tab.id, enabled: false })
-      .then(() => chrome.sidePanel.setOptions({ tabId: tab.id, path: 'sidepanel.html', enabled: true }))
-      .catch(() => {});
+    sidePanelOpen.set(tabId, false);
+    chrome.sidePanel.setOptions({ tabId, enabled: false }).catch(() => {});
   } else {
-    // Fire setOptions without awaiting, then open() while the gesture is live
-    chrome.sidePanel.setOptions({ tabId: tab.id, path: 'sidepanel.html', enabled: true });
-    chrome.sidePanel.open({ windowId }).catch((e) => console.warn('sidePanel.open failed:', e));
-    sidePanelOpen.set(windowId, true);
+    // Fire setOptions without awaiting, then open() while the gesture is live.
+    chrome.sidePanel.setOptions({ tabId, path: 'sidepanel.html', enabled: true });
+    chrome.sidePanel.open({ tabId }).catch((e) => console.warn('sidePanel.open failed:', e));
+    sidePanelOpen.set(tabId, true);
   }
 });
 
-// Sidepanel lifecycle port — marks its window open while connected
+// Sidepanel lifecycle port — marks its TAB open while connected
 chrome.runtime.onConnect.addListener((port) => {
   if (port.name !== 'sidepanel-lifecycle') return;
-  let trackedWindowId: number | null = null;
+  let trackedTabId: number | null = null;
   port.onMessage.addListener((m) => {
-    if (m?.type === 'OPEN' && typeof m.windowId === 'number') {
-      trackedWindowId = m.windowId;
-      sidePanelOpen.set(m.windowId, true);
+    if (m?.type === 'OPEN' && typeof m.tabId === 'number') {
+      trackedTabId = m.tabId;
+      sidePanelOpen.set(m.tabId, true);
     }
   });
   port.onDisconnect.addListener(() => {
-    if (trackedWindowId !== null) sidePanelOpen.set(trackedWindowId, false);
+    if (trackedTabId !== null) sidePanelOpen.set(trackedTabId, false);
   });
 });
+
+// Drop state for closed tabs so the map can't grow unbounded.
+chrome.tabs?.onRemoved?.addListener((tabId) => { sidePanelOpen.delete(tabId); });
 
 // ─────────────────────────────────────────────
 // Declarative Net Request — Strip Origin for Ollama
@@ -2232,7 +2244,19 @@ chrome.runtime.onConnect.addListener((port) => {
       if (aborted) {
         safePost({ type: 'DONE', fullText: full });
       } else {
-        safePost({ type: 'ERROR', error: String(err instanceof Error ? err.message : err) });
+        const errText = String(err instanceof Error ? err.message : err);
+        // PERSIST the failure. The panel's ERROR handler only appends the
+        // message to React state — and the CHAT_STATE:false broadcast below
+        // triggers loadChatHistory, which replaces state with the saved
+        // history and WIPED the unpersisted error (observed live: a 401
+        // flashed and vanished, leaving a silent dead turn). Saving it as a
+        // system message survives the reconcile and mirrors to other windows.
+        await saveChatMessage({
+          chatId, role: 'system',
+          text: `⚠️ ${errText}`,
+          timestamp: new Date().toISOString(), provider: 'custom'
+        }).catch(() => {});
+        safePost({ type: 'ERROR', error: errText });
       }
     } finally {
       interactiveDepth = Math.max(0, interactiveDepth - 1);

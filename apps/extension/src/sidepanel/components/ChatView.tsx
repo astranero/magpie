@@ -366,15 +366,29 @@ const MessageBody: React.FC<MessageBodyProps> = React.memo(({ text: rawText, com
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [text, anchorOrder.length]);
 
+  // A11y: announce the FINISHED reply once, politely — never the token stream.
+  // Streaming DOM mutations, if inside a live region, make screen readers
+  // "chatter" fragmented tokens (a documented AI-chat failure mode). We keep the
+  // live stream out of any live region and surface the whole coherent reply here
+  // only when it settles (streaming true→false), so SR users get one clean read.
+  const wasStreamingRef = useRef(false);
+  const [announce, setAnnounce] = useState('');
+  useEffect(() => {
+    if (wasStreamingRef.current && !streaming) setAnnounce(rawText);
+    wasStreamingRef.current = !!streaming;
+  }, [streaming, rawText]);
+
   // Plaintext fast-path render — AFTER all hooks, so hook order stays stable.
   // (renderLive messages fall through to the markdown renderer below.)
   if (fastPath) {
     return (
       <div>
-        <div className={`whitespace-pre-wrap break-words font-sans ${compact ? 'text-xs' : 'text-sm'} text-foreground`}>
+        {/* aria-live=off: the growing token stream must NOT be announced live. */}
+        <div aria-live="off" className={`whitespace-pre-wrap break-words font-sans ${compact ? 'text-xs' : 'text-sm'} text-foreground`}>
           {rawText}
           <span className="inline-block w-2 h-4 ml-0.5 align-middle bg-primary/60 animate-pulse" aria-hidden="true" />
         </div>
+        <span className="sr-only" aria-live="polite">{announce}</span>
       </div>
     );
   }
@@ -387,6 +401,8 @@ const MessageBody: React.FC<MessageBodyProps> = React.memo(({ text: rawText, com
 
   return (
     <div>
+      {/* Announced once when the reply settles (populated by the effect above). */}
+      <span className="sr-only" aria-live="polite">{announce}</span>
       <div className={`prose prose-sm dark:prose-invert max-w-none prose-img:rounded-md prose-headings-display prose-a:text-primary prose-pre:rounded-md prose-pre:border prose-pre:border-border ${compact ? 'text-xs' : ''}`}>
         <ReactMarkdown
           remarkPlugins={[remarkGfm, remarkMath]}
@@ -760,7 +776,10 @@ export const ChatView: React.FC<ChatViewProps> = ({
               </span>
             )}
             <div
-              className={`max-w-[85%] rounded-xl border px-4 py-2.5 text-sm shadow-card ${
+              // contain:layout — a growing/streaming bubble's internal reflow
+              // stays scoped to this subtree instead of forcing a whole-document
+              // layout pass on every token (documented streaming-chat CLS risk).
+              className={`[contain:layout] max-w-[85%] rounded-xl border px-4 py-2.5 text-sm shadow-card ${
                 m.role === 'user'
                   ? `bg-primary text-primary-foreground border-primary rounded-br-md ${m.queued ? 'opacity-70' : ''}`
                   : m.role === 'system'
