@@ -301,13 +301,25 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
       // article extraction; truncate the tail (boilerplate/comments) rather than
       // risk the whole run.
       const MAX_HTML = 3_000_000;
-      const html = rawHtml.length > MAX_HTML ? rawHtml.slice(0, MAX_HTML) : rawHtml;
+      let html = rawHtml.length > MAX_HTML ? rawHtml.slice(0, MAX_HTML) : rawHtml;
+
+      // Strip <script>/<link>/<style> from the RAW STRING before DOMParser. These
+      // never execute in a DOMParser doc (no browsing context), BUT Chrome still
+      // fires a CSP "Loading the script … has been blocked" console violation for
+      // each <script src> element the moment parseFromString creates it — noisy
+      // when a scraped page (e.g. a Cloudflare bot-check) is script-heavy. Removing
+      // them from the string means the elements are never created, so no report.
+      html = html
+        .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, '')
+        .replace(/<script\b[^>]*\/?>/gi, '')
+        .replace(/<link\b[^>]*>/gi, '')
+        .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, '');
 
       const parsed = new DOMParser().parseFromString(html, 'text/html');
 
-      // Strip scripts/styles to avoid CSP issues when Readability/Turndown
-      // touches innerHTML (see project CSP guidelines).
-      parsed.querySelectorAll('script, noscript, style, link[rel="stylesheet"]')
+      // Belt-and-suspenders: drop any residual resource-referencing nodes before
+      // Readability/Turndown touch innerHTML.
+      parsed.querySelectorAll('script, noscript, style, link, iframe, object, embed')
         .forEach(el => el.parentNode?.removeChild(el));
 
       // Resolve relative URLs against the source page
