@@ -91,7 +91,8 @@ installCrashHandlers('sw');
 // (this is where the PDF/embed/rerank crashes actually happen). Persist them.
 installCrumbReceiver();
 dumpCrashLog('[Magpie crashlog]').catch(() => {});
-crumb('sw', 'service worker started', { build: 'heapprobe+debounce' });
+const SW_BOOT_AT = Date.now();
+crumb('sw', 'service worker started', { build: 'swuptime+resume' });
 
 // The offscreen doc can't read chrome.storage to learn the inference device, and
 // can't watch it for changes — so we push changes to it from here (this context
@@ -2623,6 +2624,11 @@ async function executeResearch({ projectId, chatId, topic, effectiveTopic, mode 
   const heartbeatInterval = setInterval(() => {
     chrome.runtime.getPlatformInfo?.().catch(() => {});
     updateHeartbeat().catch(() => {});
+    // SW uptime at each beat — the last one before a restart tells us whether the
+    // worker dies at a consistent age (Chrome's hard MV3 lifetime cap) vs a
+    // variable point (memory). The SW process has no memory API, so this is the
+    // decisive SW-side signal.
+    crumb('sw', 'heartbeat', { upSec: Math.round((Date.now() - SW_BOOT_AT) / 1000) });
 
     // Run-level watchdog: the heartbeat proves the WORKER is alive, not the
     // run. If no progress line has appeared for RESEARCH_STALL_MS, or the
@@ -2719,14 +2725,14 @@ async function resumePendingResearch(): Promise<void> {
       return;
     }
 
-    // Gate 2: heartbeat staleness check.
-    // A fresh heartbeat (< HEARTBEAT_STALE_MS) means the run very recently
-    // completed and clearJob just lost a race — skip resume and clean up.
-    if (job.lastHeartbeatAt && Date.now() - job.lastHeartbeatAt < HEARTBEAT_STALE_MS) {
-      console.log('[Research Diagnostics] Heartbeat is fresh — job likely just finished, clearing record');
-      await clearResearchJob().catch(() => {});
-      return;
-    }
+    // NOTE: we deliberately do NOT clear on a "fresh heartbeat" anymore. The
+    // finish path calls markJobFinished() (active:false) BEFORE clearJob(), so a
+    // job that restarts still marked active:true can ONLY mean it died mid-run —
+    // never "just finished". Chrome's ~5-minute MV3 worker lifetime cap kills
+    // long research runs while the heartbeat is still fresh (updated ≤20s before
+    // the kill); the old fresh-heartbeat clear then threw the whole run away
+    // instead of resuming it. An active job = resume; the attempt cap below bounds
+    // any genuine loop.
 
     if (abortControllers.has(job.projectId)) return; // already running in this instance
     if (Date.now() - new Date(job.startedAt).getTime() > JOB_MAX_AGE_MS) {
@@ -2734,11 +2740,14 @@ async function resumePendingResearch(): Promise<void> {
       return;
     }
 
-    // Resume attempt cap: if this job has been resumed more than 3 times,
-    // it's stuck in a loop — clear it and send a failure message.
+    // Resume attempt cap. Chrome's ~5-min MV3 worker lifetime means a full deep
+    // run (multiple stages, each near the cap) legitimately needs several resumes
+    // to finish — each one makes forward progress (completed stages are skipped,
+    // scraped pages are cached, embedded chunks dedup). So the cap is generous;
+    // it exists only to stop a genuinely wedged job from looping forever.
     const attemptCount = await incrementResumeAttempts();
-    if (attemptCount > 3) {
-      const message = `Research failed: Job repeatedly interrupted and could not complete. This typically indicates a very long-running LLM request (synthesis/planning) that exceeds Chrome's worker idle timeout. Try a simpler topic or split into smaller queries.`;
+    if (attemptCount > 12) {
+      const message = `Research stopped: the run was interrupted too many times to finish (Chrome recycles the extension's background worker roughly every 5 minutes, and this run needed more segments than that allows). Try a lower research depth, or split the topic into narrower queries.`;
       if (job.chatId) {
         await saveChatMessage({
           chatId: job.chatId,
