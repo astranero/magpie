@@ -2088,25 +2088,28 @@ async function synthesizeFinalPaper(
     .join('\n\n---\n\n');
 
   const sys =
-    `You are a research editor. You have received ${stageBriefs.length} research briefs from a staged investigation of: "${topic}".
-Each brief contains inline [anchor_id] citations — YOU MUST PRESERVE EVERY ONE exactly as written.
+    `You are a senior research analyst writing the definitive report on: "${topic}".
+You have ${stageBriefs.length} research briefs from a staged investigation, each with inline [anchor_id] citations you MUST preserve exactly.
 
-Your task: synthesize all briefs into a single comprehensive academic paper with these sections:
+Write ONE long, comprehensive, decision-useful report — the kind a reader pays for because it saves them weeks. Depth and structure matter as much as accuracy.
 
-1. **Abstract** (~200 words summarising the entire investigation)
-2. **Introduction** (context, motivation, scope)
-3. One section per sub-question:
+STRUCTURE — adapt it to the subject; do NOT use a rigid template:
+- Open with a titled report and a strong 1–2 paragraph executive overview that frames the whole finding (no "Abstract:" label — write it as authoritative prose).
+- Organise the body into 4–8 sections with DESCRIPTIVE, topic-specific headings that name the actual finding (e.g. "Demand and Pain Points", "Willingness to Pay", "Competitive Landscape") — NOT generic labels like "Introduction / Section 1 / Discussion". Cover every sub-question, but through headings that fit the material:
 ${subQuestions.map((q, i) => `   ${i + 1}. ${q}`).join('\n')}
-4. **Discussion** (compare/contrast findings across stages; highlight consensus and contradictions)
-5. **Conclusion**
-6. **Open Questions & Future Work** (synthesise the gaps listed at the end of each stage brief)
+- Use ### sub-headings within sections to break up long analysis.
+- End with a decisive **Verdict** (or **Recommendation**): take a clear position, state the strongest case, and name the top 2–3 risks or caveats. Do not hedge into a shrug.
 
-Strict rules:
-- Preserve ALL [anchor_id] citations from the briefs — do not drop, alter, or invent any.
-- Integrate duplicate coverage gracefully: if two stages discuss the same finding, merge them and carry citations from both.
-- Flag conflicts explicitly: "Stage 2 found X [id] while Stage 4 found Y [id]."
-- Do not add factual claims absent from the briefs.
-- Write in formal academic English.
+USE TABLES AND STRUCTURE — this is what separates a real report from an essay:
+- Whenever the material has comparable or quantitative data — pricing, competitors, features, funding, metrics, options with trade-offs — present it as a Markdown table with clear column headers. Put a citation in the relevant cells or the sentence introducing the table.
+- When findings have a natural ranking or priority, present a ranked table or numbered hierarchy (e.g. pain points by severity, options by fit).
+- Match the register to the subject: a market/product/business question warrants an analyst report (pricing tables, competitor comparison, a go-to-market or buy/build recommendation); a scientific/technical question warrants a technical review (methods, results tables, limitations). Either way: descriptive headers, tables where data supports them, and a decisive close.
+
+SYNTHESIS RULES:
+- Preserve ALL [anchor_id] citations from the briefs — never drop, alter, or invent any.
+- Merge duplicate coverage: if two stages report the same finding, state it once and carry the citations from both.
+- Flag genuine conflicts explicitly ("one source reports X [id], another Y [id]").
+- Do not add claims absent from the briefs. Synthesise and structure what's there — don't pad with what's missing.
 
 ${RESEARCH_CITATION_RULES}`;
 
@@ -2389,7 +2392,15 @@ async function runDeeperResearch(
     if (contextText.length < 100) {
       throw new Error(`Agents found ${allSources.length} source(s) but could not extract readable text.`);
     }
-    const fallbackSys = `You are a senior research analyst. Using ONLY the excerpts below, write a comprehensive markdown report on: "${topic}".\n\nSub-questions:\n${subQuestions.map(q => `- ${q}`).join('\n')}\n\n${RESEARCH_CITATION_RULES}`;
+    const fallbackSys =
+      `You are a senior research analyst writing the definitive report on: "${topic}", using ONLY the excerpts below.\n\n` +
+      `Write ONE long, comprehensive, decision-useful report:\n` +
+      `- Open with a titled report and a strong 1–2 paragraph executive overview (authoritative prose, no "Abstract:" label).\n` +
+      `- Organise into 4–8 sections with DESCRIPTIVE, topic-specific headings that name the actual finding — not generic "Introduction / Discussion". Cover every sub-question:\n${subQuestions.map(q => `   - ${q}`).join('\n')}\n` +
+      `- Whenever the excerpts have comparable or quantitative data (pricing, competitors, features, funding, metrics, options with trade-offs), present it as a Markdown table; use a ranked table/numbered hierarchy when findings have a natural priority.\n` +
+      `- Match register to the subject (analyst report for market/product questions with pricing + competitor tables and a recommendation; technical review for scientific ones).\n` +
+      `- End with a decisive **Verdict** (or **Recommendation**): a clear position, the strongest case, and the top 2–3 risks. Do not hedge.\n\n` +
+      `${RESEARCH_CITATION_RULES}`;
     synthesis = await (synthesisFn ?? llmChatFn)(fallbackSys, `SOURCE EXCERPTS:\n\n${contextText}`);
     revisionContext = contextText;
   }
