@@ -92,7 +92,7 @@ installCrashHandlers('sw');
 installCrumbReceiver();
 dumpCrashLog('[Magpie crashlog]').catch(() => {});
 const SW_BOOT_AT = Date.now();
-crumb('sw', 'service worker started', { build: 'pdf-mem-cleanup' });
+crumb('sw', 'service worker started', { build: 'idle-watchdog' });
 
 // The offscreen doc can't read chrome.storage to learn the inference device, and
 // can't watch it for changes — so we push changes to it from here (this context

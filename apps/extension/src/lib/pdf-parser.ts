@@ -78,6 +78,13 @@ export async function recycleOffscreenWorker(): Promise<void> {
 
 /** Ensure the offscreen document exists (idempotent). */
 export async function ensureOffscreen(): Promise<void> {
+  // The offscreen can vanish out from under us — its own idle watchdog calls
+  // window.close() to free the renderer between runs. If our cached (resolved)
+  // promise points at a doc that's gone, drop it so we rebuild instead of routing
+  // messages into a closed document. hasDocument() is a cheap SW-local API call.
+  try {
+    if (offscreenReady && !(await (chrome.offscreen as any).hasDocument?.())) offscreenReady = null;
+  } catch { /* hasDocument unavailable — fall through to the create path */ }
   if (!offscreenReady) {
     offscreenReady = (async () => {
       const has = await (chrome.offscreen as any).hasDocument?.();

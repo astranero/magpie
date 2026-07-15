@@ -277,7 +277,25 @@ async function parsePdfData(data: Uint8Array): Promise<{ pages: string[]; imageP
   }
 }
 
+// Idle watchdog. Chrome NEVER reclaims the offscreen renderer on its own (a
+// non-audio reason means unbounded lifetime), so once a run finishes the doc sits
+// open holding its whole ~1-2 GB parse heap indefinitely — and the NEXT run
+// inherits that hot renderer (the "stage 1 starts at 2.5 GB" crash). Closing the
+// doc after a stretch of no messages frees the renderer; the next embed/parse
+// rebuilds it fresh (ensureOffscreen re-checks hasDocument; model reloads from
+// cache in a few seconds). 90 s so a genuine mid-run lull — e.g. a long LLM
+// synthesis with no offscreen traffic — doesn't trip it.
+let lastActivity = Date.now();
+const IDLE_CLOSE_MS = 90_000;
+setInterval(() => {
+  if (Date.now() - lastActivity >= IDLE_CLOSE_MS) {
+    try { crumb('offscreen', 'idle close — freeing renderer', {}); } catch { /* ignore */ }
+    try { window.close(); } catch { /* ignore */ }
+  }
+}, 30_000);
+
 chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
+  lastActivity = Date.now();
   if (request?.action === 'OFFSCREEN_PARSE_PDF') {
     crumb('offscreen', 'pdf parse (base64) start', { base64Mb: Math.round((request.base64 as string || '').length / 1.33 / 1024 / 1024) });
     parsePdf(request.base64 as string)
@@ -317,11 +335,18 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
       // each <script src> element the moment parseFromString creates it — noisy
       // when a scraped page (e.g. a Cloudflare bot-check) is script-heavy. Removing
       // them from the string means the elements are never created, so no report.
+      // Also drop the heaviest non-article nodes BEFORE building the DOM: inline
+      // <svg> icon sprites (often 100s of KB), HTML comments, and <template>
+      // payloads. Readability would discard them anyway, but only AFTER they've
+      // inflated the parsed DOM on this main thread — the heap we're bounding.
       html = html
         .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, '')
         .replace(/<script\b[^>]*\/?>/gi, '')
         .replace(/<link\b[^>]*>/gi, '')
-        .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, '');
+        .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, '')
+        .replace(/<svg\b[^>]*>[\s\S]*?<\/svg>/gi, '')
+        .replace(/<template\b[^>]*>[\s\S]*?<\/template>/gi, '')
+        .replace(/<!--[\s\S]*?-->/g, '');
 
       const parsed = new DOMParser().parseFromString(html, 'text/html');
 
