@@ -431,6 +431,19 @@ async function searchGoogleNewsRss(query: string, signal?: AbortSignal): Promise
 export async function scrapeUrl(url: string, signal?: AbortSignal): Promise<ParsedPage | null> {
   let parsed: ParsedPage | null = null;
 
+  // Cloudflare-gated publisher (ACM/IEEE/Springer/Wiley/Elsevier): the URL only
+  // ever yields a bot-check, and every ~10-13 s jina attempt on it is wasted (a
+  // whole stage of these overran the SW cap and looped). Go STRAIGHT to the DOI's
+  // open-access PDF — fast and full-text — before spending any time on the page.
+  if (CLOUDFLARE_GATED.test(url)) {
+    const doi = extractDoi(url);
+    if (doi) {
+      const recovered = await recoverViaDoi(doi, url, signal);
+      if (recovered) return recovered;
+    }
+    return null; // no open copy — don't burn the jina/local attempts on a bot wall
+  }
+
   // Google News RSS items are opaque redirect URLs; Jina answers them with
   // 403, burning its 20s timeout per article. Resolve the redirect locally
   // first so the publisher URL is what gets scraped (and cached/deduped).
@@ -481,10 +494,11 @@ export async function scrapeUrl(url: string, signal?: AbortSignal): Promise<Pars
   if (!gate.pass) {
     const doi = extractDoi(url);
     if (doi) {
-      const paper = await resolvePaperViaDoi(doi, signal);
-      if (paper) {
+      // Prefer the full open-access PDF, fall back to abstract metadata.
+      const recovered = await recoverViaDoi(doi, url, signal);
+      if (recovered) {
         console.log(`[GATE] ${url} rejected (${gate.reason}) — recovered via DOI ${doi}`);
-        return paperToParsedPage(paper);
+        return recovered;
       }
     }
     if (parsed) console.warn(`[GATE] Rejected ${url}: ${gate.reason}`);
@@ -800,14 +814,12 @@ export function linkifyReportCitations(
  * files, tracker endpoints. These leak in from link extraction on scraped
  * pages (e.g. http://www.w3.org/TR/html4/loose.dtd).
  */
-// Reader-proxy (jina) dead ends — URLs it CONSISTENTLY returns 0 bytes for
-// (paywall / hard bot-block), each proven in the crash logs. Every one still costs
-// a full ~10-13 s fetch before failing, so a single stage stuffed with them (e.g. a
-// `site:acm.org` query returning 12 ACM DOI links) burns >2 min doing nothing,
-// blows the ~5-min SW lifetime cap mid-stage, and the stage restarts on resume →
-// an infinite re-gather loop. Skip them up front. Kept evidence-based: hosts that
-// returned real content elsewhere in the logs (ieeexplore, tandfonline) are NOT here.
-const DEAD_READER_HOSTS = /\/\/([^/]*\.)?dl\.acm\.org\/|\/\/([^/]*\.)?linkedin\.com\/|\/\/static\.licdn\.com\/|\/\/([^/]*\.)?aimodels\.fyi\/|\/\/([^/]*\.)?researchgate\.net\/(figure|profile)\//i;
+// Reader-proxy dead ends with NO open-access recovery path — URLs jina returns 0
+// bytes for AND that carry no usable DOI (so recoverViaDoi can't help), each proven
+// in the crash logs. Every one still costs a full ~10-13 s fetch before failing.
+// (Cloudflare-gated PUBLISHERS like dl.acm.org/ieeexplore are NOT here — they're
+// handled via CLOUDFLARE_GATED → DOI → open-access PDF, which recovers full text.)
+const DEAD_READER_HOSTS = /\/\/([^/]*\.)?linkedin\.com\/|\/\/static\.licdn\.com\/|\/\/([^/]*\.)?aimodels\.fyi\/|\/\/([^/]*\.)?researchgate\.net\/(figure|profile)\//i;
 
 export function isJunkUrl(url: string): boolean {
   if (!/^https?:\/\//i.test(url)) return true;
@@ -1024,6 +1036,78 @@ async function resolvePaperViaDoi(doi: string, signal?: AbortSignal): Promise<Ac
   } catch {
     return null;
   }
+}
+
+// Publisher pages behind Cloudflare / a paywall: scraping the URL (jina, direct
+// fetch, even a real browser) only ever returns a bot-check "security verification"
+// page — verified live for dl.acm.org. But these carry a DOI, and the DOI resolves
+// to an OPEN-ACCESS full-text PDF elsewhere (arXiv / PMC / repo). Recover via that.
+const CLOUDFLARE_GATED = /\/\/([^/]*\.)?(dl\.acm\.org|ieeexplore\.ieee\.org|link\.springer\.com|onlinelibrary\.wiley\.com|(www\.)?sciencedirect\.com)\//i;
+
+/**
+ * DOI → open-access full-text PDF URL on a READABLE host (arXiv/PMC/repository),
+ * NOT the publisher's gated page. The "best" OA location is often the publisher's
+ * own Cloudflare-gated PDF (verified: OpenAlex returns the ACM PDF as best_oa for a
+ * paper that also sits on arXiv), so we scan ALL locations and pick a non-gated one,
+ * preferring arXiv. Falls back to Semantic Scholar's arXiv externalId. Returns null
+ * when no open, readable copy exists.
+ */
+async function resolveOpenAccessPdfUrl(doi: string, signal?: AbortSignal): Promise<{ pdfUrl: string; title?: string } | null> {
+  try {
+    const res = await fetch(
+      `https://api.openalex.org/works/https://doi.org/${encodeURIComponent(doi)}`,
+      { signal: apiSignal(signal), headers: { 'Accept': 'application/json' } }
+    );
+    if (res.ok) {
+      const w = await res.json();
+      const title = w?.title || w?.display_name || undefined;
+      const locs: any[] = Array.isArray(w?.locations) ? w.locations : [];
+      const pdfs = locs
+        .map(l => l?.pdf_url)
+        .filter((u): u is string => typeof u === 'string' && /^https?:\/\//.test(u) && !CLOUDFLARE_GATED.test(u));
+      const pick = pdfs.find(u => /arxiv\.org/i.test(u)) || pdfs[0];
+      if (pick) return { pdfUrl: pick, title };
+    }
+  } catch { /* fall through to S2 */ }
+  try {
+    const p = await s2Fetch(
+      `https://api.semanticscholar.org/graph/v1/paper/DOI:${encodeURIComponent(doi)}?fields=title,openAccessPdf,externalIds`,
+      signal
+    );
+    const arx = p?.externalIds?.ArXiv;
+    if (arx) return { pdfUrl: `https://arxiv.org/pdf/${arx}`, title: p?.title };
+    const pdf = p?.openAccessPdf?.url;
+    if (typeof pdf === 'string' && /^https?:\/\//.test(pdf) && !CLOUDFLARE_GATED.test(pdf)) return { pdfUrl: pdf, title: p?.title };
+  } catch { /* no OA copy */ }
+  return null;
+}
+
+/**
+ * Recover a blocked/paywalled DOI page: prefer the full open-access PDF (parsed via
+ * offscreen pdf.js), fall back to abstract-only metadata. Used both as the fast path
+ * for known Cloudflare hosts and as the quality-gate rescue for any DOI-bearing URL.
+ */
+async function recoverViaDoi(doi: string, url: string, signal?: AbortSignal): Promise<ParsedPage | null> {
+  const oa = await resolveOpenAccessPdfUrl(doi, signal);
+  if (oa && !CLOUDFLARE_GATED.test(oa.pdfUrl)) {
+    try {
+      // arXiv copies go through the proven arXiv path (handles HTML + PDF forms);
+      // any other open PDF is parsed directly via offscreen pdf.js.
+      const arxivId = extractArxivId(oa.pdfUrl);
+      const body = arxivId
+        ? await fetchArxivFullText(arxivId, signal)
+        : await pdfUrlToBody(oa.pdfUrl);
+      if (body && body.trim().length > 400) {
+        crumb('scrape', 'oa recovered', { doi, host: oa.pdfUrl.slice(0, 60) });
+        const title = oa.title || body.match(/^#\s*(.+)$/m)?.[1]?.trim() || url;
+        return { title, markdown: body, wordCount: body.split(/\s+/).filter(Boolean).length };
+      }
+    } catch (e) {
+      crumb('scrape', 'oa recover failed', { doi });
+    }
+  }
+  const paper = await resolvePaperViaDoi(doi, signal);
+  return paper ? paperToParsedPage(paper) : null;
 }
 
 /** Build a scrapeable page from paper metadata when the real page is blocked. */

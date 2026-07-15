@@ -425,10 +425,8 @@ Neither side disputes the underlying data.`;
 });
 
 describe('isJunkUrl — reader-proxy dead ends', () => {
-  it('skips domains that jina reliably returns empty for', () => {
+  it('skips dead ends with no open-access recovery path', () => {
     for (const u of [
-      'https://dl.acm.org/doi/10.1145/3746059.3747721',
-      'https://dl.acm.org/doi/epdf/10.1145/3795154.3795331',
       'https://www.linkedin.com/pulse/performance-testing-abc',
       'https://static.licdn.com/aero-v1/sc/h/xyz',
       'https://www.researchgate.net/figure/Compute-requirements_fig4_391',
@@ -439,10 +437,13 @@ describe('isJunkUrl — reader-proxy dead ends', () => {
     }
   });
 
-  it('does NOT block hosts that returned real content in the logs', () => {
+  it('does NOT junk-filter recoverable or readable hosts', () => {
     for (const u of [
-      'https://arxiv.org/pdf/2507.22352',
+      // Cloudflare publishers are recovered via DOI → OA PDF, not junk-skipped
+      'https://dl.acm.org/doi/10.1145/3746059.3747721',
       'https://ieeexplore.ieee.org/document/10589417',
+      // readable directly
+      'https://arxiv.org/pdf/2507.22352',
       'https://www.tandfonline.com/doi/full/10.1080/0144929X.2026.2692099',
       'https://www.researchgate.net/publication/387223217_Optimizing_LLM_Latency',
       'https://www.nngroup.com/articles/generative-ui/',
