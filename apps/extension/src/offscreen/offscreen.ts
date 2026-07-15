@@ -243,6 +243,11 @@ async function parsePdfData(data: Uint8Array): Promise<{ pages: string[]; imageP
                 imagePages.push({ index: p, dataUrl: canvas.toDataURL('image/png') });
               } catch {
                 try { task.cancel(); } catch { /* ignore */ }
+              } finally {
+                // Free the canvas backing store immediately — a scale-2 full-page
+                // raster is multi-MB, and letting a dozen linger balloons the
+                // offscreen heap. Zeroing the dimensions releases the pixel buffer.
+                canvas.width = 0; canvas.height = 0;
               }
             }
           }
@@ -265,6 +270,9 @@ async function parsePdfData(data: Uint8Array): Promise<{ pages: string[]; imageP
     }
     return { pages, imagePages };
   } finally {
+    // Document-level cleanup (frees @font-face / shared resources pdf.js caches
+    // across pages) BEFORE destroy — page.cleanup() alone leaves these behind.
+    try { await (pdf as any).cleanup?.(); } catch { /* ignore */ }
     await pdf.destroy().catch(() => {});
   }
 }
