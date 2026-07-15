@@ -365,6 +365,22 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
     return true;
   }
 
+  // Reclaim the inference worker's accumulated ONNX/WASM heap. The WASM heap only
+  // ever GROWS (~100 MB per embedded source, never shrinks), so over a long stage
+  // the renderer OOMs. closeDocument() from the SW doesn't reliably free it
+  // mid-run; terminate()-ing the worker and respawning a fresh one does. The SW
+  // sends this between sources when the worker is idle (no embed in flight).
+  if (request?.action === 'OFFSCREEN_RECYCLE_WORKER') {
+    const beforeMB = heapMB();
+    for (const [, p] of workerPending) p.reject(new Error('worker recycled for memory'));
+    workerPending.clear();
+    try { inferenceWorker.terminate(); } catch { /* already gone */ }
+    spawnInferenceWorker();
+    crumb('offscreen', 'worker recycled', { beforeMB });
+    sendResponse({ ok: true });
+    return true;
+  }
+
   return false;
 });
 

@@ -37,6 +37,19 @@ export async function recreateOffscreen(): Promise<void> {
   offscreenReady = null;
 }
 
+/**
+ * Recycle the offscreen's inference worker — terminate() + respawn — to reclaim
+ * its ONNX/WASM heap, which only grows (never shrinks) with each embedded source.
+ * Unlike recreateOffscreen(), this works RELIABLY mid-run: closeDocument() won't
+ * fire while the offscreen has active message traffic, but the worker can always
+ * be torn down between calls. Routed through the offscreen mutex so it waits for
+ * any in-flight embed to finish first.
+ */
+export async function recycleOffscreenWorker(): Promise<void> {
+  await ensureOffscreen();
+  await sendToOffscreen({ action: 'OFFSCREEN_RECYCLE_WORKER' }, 30_000).catch(() => { /* best-effort */ });
+}
+
 /** Ensure the offscreen document exists (idempotent). */
 export async function ensureOffscreen(): Promise<void> {
   if (!offscreenReady) {

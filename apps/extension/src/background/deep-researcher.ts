@@ -3,7 +3,7 @@ import { chunkDocument, makeDocShortId } from '../lib/chunker';
 import { buildFrontmatter } from '../lib/frontmatter';
 import { addChunksToVectorStore, searchSessionChunks, resetSessionIndex } from '../lib/vector-store';
 import { getJob, updateJob, getPage, savePage, listPages } from '../lib/research-store';
-import { pdfUrlToBody, recreateOffscreen } from '../lib/pdf-parser';
+import { pdfUrlToBody, recreateOffscreen, recycleOffscreenWorker } from '../lib/pdf-parser';
 import { checkContentQuality, extractDoi } from '../lib/quality-gate';
 import { isAcademicQuery } from '../lib/query-intent';
 import { getResearchLimits, getResearchDepth, getSynthesisCharBudget, getSourceQuality, getAcademicDepth, RESEARCH_LIMITS, ResearchLimits, SourceQuality, AcademicDepth } from '../lib/research-limits';
@@ -846,12 +846,14 @@ async function scrapeUrlList(
         docIds.push(docId);
         sources.push({ url, title: title || url, label, docId, tier: sourceTier(url) });
         onProgress(`[${label}] ✓ Captured "${title}"`);
-        // Periodically reclaim the offscreen renderer so its heap can't grow
-        // unbounded within a long stage (see OFFSCREEN_RECLAIM_EVERY).
+        // Periodically recycle the inference worker so its ONNX/WASM heap (which
+        // only grows, ~100 MB/source, and closeDocument can't free mid-run) can't
+        // OOM the renderer within a long stage. A worker terminate()+respawn frees
+        // it reliably (see OFFSCREEN_RECLAIM_EVERY).
         if (++sourcesSinceOffscreenReclaim >= OFFSCREEN_RECLAIM_EVERY) {
           sourcesSinceOffscreenReclaim = 0;
           crumb('offscreen', 'reclaim (mid-stage)', { after: i });
-          await recreateOffscreen().catch(() => {});
+          await recycleOffscreenWorker().catch(() => {});
         }
       } else {
         onProgress(`[${label}] ✗ No readable content: ${url}`);
