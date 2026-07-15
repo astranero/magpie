@@ -109,6 +109,18 @@ export function stripModelBibliography(synthesis: string): string {
   return synthesis.slice(0, m.index).trimEnd();
 }
 
+/**
+ * The report already carries a document title ("Deep Research: <topic>"), so a
+ * top-level H1 the synthesis model writes anyway ("# Professional Report: …")
+ * renders as an ugly double header. Strip a single leading H1/H2 heading (only if
+ * it's the very first content), leaving the executive overview as the opener.
+ */
+export function stripLeadingTitle(synthesis: string): string {
+  const s = synthesis.replace(/^﻿?\s*/, '');
+  const m = s.match(/^#{1,2}\s+.+\n+/);
+  return m ? s.slice(m[0].length) : s;
+}
+
 // ─────────────────────────────────────────────
 // Deep Researcher — tab-free
 // ─────────────────────────────────────────────
@@ -1397,7 +1409,8 @@ async function saveSynthesisReport(
 
   // Turn inline [anchor] citations into real links, and number the Sources list
   // to match — cited sources first (in citation order), then any uncited ones.
-  const { text: linkedSynthesis, cited } = linkifyReportCitations(synthesis, sources);
+  // Strip a leading H1 first so the doc title isn't doubled by the model's own.
+  const { text: linkedSynthesis, cited } = linkifyReportCitations(stripLeadingTitle(synthesis), sources);
   const unique = dedupeSourceRecords(sources).filter(r => r.url || r.title);
   const citedKeys = new Set(cited.map(r => r.docId || r.url));
   const ordered = [...cited, ...unique.filter(r => !citedKeys.has(r.docId || r.url))];
@@ -1469,7 +1482,7 @@ export async function runDeepResearch(
   // standard. /research (quick) still honours the setting as-is.
   if (mode === 'deep' && depth === 'standard') {
     activeLimits = RESEARCH_LIMITS.deep;
-    onProgress('[PLANNING] Deep run — using deep source limits (10 URLs/query, 7 queries, 4 rounds)');
+    onProgress('[PLANNING] Deep run — using deep source limits (10 URLs/query, 7 queries, 6 rounds)');
   } else if (depth !== 'standard') {
     onProgress(`[PLANNING] Research depth: ${depth}`);
   }
@@ -1796,33 +1809,38 @@ async function evaluateAndRefine(
   evaluatorFn: LlmChatFn,
   onProgress: (s: string) => void
 ): Promise<string> {
-  synthesis = stripModelBibliography(synthesis);
-  onProgress(`[EVALUATING] Running quality evaluation on report…`);
-  const first = await evaluateReport(topic, synthesis, evaluatorFn).catch(() => null);
-  if (!first) return synthesis;
+  // Keep revising until the report scores well or we hit the pass cap. A single
+  // pass often only nudges a 4-5/10 (the auditor flags depth/scope gaps a thin
+  // draft can't fix in one go), so loop — bounded to avoid runaway LLM calls.
+  const PASS_SCORE = 8;
+  const MAX_REVISIONS = 2;
 
   const label = (ev: EvaluationResult) =>
     ev.verdict === 'PASS' ? '✅ PASS' : ev.verdict === 'NEEDS_REVISION' ? '⚠️ NEEDS REVISION' : '❌ FAIL';
-  onProgress(`[EVALUATING] Verdict: ${label(first)} (${first.score}/10) — ${first.recommendation}`);
 
-  if (first.verdict === 'PASS' || first.score >= 7) {
-    return synthesis + formatEvaluationBlock(first, false);
+  let current = stripModelBibliography(synthesis);
+  onProgress(`[EVALUATING] Running quality evaluation on report…`);
+  let ev = await evaluateReport(topic, current, evaluatorFn).catch(() => null);
+  if (!ev) return current;
+  onProgress(`[EVALUATING] Verdict: ${label(ev)} (${ev.score}/10) — ${ev.recommendation}`);
+
+  let revisedAny = false;
+  for (let pass = 1; pass <= MAX_REVISIONS; pass++) {
+    if (ev.verdict === 'PASS' || ev.score >= PASS_SCORE) break;
+    onProgress(`[EVALUATING] Revising report to reach ${PASS_SCORE}/10 (pass ${pass}/${MAX_REVISIONS})…`);
+    const revised = stripModelBibliography(
+      await reviseSynthesis(topic, current, ev, sourceContext, llmChatFn).catch(() => current)
+    );
+    if (revised === current) break;           // revision made no change — stop
+    current = revised;
+    revisedAny = true;
+    const next = await evaluateReport(topic, current, evaluatorFn).catch(() => null);
+    if (!next) break;                          // can't re-audit — keep the revision
+    ev = next;
+    onProgress(`[EVALUATING] Post-revision verdict: ${label(ev)} (${ev.score}/10)`);
   }
 
-  // Flagged: one revision pass, then re-audit so the shown verdict is honest.
-  onProgress(`[EVALUATING] Revising report to address auditor findings…`);
-  const revised = stripModelBibliography(
-    await reviseSynthesis(topic, synthesis, first, sourceContext, llmChatFn).catch(() => synthesis)
-  );
-  if (revised === synthesis) {
-    return synthesis + formatEvaluationBlock(first, false);
-  }
-  const second = await evaluateReport(topic, revised, evaluatorFn).catch(() => null);
-  if (second) {
-    onProgress(`[EVALUATING] Post-revision verdict: ${label(second)} (${second.score}/10)`);
-    return revised + formatEvaluationBlock(second, true);
-  }
-  return revised + formatEvaluationBlock(first, true);
+  return current + formatEvaluationBlock(ev, revisedAny);
 }
 
 /**
@@ -2128,7 +2146,8 @@ You have ${stageBriefs.length} research briefs from a staged investigation, each
 Write ONE long, comprehensive, decision-useful report — the kind a reader pays for because it saves them weeks. Depth and structure matter as much as accuracy.
 
 STRUCTURE — adapt it to the subject; do NOT use a rigid template:
-- Open with a titled report and a strong 1–2 paragraph executive overview that frames the whole finding (no "Abstract:" label — write it as authoritative prose).
+- Do NOT write a top-level title / H1 (no "# Professional Report: …", no "Report on …") — the document already has a title, and a second one renders as an ugly double header. Start directly with the body.
+- Open with a strong 1–2 paragraph executive overview that frames the whole finding (no "Abstract:" label — write it as authoritative prose).
 - Organise the body into 4–8 sections with DESCRIPTIVE, topic-specific headings that name the actual finding (e.g. "Demand and Pain Points", "Willingness to Pay", "Competitive Landscape") — NOT generic labels like "Introduction / Section 1 / Discussion". Cover every sub-question, but through headings that fit the material:
 ${subQuestions.map((q, i) => `   ${i + 1}. ${q}`).join('\n')}
 - Use ### sub-headings within sections to break up long analysis.
@@ -2430,7 +2449,7 @@ async function runDeeperResearch(
     const fallbackSys =
       `You are a senior research analyst writing the definitive report on: "${topic}", using ONLY the excerpts below.\n\n` +
       `Write ONE long, comprehensive, decision-useful report:\n` +
-      `- Open with a titled report and a strong 1–2 paragraph executive overview (authoritative prose, no "Abstract:" label).\n` +
+      `- Do NOT write a top-level title / H1 (the document already has one — a second renders as a double header). Start directly with a strong 1–2 paragraph executive overview (authoritative prose, no "Abstract:" label).\n` +
       `- Organise into 4–8 sections with DESCRIPTIVE, topic-specific headings that name the actual finding — not generic "Introduction / Discussion". Cover every sub-question:\n${subQuestions.map(q => `   - ${q}`).join('\n')}\n` +
       `- Whenever the excerpts have comparable or quantitative data (pricing, competitors, features, funding, metrics, options with trade-offs), present it as a Markdown table; use a ranked table/numbered hierarchy when findings have a natural priority.\n` +
       `- Match register to the subject (analyst report for market/product questions with pricing + competitor tables and a recommendation; technical review for scientific ones).\n` +

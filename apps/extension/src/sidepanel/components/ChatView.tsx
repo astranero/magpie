@@ -457,34 +457,28 @@ const MessageBody: React.FC<MessageBodyProps> = React.memo(({ text: rawText, com
           <div className="mt-3 pt-2 border-t border-border/60">
             {/* Sources section label — text-xs floor for legibility */}
             <div className="text-xs font-medium text-muted-foreground mb-1.5">Sources</div>
-            <div className="space-y-2">
-              {groups.map(group => (
-                <div key={group.docId}>
-                  <div className="text-xs font-mono font-bold text-foreground/80 mb-0.5">{group.docTitle}</div>
-                  {/* pl-2 indent without side-stripe border */}
-                  <div className="space-y-0.5 pl-2">
-                    {group.entries.map(({ idx, anchor, cite }) => {
-                      // Show a short preview of the chunk text to distinguish entries
-                      const preview = cite.chunkText
-                        ? cite.chunkText.replace(/\s+/g, ' ').slice(0, 80) + (cite.chunkText.length > 80 ? '…' : '')
-                        : cite.heading && cite.heading !== 'Document' ? cite.heading : 'View source';
-                      return (
-                        <div key={anchor} className="flex items-start gap-1.5 text-[10px] font-mono text-muted-foreground">
-                          <span className="font-bold text-primary shrink-0 mt-px">[{idx + 1}]</span>
-                          <button
-                            onClick={() => cite.docId && onOpenDocument?.(cite.docId, anchor)}
-                            className="text-left cursor-pointer bg-transparent border-none p-0 hover:text-primary hover:underline transition-colors leading-snug truncate max-w-[280px]"
-                            title={`${preview}\n\nClick to view highlighted source`}
-                          >
-                            {preview}
-                          </button>
-                        </div>
-                      );
-                    })}
-                  </div>
-                </div>
-              ))}
-            </div>
+            {/* One clean line per source: its citation number(s) + title link.
+                (Per-chunk excerpt previews were noisy on long research reports.) */}
+            <ol className="space-y-1 list-none p-0 m-0">
+              {groups.map(group => {
+                const nums = group.entries.map(e => e.idx + 1);
+                const firstAnchor = group.entries[0].anchor;
+                return (
+                  <li key={group.docId} className="flex items-start gap-1.5 text-[11px] text-muted-foreground">
+                    <span className="font-semibold text-primary shrink-0 tabular-nums">
+                      {nums.map(n => `[${n}]`).join('')}
+                    </span>
+                    <button
+                      onClick={() => group.docId && onOpenDocument?.(group.docId, firstAnchor)}
+                      className="text-left cursor-pointer bg-transparent border-none p-0 hover:text-primary hover:underline transition-colors leading-snug truncate max-w-[300px]"
+                      title="Click to view source"
+                    >
+                      {group.docTitle}
+                    </button>
+                  </li>
+                );
+              })}
+            </ol>
           </div>
         );
       })()}

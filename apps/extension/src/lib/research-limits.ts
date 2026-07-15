@@ -35,8 +35,8 @@ export interface ResearchLimits {
 
 export const RESEARCH_LIMITS: Record<ResearchDepth, ResearchLimits> = {
   standard:  { urlsPerQuery: 6,  webQueries: 5, s2Limit: 8,  hfLimit: 8,  crossrefRows: 0,  newsMax: 6,  chunksPerAngle: 15, chunkPoolCap: 120, quickChunks: 40, rounds: 2, totalSourcesCap: 40  },
-  deep:      { urlsPerQuery: 10, webQueries: 7, s2Limit: 20, hfLimit: 15, crossrefRows: 10, newsMax: 10, chunksPerAngle: 20, chunkPoolCap: 160, quickChunks: 60, rounds: 4, totalSourcesCap: 80  },
-  exhaustive:{ urlsPerQuery: 12, webQueries: 8, s2Limit: 30, hfLimit: 20, crossrefRows: 20, newsMax: 12, chunksPerAngle: 25, chunkPoolCap: 200, quickChunks: 80, rounds: 6, totalSourcesCap: 120 },
+  deep:      { urlsPerQuery: 10, webQueries: 7, s2Limit: 20, hfLimit: 15, crossrefRows: 10, newsMax: 10, chunksPerAngle: 20, chunkPoolCap: 160, quickChunks: 60, rounds: 6, totalSourcesCap: 120 },
+  exhaustive:{ urlsPerQuery: 12, webQueries: 8, s2Limit: 30, hfLimit: 20, crossrefRows: 20, newsMax: 12, chunksPerAngle: 25, chunkPoolCap: 240, quickChunks: 80, rounds: 8, totalSourcesCap: 160 },
 };
 
 export const DEFAULT_CONTEXT_TOKENS = 32768;
