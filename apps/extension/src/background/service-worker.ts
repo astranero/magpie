@@ -191,11 +191,28 @@ chrome.runtime.onInstalled.addListener(async () => {
           urlFilter: '|http://127.0.0.1:11434/*',
           resourceTypes: ['xmlhttprequest']
         }
+      },
+      {
+        id: 3,
+        priority: 1,
+        action: {
+          type: 'modifyHeaders',
+          requestHeaders: [
+            { header: 'Origin', operation: 'remove' },
+            { header: 'Sec-Ch-Ua', operation: 'remove' },
+            { header: 'User-Agent', operation: 'set', value: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36' }
+          ]
+        },
+        condition: {
+          urlFilter: '*',
+          initiatorDomains: [chrome.runtime.id],
+          resourceTypes: ['xmlhttprequest']
+        }
       }
     ];
 
     await chrome.declarativeNetRequest.updateDynamicRules({
-      removeRuleIds: [1, 2],
+      removeRuleIds: [1, 2, 3],
       addRules: rules as any
     });
   }
@@ -317,6 +334,69 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
 // Message Router
 // ─────────────────────────────────────────────
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+  if (request.action === 'toggle_sidepanel') {
+    chrome.storage.local.get(['sidePanelOpen'], (res) => {
+      const isOpen = !!res.sidePanelOpen;
+      if (isOpen) {
+        chrome.runtime.sendMessage({ action: 'close_sidepanel' });
+      } else {
+        if (sender.tab && sender.tab.id) {
+          chrome.sidePanel.open({ tabId: sender.tab.id })
+            .then(() => sendResponse({ success: true }))
+            .catch((err) => sendResponse({ success: false, error: String(err) }));
+        } else {
+          chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+            const activeTab = tabs[0];
+            if (activeTab?.id) {
+              chrome.sidePanel.open({ tabId: activeTab.id })
+                .then(() => sendResponse({ success: true }))
+                .catch((err) => sendResponse({ success: false, error: String(err) }));
+            } else {
+              sendResponse({ success: false, error: 'No active tab found' });
+            }
+          });
+        }
+      }
+    });
+    return true;
+  }
+
+  if (request.action === 'capture_current_page_via_hotkey') {
+    chrome.storage.local.get(['activeProjectId'], (res) => {
+      const projectId = res.activeProjectId || null;
+      chrome.tabs.query({ active: true, lastFocusedWindow: true }, (tabs) => {
+        const tab = tabs[0];
+        if (!tab?.id || !tab.url) {
+          if (sender.tab && sender.tab.id) {
+            chrome.tabs.sendMessage(sender.tab.id, { 
+              action: 'SHOW_ONPAGE_TOAST', 
+              message: '✕ Capture failed: No active tab found', 
+              isError: true 
+            }).catch(() => {});
+          }
+          return;
+        }
+
+        captureTab(tab, projectId)
+          .then(() => {
+            chrome.tabs.sendMessage(tab.id!, { 
+              action: 'SHOW_ONPAGE_TOAST', 
+              message: `✓ Saved to Library${projectId ? ' (Workspace)' : ''}` 
+            }).catch(() => {});
+            chrome.runtime.sendMessage({ action: 'DOCUMENT_IMPORTED' }).catch(() => {});
+          })
+          .catch((err: any) => {
+            chrome.tabs.sendMessage(tab.id!, { 
+              action: 'SHOW_ONPAGE_TOAST', 
+              message: `✕ Capture failed: ${err.message || err}`, 
+              isError: true 
+            }).catch(() => {});
+          });
+      });
+    });
+    return true;
+  }
+
   const handler = messageHandlers[request.action];
   if (handler) {
     handler(request, sender)

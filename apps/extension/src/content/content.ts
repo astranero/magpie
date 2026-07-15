@@ -292,7 +292,11 @@ async function scrapePage(): Promise<{
       // Read the live player response via the background script (MAIN world)
       const ytResponse = await new Promise<any>((resolve) => {
         chrome.runtime.sendMessage({ action: 'GET_MAIN_WORLD_YT_RESPONSE' }, (response) => {
-          resolve(response?.data || null);
+          if (chrome.runtime.lastError) {
+            resolve(null);
+          } else {
+            resolve(response?.data || null);
+          }
         });
       });
 
@@ -383,6 +387,34 @@ async function scrapePage(): Promise<{
     }
   }
 
+  // Site navigation — ALWAYS harvested, regardless of how link-rich the
+  // article is. Readability strips nav/header/footer, so on a link-rich page
+  // the <15 rescue above never fires and the site's own nav (Pricing, Docs,
+  // Plans…) silently vanishes — which is exactly where chat's link-following
+  // needs to hop when the user asks "what does a credit cost" on a page that
+  // links to Pricing (observed live: the pricing link never reached the
+  // selector). Compact, deduped, capped; ephemeral page-context only.
+  {
+    const navSeen = new Set<string>(Array.from(markdown.matchAll(/\]\((https?:\/\/[^)\s]+)\)/g)).map(m => m[1]));
+    const navItems: string[] = [];
+    for (const a of Array.from(document.querySelectorAll<HTMLAnchorElement>(
+      'nav a[href], header a[href], footer a[href], [role="navigation"] a[href]'
+    ))) {
+      const text = (a.textContent || '').replace(/\s+/g, ' ').trim();
+      if (text.length < 2 || text.length > 60) continue;
+      let abs: string;
+      try { abs = new URL(a.getAttribute('href')!, window.location.href).href; } catch { continue; }
+      if (!/^https?:\/\//.test(abs) || abs.split('#')[0] === url.split('#')[0]) continue;
+      if (navSeen.has(abs)) continue;
+      navSeen.add(abs);
+      navItems.push(`- [${text.replace(/[\[\]]/g, '')}](${abs})`);
+      if (navItems.length >= 40) break;
+    }
+    if (navItems.length > 0) {
+      markdown += `\n\n## Site navigation\n\n${navItems.join('\n')}`;
+    }
+  }
+
   // Comments + build info: Readability keeps only the main article, dropping
   // comment threads, asides, and footers — so a question answerable from the
   // discussion or a colophon ("built with X") comes up empty. Recover them
@@ -431,4 +463,117 @@ async function scrapePage(): Promise<{
   const wordCount = markdown.split(/\s+/).filter(w => w.length > 0).length;
 
   return { title, url, favicon, markdown, wordCount, kind: 'web' as const, author: (article as any)?.byline || undefined };
+}
+
+// ─────────────────────────────────────────────
+// Keyboard Shortcuts Listener for Sidepanel & Capture
+// ─────────────────────────────────────────────
+window.addEventListener('keydown', (e) => {
+  const code = e.code;
+  if (code !== 'KeyM' && code !== 'KeyC') return;
+
+  const activeEl = document.activeElement;
+  const isTyping = activeEl && (
+    activeEl.tagName === 'INPUT' ||
+    activeEl.tagName === 'TEXTAREA' ||
+    activeEl.tagName === 'SELECT' ||
+    activeEl.hasAttribute('contenteditable') ||
+    (activeEl as HTMLElement).isContentEditable
+  );
+  if (isTyping) return;
+
+  // Toggle Sidepanel: Alt + M (Option + M on Mac)
+  if (code === 'KeyM' && e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey) {
+    e.preventDefault();
+    e.stopPropagation();
+    chrome.runtime.sendMessage({ action: 'toggle_sidepanel' }).catch(() => {});
+  }
+
+  // Instant Capture: Alt + C (Option + C on Mac)
+  if (code === 'KeyC' && e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey) {
+    e.preventDefault();
+    e.stopPropagation();
+    chrome.runtime.sendMessage({ action: 'capture_current_page_via_hotkey' }).catch(() => {});
+  }
+}, true);
+
+// ─────────────────────────────────────────────
+// On-Page Toast Notification System
+// ─────────────────────────────────────────────
+chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
+  if (request.action === 'SHOW_ONPAGE_TOAST') {
+    showOnPageToast(request.message, request.isError);
+    sendResponse({ success: true });
+    return false;
+  }
+  return false;
+});
+
+function showOnPageToast(message: string, isError = false) {
+  let container = document.getElementById('magpie-toast-container');
+  if (!container) {
+    container = document.createElement('div');
+    container.id = 'magpie-toast-container';
+    container.style.position = 'fixed';
+    container.style.bottom = '24px';
+    container.style.right = '24px';
+    container.style.zIndex = '2147483647';
+    container.style.display = 'flex';
+    container.style.flexDirection = 'column';
+    container.style.gap = '8px';
+    container.style.pointerEvents = 'none';
+    document.body.appendChild(container);
+  }
+
+  const toast = document.createElement('div');
+  toast.style.display = 'flex';
+  toast.style.alignItems = 'center';
+  toast.style.gap = '10px';
+  toast.style.padding = '10px 14px';
+  toast.style.borderRadius = '10px';
+  toast.style.backgroundColor = isError ? 'rgba(220, 38, 38, 0.95)' : 'rgba(15, 23, 42, 0.95)';
+  toast.style.color = '#ffffff';
+  toast.style.fontSize = '12px';
+  toast.style.fontWeight = '600';
+  toast.style.fontFamily = '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif';
+  toast.style.boxShadow = '0 10px 15px -3px rgba(0, 0, 0, 0.15), 0 4px 6px -4px rgba(0, 0, 0, 0.15)';
+  toast.style.border = '1px solid rgba(255, 255, 255, 0.1)';
+  toast.style.transition = 'all 0.3s cubic-bezier(0.16, 1, 0.3, 1)';
+  toast.style.transform = 'translateY(20px)';
+  toast.style.opacity = '0';
+
+  const symbol = document.createElement('span');
+  symbol.textContent = isError ? '✕' : '✓';
+  symbol.style.display = 'inline-flex';
+  symbol.style.alignItems = 'center';
+  symbol.style.justifyContent = 'center';
+  symbol.style.width = '16px';
+  symbol.style.height = '16px';
+  symbol.style.borderRadius = '50%';
+  symbol.style.backgroundColor = isError ? 'rgba(255, 255, 255, 0.2)' : 'rgba(16, 185, 129, 0.2)';
+  symbol.style.color = isError ? '#ffffff' : '#10b981';
+  symbol.style.fontSize = '9px';
+  toast.appendChild(symbol);
+
+  const textNode = document.createElement('span');
+  textNode.textContent = message;
+  toast.appendChild(textNode);
+
+  container.appendChild(toast);
+
+  requestAnimationFrame(() => {
+    toast.style.transform = 'translateY(0)';
+    toast.style.opacity = '1';
+  });
+
+  setTimeout(() => {
+    toast.style.transform = 'translateY(-20px)';
+    toast.style.opacity = '0';
+    setTimeout(() => {
+      toast.remove();
+      if (container && container.childNodes.length === 0) {
+        container.remove();
+      }
+    }, 300);
+  }, 3000);
 }

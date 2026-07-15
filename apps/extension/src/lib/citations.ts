@@ -113,6 +113,22 @@ export async function parseResponseCitations(responseText: string): Promise<Pars
 }
 
 /**
+ * Context compression helper. Removes common filler words/phrases at sentence boundaries
+ * and normalizes whitespace to maximize payload density in LLM prompts.
+ */
+export function compressText(text: string): string {
+  if (!text) return '';
+  return text
+    // Strip common filler phrases at sentence boundaries (start of paragraph or after periods)
+    .replace(/(?:^|(?:\.\s+))\b(furthermore|moreover|consequently|in order to|as a matter of fact|needless to say|without a doubt|it is important to note that|it should be noted that|as previously mentioned|as stated above)\b,?\s*/gi, (match) => {
+      const hasPeriod = match.startsWith('.');
+      return hasPeriod ? '. ' : '';
+    })
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/**
  * Build citation-anchored context from chunks for the AI prompt.
  * Each chunk's text is prefixed with its anchor marker.
  */
@@ -134,7 +150,8 @@ export function buildCitationContext(
       currentDocId = chunk.docId;
     }
 
-    context += `<c>${chunk.anchorId}</c> ${chunk.text}\n\n`;
+    const compressed = compressText(chunk.text);
+    context += `<c>${chunk.anchorId}</c> ${compressed}\n\n`;
   }
 
   return context;

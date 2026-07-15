@@ -4,10 +4,11 @@ import remarkGfm from 'remark-gfm';
 import remarkMath from 'remark-math';
 import rehypeKatex from 'rehype-katex';
 import { LocalDocument, ChatMessage, ResearchPlan, ResolvedCitation } from '../types';
-import { Send, StopCircle, Sparkles, ChevronDown, ChevronUp, Loader2, Microscope, Search } from 'lucide-react';
+import { Send, StopCircle, Sparkles, ChevronDown, ChevronUp, Loader2, Microscope, Search, User, Copy, Check, Paperclip, FileText } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { paletteEntries, SlashCommand } from '../../lib/commands';
 import { ErrorBoundary } from './ErrorBoundary';
+import { MagpieEmptyIllustration } from './BrandMark';
 
 const CITATION_REGEX = /\[([a-z]\w{1,8}\.s\d+\.p\d+(?:\.\d+)?)\]/g;
 
@@ -50,6 +51,15 @@ interface ChatViewProps {
 
   /** Open an external http(s) link as an in-panel preview. */
   onOpenExternalLink?: (url: string) => void;
+
+  customModel?: string;
+  setCustomModel?: (val: string) => void;
+  customModels?: string[];
+  fetchCustomModels?: () => Promise<void>;
+  customUrl?: string;
+  toggleDoc?: (docId: string, enabled: boolean) => void;
+  onUploadMarkdown?: () => void;
+  onUploadPdf?: () => void;
 }
 
 // ─────────────────────────────────────────────
@@ -513,6 +523,269 @@ const MessageBody: React.FC<MessageBodyProps> = React.memo(({ text: rawText, com
   prev.renderLive === next.renderLive);
 
 // ─────────────────────────────────────────────
+// Copy Message Button Component
+// ─────────────────────────────────────────────
+const CopyButton: React.FC<{ text: string }> = ({ text }) => {
+  const [copied, setCopied] = useState(false);
+
+  const handleCopy = async () => {
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch (e) {
+      console.error(e);
+    }
+  };
+
+  return (
+    <button
+      type="button"
+      onClick={handleCopy}
+      className="inline-flex items-center gap-1 text-[10px] text-muted-foreground hover:text-foreground transition-colors px-1.5 py-0.5 rounded bg-muted/50 border border-border/50 shadow-sm"
+      title="Copy message text"
+    >
+      {copied ? (
+        <>
+          <Check size={10} className="text-emerald-500" />
+          <span className="text-emerald-500 font-medium">Copied</span>
+        </>
+      ) : (
+        <>
+          <Copy size={10} />
+          <span>Copy</span>
+        </>
+      )}
+    </button>
+  );
+};
+
+// ─────────────────────────────────────────────
+// Format Model Name Helper
+// ─────────────────────────────────────────────
+function formatModelName(model: string): string {
+  if (!model) return '';
+  let name = model.split('/').pop() || model;
+  name = name.replace(/:beta|:free|-instruct|-exp|-preview/gi, '');
+  name = name.replace(/-/g, ' ');
+  return name.split(' ').map(word => {
+    if (/^gpt/i.test(word)) return word.toUpperCase();
+    if (/^gemini/i.test(word)) return 'Gemini';
+    if (/^claude/i.test(word)) return 'Claude';
+    if (/^llama/i.test(word)) return 'Llama';
+    if (/^mixtral/i.test(word)) return 'Mixtral';
+    if (/^mistral/i.test(word)) return 'Mistral';
+    return word.charAt(0).toUpperCase() + word.slice(1);
+  }).join(' ');
+}
+
+// ─────────────────────────────────────────────
+// Model Selector Component
+// ─────────────────────────────────────────────
+const ModelSelector: React.FC<{
+  currentModel: string;
+  models: string[];
+  onSelect: (model: string) => void;
+  onFetch: () => Promise<void>;
+  isOpenRouter: boolean;
+}> = ({ currentModel, models, onSelect, onFetch, isOpenRouter }) => {
+  const [isOpen, setIsOpen] = useState(false);
+  const [search, setSearch] = useState('');
+  const [fetching, setFetching] = useState(false);
+  const containerRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const handleOutsideClick = (e: MouseEvent) => {
+      if (containerRef.current && !containerRef.current.contains(e.target as Node)) {
+        setIsOpen(false);
+      }
+    };
+    if (isOpen) {
+      document.addEventListener('mousedown', handleOutsideClick);
+    }
+    return () => document.removeEventListener('mousedown', handleOutsideClick);
+  }, [isOpen]);
+
+  const filteredModels = useMemo(() => {
+    const s = search.toLowerCase().trim();
+    if (!s) return models;
+    return models.filter(m => m.toLowerCase().includes(s));
+  }, [models, search]);
+
+  const triggerRefresh = async () => {
+    setFetching(true);
+    try {
+      await onFetch();
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setFetching(false);
+    }
+  };
+
+  if (!isOpenRouter && models.length === 0) return null;
+
+  return (
+    <div ref={containerRef} className="relative inline-block text-left">
+      <button
+        type="button"
+        onClick={() => setIsOpen(!isOpen)}
+        className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full border border-border bg-card hover:bg-accent text-xs font-semibold text-foreground shadow-sm transition-colors"
+      >
+        <Sparkles size={11} className="text-primary shrink-0" />
+        <span className="truncate max-w-[130px] font-sans text-xs font-semibold">{formatModelName(currentModel) || 'Select model…'}</span>
+        <ChevronDown size={11} className="text-muted-foreground shrink-0" />
+      </button>
+
+      {isOpen && (
+        <div className="absolute bottom-full left-0 mb-1.5 w-60 rounded-xl border border-border bg-popover text-popover-foreground shadow-card p-1.5 z-[100] flex flex-col gap-1.5 animate-in fade-in slide-in-from-bottom-2">
+          {/* Search Input */}
+          <div className="relative flex items-center">
+            <Search size={12} className="absolute left-2.5 text-muted-foreground" />
+            <input
+              type="text"
+              placeholder="Search models…"
+              value={search}
+              onChange={e => setSearch(e.target.value)}
+              className="w-full h-8 pl-8 pr-2.5 text-xs rounded-lg border border-border bg-background placeholder:text-muted-foreground focus:outline-none focus:border-primary/50"
+              autoFocus
+            />
+          </div>
+
+          {/* Models List */}
+          <div className="max-h-48 overflow-y-auto no-scrollbar flex flex-col gap-0.5">
+            {filteredModels.length === 0 ? (
+              <div className="p-3 text-center text-xs text-muted-foreground font-mono">
+                No models found
+              </div>
+            ) : (
+              filteredModels.map(m => (
+                <button
+                  key={m}
+                  type="button"
+                  onClick={() => {
+                    onSelect(m);
+                    setIsOpen(false);
+                  }}
+                  className={`w-full text-left px-2.5 py-1.5 rounded-lg transition-colors flex items-center justify-between gap-1.5 ${
+                    m === currentModel
+                      ? 'bg-primary text-primary-foreground font-semibold'
+                      : 'hover:bg-accent text-foreground'
+                  }`}
+                >
+                  <span className="truncate flex flex-col items-start gap-0.5">
+                    <span className="font-sans font-semibold text-xs leading-none">{formatModelName(m)}</span>
+                    <span className={`font-mono text-[9px] truncate max-w-[170px] ${m === currentModel ? 'text-primary-foreground/75' : 'text-muted-foreground/60'}`}>{m}</span>
+                  </span>
+                  {m === currentModel && <span className="text-[9px] uppercase font-sans shrink-0">Active</span>}
+                </button>
+              ))
+            )}
+          </div>
+
+          {/* Fetch Button for OpenRouter */}
+          {isOpenRouter && (
+            <div className="border-t border-border/60 pt-1.5 mt-0.5">
+              <button
+                type="button"
+                onClick={triggerRefresh}
+                disabled={fetching}
+                className="w-full h-7 text-xs font-medium text-primary hover:bg-primary/5 border border-primary/20 rounded-lg transition-colors flex items-center justify-center gap-1.5"
+              >
+                {fetching ? (
+                  <>
+                    <Loader2 size={11} className="animate-spin" /> Fetching…
+                  </>
+                ) : (
+                  <>
+                    <Sparkles size={11} /> Refresh OpenRouter Models
+                  </>
+                )}
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+};
+
+// ─────────────────────────────────────────────
+// Add Context Dropdown Button (+ Button)
+// ─────────────────────────────────────────────
+const AddContextButton: React.FC<{
+  onUploadMarkdown: () => void;
+  onUploadPdf: () => void;
+}> = ({ onUploadMarkdown, onUploadPdf }) => {
+  const [isOpen, setIsOpen] = useState(false);
+  const containerRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const handleOutsideClick = (e: MouseEvent) => {
+      if (containerRef.current && !containerRef.current.contains(e.target as Node)) {
+        setIsOpen(false);
+      }
+    };
+    if (isOpen) {
+      document.addEventListener('mousedown', handleOutsideClick);
+    }
+    return () => document.removeEventListener('mousedown', handleOutsideClick);
+  }, [isOpen]);
+
+  return (
+    <div ref={containerRef} className="relative shrink-0 self-center pl-2">
+      <button
+        type="button"
+        onClick={() => setIsOpen(!isOpen)}
+        className="h-8 w-8 flex items-center justify-center rounded-lg border border-border hover:bg-accent text-muted-foreground hover:text-foreground transition-all duration-200 shadow-sm focus:outline-none"
+        title="Add files"
+        aria-label="Add files"
+      >
+        <Paperclip size={14} className={`transition-transform duration-200 ${isOpen ? 'rotate-45 text-primary' : ''}`} />
+      </button>
+
+      {isOpen && (
+        <div className="absolute bottom-full left-0 mb-1.5 w-64 rounded-xl border border-border bg-popover text-popover-foreground shadow-card p-1.5 z-[100] flex flex-col gap-1 animate-in fade-in slide-in-from-bottom-2">
+          <button
+            type="button"
+            onClick={() => {
+              if (onUploadPdf) onUploadPdf();
+              setIsOpen(false);
+            }}
+            className="w-full text-left p-2 rounded-lg hover:bg-accent text-foreground flex items-start gap-3 transition-colors group"
+          >
+            <div className="h-8 w-8 rounded-lg bg-red-500/10 text-red-500 flex items-center justify-center shrink-0 group-hover:bg-red-500/20 transition-colors">
+              <FileText size={16} />
+            </div>
+            <div className="min-w-0 flex-1">
+              <div className="text-xs font-semibold">Upload PDF Document</div>
+              <div className="text-[10px] text-muted-foreground mt-0.5 leading-normal">Import academic papers, reports, or articles.</div>
+            </div>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => {
+              if (onUploadMarkdown) onUploadMarkdown();
+              setIsOpen(false);
+            }}
+            className="w-full text-left p-2 rounded-lg hover:bg-accent text-foreground flex items-start gap-3 transition-colors group"
+          >
+            <div className="h-8 w-8 rounded-lg bg-indigo-500/10 text-indigo-500 flex items-center justify-center shrink-0 group-hover:bg-indigo-500/20 transition-colors">
+              <FileText size={16} />
+            </div>
+            <div className="min-w-0 flex-1">
+              <div className="text-xs font-semibold">Upload Markdown</div>
+              <div className="text-[10px] text-muted-foreground mt-0.5 leading-normal">Import structured notes, outlines, or text.</div>
+            </div>
+          </button>
+        </div>
+      )}
+    </div>
+  );
+};
+
+// ─────────────────────────────────────────────
 // Chat view
 // ─────────────────────────────────────────────
 
@@ -542,7 +815,14 @@ export const ChatView: React.FC<ChatViewProps> = ({
   llmEndpointLocal = false,
   onStartPlan,
   onCancelPlan,
-  onOpenExternalLink
+  onOpenExternalLink,
+  customModel = '',
+  setCustomModel,
+  customModels = [],
+  fetchCustomModels,
+  customUrl = '',
+  onUploadMarkdown,
+  onUploadPdf
 }) => {
   const msgEnd = useRef<HTMLDivElement>(null);
   const scrollBox = useRef<HTMLDivElement>(null);
@@ -570,6 +850,13 @@ export const ChatView: React.FC<ChatViewProps> = ({
       msgEnd.current?.scrollIntoView({ behavior: 'instant' });
     }
   }, [isActive]);
+
+  // Automatically fetch custom models on mount or when the endpoint url changes
+  useEffect(() => {
+    if (fetchCustomModels) {
+      fetchCustomModels().catch(() => {});
+    }
+  }, [customUrl, fetchCustomModels]);
 
   // Register imperative scrollToBottom so parent can call it on nav clicks
   useEffect(() => {
@@ -716,8 +1003,9 @@ export const ChatView: React.FC<ChatViewProps> = ({
       >
         {/* Command hint card — shown in empty state to surface slash commands */}
         {isEmpty && (
-          <div className="flex flex-col items-center gap-1.5 pt-8 pb-3 text-center">
-            <div className="font-display text-xl text-foreground">Ask your treasure trove.</div>
+          <div className="flex flex-col items-center gap-2 pt-8 pb-3 text-center">
+            <MagpieEmptyIllustration size={72} className="text-muted-foreground mb-2" />
+            <div className="font-display text-xl text-foreground">Ask your treasure trove</div>
             <div className="w-8 border-t-2 border-[hsl(var(--rule)/0.6)]" aria-hidden="true" />
             <div className="text-xs text-muted-foreground max-w-[250px] leading-relaxed">
               Everything you've collected is searchable. Answers cite their sources.
@@ -768,23 +1056,49 @@ export const ChatView: React.FC<ChatViewProps> = ({
             </div>
           </div>
         ) : (
-          <div key={m.id} className={`flex flex-col ${m.role === 'user' ? 'items-end' : 'items-start'}`}>
+          <div key={m.id} className={`flex flex-col w-full ${m.role === 'user' ? 'items-end' : 'items-start'} gap-1`}>
+            {/* Sender Header */}
+            <div className="flex items-center gap-1.5 px-1 text-[11px] font-semibold text-muted-foreground/80">
+              {m.role === 'user' ? (
+                <>
+                  <span>You</span>
+                  <User size={10} className="text-muted-foreground/60" />
+                </>
+              ) : m.role === 'system' ? (
+                <>
+                  <Loader2 size={10} className="text-muted-foreground/60 animate-spin" />
+                  <span>System Run</span>
+                </>
+              ) : (
+                <>
+                  <Sparkles size={10} className="text-primary shrink-0" />
+                  <span>Magpie Assistant</span>
+                  {customModel && (
+                    <span className="font-mono text-[9px] px-1.5 py-0.5 rounded bg-muted border border-border text-muted-foreground">
+                      {customModel}
+                    </span>
+                  )}
+                </>
+              )}
+            </div>
+
             {m.queued && (
               <span className="mb-1 inline-flex items-center gap-1 rounded-full bg-highlight/15 text-amber-700 dark:text-highlight px-2 py-0.5 text-[10px] font-medium">
                 <span className="w-1.5 h-1.5 rounded-full bg-current animate-pulse motion-reduce:animate-none" aria-hidden="true" />
                 Queued — runs after research
               </span>
             )}
+
             <div
               // contain:layout — a growing/streaming bubble's internal reflow
               // stays scoped to this subtree instead of forcing a whole-document
               // layout pass on every token (documented streaming-chat CLS risk).
-              className={`[contain:layout] max-w-[85%] rounded-xl border px-4 py-2.5 text-sm shadow-card ${
+              className={`[contain:layout] w-full ${m.role === 'user' ? 'max-w-[85%]' : 'max-w-[92%]'} rounded-2xl border px-4 py-3 text-sm shadow-sm transition-all leading-relaxed ${
                 m.role === 'user'
-                  ? `bg-primary text-primary-foreground border-primary rounded-br-md ${m.queued ? 'opacity-70' : ''}`
+                  ? `bg-primary border-primary text-primary-foreground rounded-tr-sm ${m.queued ? 'opacity-70' : ''}`
                   : m.role === 'system'
-                  ? 'bg-muted/40 border-border/70 text-muted-foreground w-full'
-                  : 'bg-card border-border/80 text-card-foreground rounded-bl-md'
+                  ? 'bg-muted/40 border-border/60 text-muted-foreground w-full rounded-lg'
+                  : 'bg-card border-border/80 text-card-foreground rounded-tl-sm'
               }`}
             >
               {/* One malformed message (broken markdown/KaTeX) must not white-
@@ -796,11 +1110,18 @@ export const ChatView: React.FC<ChatViewProps> = ({
                   </CollapsibleMessage>
                 ) : (
                   <CollapsibleMessage text={m.text}>
-                    <div className="whitespace-pre-wrap font-sans">{m.text}</div>
+                    <div className="whitespace-pre-wrap font-sans break-words">{m.text}</div>
                   </CollapsibleMessage>
                 )}
               </ErrorBoundary>
             </div>
+
+            {/* Action row for assistant messages */}
+            {m.role === 'assistant' && !m.streaming && (
+              <div className="flex items-center gap-2 px-1 mt-0.5 opacity-0 hover:opacity-100 focus-within:opacity-100 transition-opacity">
+                <CopyButton text={m.text} />
+              </div>
+            )}
           </div>
           )}
           </React.Fragment>
@@ -825,7 +1146,23 @@ export const ChatView: React.FC<ChatViewProps> = ({
       </div>
 
       {/* Input */}
-      <div className="p-3 bg-background border-t border-border shrink-0">
+      <div className="p-3 bg-background border-t border-border shrink-0 flex flex-col gap-2">
+        {/* Model selection toolbar */}
+        {(customUrl.includes('openrouter.ai') || customModels.length > 0) && (
+          <div className="flex items-center justify-between px-1">
+            <ModelSelector
+              currentModel={customModel}
+              models={customModels}
+              onSelect={setCustomModel!}
+              onFetch={fetchCustomModels!}
+              isOpenRouter={customUrl.includes('openrouter.ai')}
+            />
+            <span className="text-[10px] text-muted-foreground font-mono">
+              {documents.filter(d => d.enabled !== false).length} active source(s)
+            </span>
+          </div>
+        )}
+
         <div className="relative flex items-end w-full rounded-xl border border-input bg-card shadow-card focus-within:border-primary/70 focus-within:ring-2 focus-within:ring-primary/15 transition-all">
           {input.startsWith('/') && !input.includes(' ') && (() => {
             const matches = paletteEntries(input, customCommands);
@@ -852,10 +1189,17 @@ export const ChatView: React.FC<ChatViewProps> = ({
               </div>
             );
           })()}
+
+          {/* Add Context Button (+ Button) */}
+          <AddContextButton
+            onUploadMarkdown={onUploadMarkdown!}
+            onUploadPdf={onUploadPdf!}
+          />
+
           <textarea
             id="chat-input"
             rows={1}
-            className="flex w-full max-h-40 resize-none bg-transparent px-3 py-2.5 text-sm leading-relaxed placeholder:text-muted-foreground focus:outline-none disabled:cursor-not-allowed disabled:opacity-50 font-sans no-scrollbar"
+            className="flex-1 w-full max-h-40 resize-none bg-transparent px-3 py-2.5 text-sm leading-relaxed placeholder:text-muted-foreground focus:outline-none disabled:cursor-not-allowed disabled:opacity-50 font-sans no-scrollbar"
             placeholder={hasDraftPlan
               ? 'Refine the plan, or type "start"…'
               : 'Ask a question, or / for commands…'}
@@ -881,7 +1225,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
             autoComplete="off"
             aria-label="Chat input"
           />
-          <div className="pr-1 flex shrink-0">
+          <div className="pr-1.5 pb-1.5 flex shrink-0">
             {generating[activeChatId] ? (
               <Button
                 variant="ghost"

@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback, Fragment } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { get, set } from 'idb-keyval';
 
 // Collision-free message ids. `Date.now()` and `Date.now()+1` for a paired
@@ -19,17 +19,19 @@ const sanitizeSegment = (name: string): string =>
     .replace(/^\.+/, '').replace(/\.+$/, '')
     .trim()
     .slice(0, 100);
-import { Edit2, Trash2, FileText, Library, MessageSquare, SlidersHorizontal } from 'lucide-react';
+import { FileText } from 'lucide-react';
 import { LocalDocument, Project, Chat, ChatMessage, ResearchPlan, ResolvedCitation, TabInfo, View } from './types';
 import { LoreView } from './components/LoreView';
 import { LinkPreview, LinkPreviewState } from './components/LinkPreview';
+import { Header } from './components/layout/Header';
+import { Navbar } from './components/layout/Navbar';
 
 // Brand import moved to top level, removing here due to TS import rule
 import { ChatView } from './components/ChatView';
 import { SettingsView } from './components/SettingsView';
 import { DocumentView } from './components/DocumentView';
 import { Button } from '@/components/ui/button';
-import { Select, SelectContent, SelectItem, SelectSeparator, SelectTrigger, SelectValue } from '@/components/ui/select';
+
 import { findPromptCommand, buildHelpText, loadCustomSkills, SlashCommand } from '../lib/commands';
 import { contentHasTag } from '../lib/frontmatter';
 import { timeAgo } from '../lib/format';
@@ -41,7 +43,11 @@ function msg(action: string, data?: Record<string, unknown>): Promise<Record<str
   return new Promise((resolve) => {
     if (typeof chrome !== 'undefined' && chrome.runtime) {
       chrome.runtime.sendMessage({ action, ...data }, (res) => {
-        resolve(res || { success: false, error: 'No response' });
+        if (chrome.runtime.lastError) {
+          resolve({ success: false, error: chrome.runtime.lastError.message || 'Service Worker connection error' });
+        } else {
+          resolve(res || { success: false, error: 'No response' });
+        }
       });
     } else {
       resolve({ success: false, error: 'Chrome API not available' });
@@ -80,7 +86,31 @@ export default function App() {
     }
   }, [view]);
 
-// Brand import moved to top level, removing here due to TS import rule
+  // Manage sidePanelOpen flag in chrome.storage.local for keyboard shortcut toggle
+  useEffect(() => {
+    if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
+      chrome.storage.local.set({ sidePanelOpen: true });
+    }
+
+    const handleMessage = (message: any) => {
+      if (message.action === 'close_sidepanel') {
+        window.close();
+      }
+    };
+    if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.onMessage) {
+      chrome.runtime.onMessage.addListener(handleMessage);
+    }
+
+    return () => {
+      if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
+        chrome.storage.local.set({ sidePanelOpen: false });
+      }
+      if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.onMessage) {
+        chrome.runtime.onMessage.removeListener(handleMessage);
+      }
+    };
+  }, []);
+
   const [tabInfo, setTabInfo] = useState<TabInfo | null>(null);
 
   // Capture
@@ -103,6 +133,7 @@ export default function App() {
   const [docCount, setDocCount] = useState(0);
   const [activeDocumentId, setActiveDocumentId] = useState<string | null>(null);
   const [highlightAnchorId, setHighlightAnchorId] = useState<string | null>(null);
+  const [loreSearchQuery, setLoreSearchQuery] = useState('');
 
   // Settings
   const [customUrl, setCustomUrl] = useState('https://openrouter.ai/api/v1');
@@ -1799,67 +1830,19 @@ export default function App() {
   return (
     <div className="h-screen w-full flex flex-col bg-background text-foreground overflow-hidden">
       
-      {/* ── Functional Header (Topic) ── */}
-      {view !== 'settings' && (
-        <header className="card-rule flex items-center px-3.5 py-2.5 bg-card gap-2 shrink-0">
-          {editingProjectId ? (
-            <input
-              autoFocus
-              type="text"
-              className="flex h-8 w-full rounded-lg border border-primary/50 bg-background px-2.5 text-sm font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/15"
-              defaultValue={projects.find(p => p.id === activeProjectId)?.title || ''}
-              onBlur={(e) => handleProjectRenameSubmit(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter') handleProjectRenameSubmit(e.currentTarget.value);
-                if (e.key === 'Escape') setEditingProjectId('');
-              }}
-            />
-          ) : (
-            <div className="flex items-center flex-1 min-w-0 gap-0.5 rounded-lg hover:bg-accent/70 transition-colors">
-              <Select
-                value={activeProjectId || ''}
-                onValueChange={(val) => {
-                  if (!val) return;
-                  if (val === 'new') createNewProject();
-                  else setActiveProjectId(val as string);
-                }}
-              >
-                <SelectTrigger className="h-8 border-none shadow-none bg-transparent hover:bg-transparent focus:ring-0 p-0 px-2 truncate w-full text-sm font-semibold">
-                  <SelectValue placeholder="Select a workspace…">
-                    {projects.find(p => p.id === activeProjectId)?.title || 'Select a workspace…'}
-                  </SelectValue>
-                </SelectTrigger>
-                <SelectContent className="border border-border rounded-lg shadow-card">
-                  {projects.map(p => (
-                    <SelectItem key={p.id} value={p.id} className="rounded-md text-sm">{p.title}</SelectItem>
-                  ))}
-                  <SelectSeparator className="bg-border" />
-                  <SelectItem value="new" className="text-primary font-medium rounded-md text-sm">+ New workspace</SelectItem>
-                </SelectContent>
-              </Select>
-              {activeProjectId && (
-                <button className="text-muted-foreground hover:text-primary shrink-0 p-2" onClick={() => setEditingProjectId(activeProjectId)} title="Rename Workspace">
-                  <Edit2 size={14} />
-                </button>
-              )}
-              {activeProjectId && projects.length > 1 && (
-                <button
-                  className={`shrink-0 px-2 py-1 text-xs font-medium rounded-md transition-colors ${
-                    confirmDeleteProjectId === activeProjectId
-                      ? 'text-destructive bg-destructive/10 hover:bg-destructive hover:text-destructive-foreground'
-                      : 'text-muted-foreground hover:text-destructive'
-                  }`}
-                  onClick={deleteProject}
-                  title={confirmDeleteProjectId === activeProjectId ? 'Click again to confirm delete' : 'Delete workspace'}
-                  aria-label={confirmDeleteProjectId === activeProjectId ? 'Confirm workspace deletion' : 'Delete workspace'}
-                >
-                  {confirmDeleteProjectId === activeProjectId ? 'Delete?' : <Trash2 size={14} />}
-                </button>
-              )}
-            </div>
-          )}
-        </header>
-      )}
+      {/* ── Functional Header (Workspace Navigation) ── */}
+      <Header
+        view={view}
+        editingProjectId={editingProjectId}
+        activeProjectId={activeProjectId}
+        projects={projects}
+        confirmDeleteProjectId={confirmDeleteProjectId}
+        setEditingProjectId={setEditingProjectId}
+        setActiveProjectId={setActiveProjectId}
+        handleProjectRenameSubmit={handleProjectRenameSubmit}
+        createNewProject={createNewProject}
+        deleteProject={deleteProject}
+      />
 
       {/* ── Main Content Area ── */}
       <main className="flex-1 flex flex-col overflow-hidden relative bg-background border-b border-border">
@@ -1911,6 +1894,8 @@ export default function App() {
               importImageFiles={importImageFiles}
               timeAgo={timeAgo}
               onDocumentClick={(id, anchorId) => openDocById(id, anchorId, 'lore')}
+              searchQuery={loreSearchQuery}
+              setSearchQuery={setLoreSearchQuery}
             />
           </div>
 
@@ -1927,6 +1912,10 @@ export default function App() {
               onOpenExternalLink={openLinkInTab}
               resolveCitations={resolveCitations}
               onOpenDocument={(docId, anchorId) => openDocById(docId, anchorId)}
+              onTagClick={(tag) => {
+                setLoreSearchQuery('tag:' + tag);
+                setView('lore');
+              }}
             />
           )}
 
@@ -1957,8 +1946,30 @@ export default function App() {
               onStartPlan={(msgId, plan) => executeDeepResearch(msgId, plan)}
               onCancelPlan={cancelResearchPlan}
               onOpenExternalLink={openLinkInTab}
-
               onOpenDocument={(docId, anchorId) => openDocById(docId, anchorId, 'chat')}
+              customModel={customModel}
+              setCustomModel={(val) => {
+                setCustomModel(val);
+                if (typeof chrome !== 'undefined' && chrome.storage) {
+                  chrome.storage.local.set({ customModel: val });
+                }
+              }}
+              customModels={customModels}
+              fetchCustomModels={async () => {
+                const res = await msg('FETCH_CUSTOM_MODELS', { url: customUrl, apiKey: customKey });
+                if (res.success) {
+                  setCustomModels(res.models as string[]);
+                  if ((res.models as string[]).length > 0 && !customModel) {
+                    setCustomModel((res.models as string[])[0]);
+                  }
+                } else {
+                  showToast('error', (res.error as string) || 'Failed to fetch custom models');
+                }
+              }}
+              customUrl={customUrl}
+              toggleDoc={toggleDoc}
+              onUploadMarkdown={importMarkdownFiles}
+              onUploadPdf={importPdfFiles}
             />
           </div>
 
@@ -2029,30 +2040,14 @@ export default function App() {
       )}
 
       {/* ── Bottom Navigation Bar ── */}
-      <nav className="flex items-center justify-between px-3 py-2.5 bg-card border-t border-border shrink-0">
-        {([
-          { key: 'lore' as View, label: 'Lore', Icon: Library, onClick: () => setView('lore') },
-          { key: 'chat' as View, label: 'Chat', Icon: MessageSquare, onClick: () => { chatScrollTopRef.current = null; setView('chat'); chatScrollToBottomRef.current?.(); } },
-          { key: 'settings' as View, label: 'Config', Icon: SlidersHorizontal, onClick: () => setView('settings') },
-        ]).map(({ key, label, Icon, onClick }, i) => (
-          <Fragment key={key}>
-            {i > 0 && <div className="w-px h-4 bg-border mx-2" />}
-            <button
-              className={`flex-1 flex items-center justify-center gap-1.5 py-2 text-xs font-medium transition-colors rounded-lg relative ${
-                view === key ? 'bg-primary/10 text-primary' : 'text-muted-foreground hover:bg-accent hover:text-foreground'
-              }`}
-              onClick={onClick}
-              aria-current={view === key ? 'page' : undefined}
-            >
-              <Icon size={13} aria-hidden="true" />
-              {label}
-              {key === 'chat' && researching[activeProjectId] && (
-                <span className="absolute top-1 right-2 w-1.5 h-1.5 rounded-full bg-primary animate-pulse motion-reduce:animate-none" title="Research running" aria-label="Research running" />
-              )}
-            </button>
-          </Fragment>
-        ))}
-      </nav>
+      <Navbar
+        view={view}
+        setView={setView}
+        activeProjectId={activeProjectId}
+        researching={researching}
+        chatScrollTopRef={chatScrollTopRef}
+        chatScrollToBottomRef={chatScrollToBottomRef}
+      />
     </div>
   );
 }

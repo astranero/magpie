@@ -55,6 +55,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   const [s2ApiKey, setS2ApiKey] = useState('');
   // Chat web-search fallback — default ON; only an explicit false disables it.
   const [webFallback, setWebFallback] = useState(true);
+  const [jinaEnabled, setJinaEnabled] = useState(true);
   // How chat gathers extra detail from the open page (repo files / links).
   const [pageCtxStrategy, setPageCtxStrategy] = useState<'semantic' | 'router' | 'agentic'>('semantic');
   const [inferenceDevice, setInferenceDevice] = useState<'wasm' | 'webgpu'>('wasm');
@@ -63,7 +64,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   const tzGuess = (() => { try { return (Intl.DateTimeFormat().resolvedOptions().timeZone || '').split('/').pop()?.replace(/_/g, ' ') || ''; } catch { return ''; } })();
   useEffect(() => {
     if (typeof chrome === 'undefined' || !chrome.storage) return;
-    chrome.storage.local.get(['researchDepth', 'contextTokens', 's2ApiKey', 'sourceQuality', 'academicDepth', 'chatWebFallback', 'pageContextStrategy', 'userLocation', 'inferenceDevice']).then(r => {
+    chrome.storage.local.get(['researchDepth', 'contextTokens', 's2ApiKey', 'sourceQuality', 'academicDepth', 'chatWebFallback', 'jinaReaderEnabled', 'pageContextStrategy', 'userLocation', 'inferenceDevice']).then(r => {
       if (r.inferenceDevice === 'webgpu') setInferenceDevice('webgpu');
       if (r.researchDepth === 'deep' || r.researchDepth === 'exhaustive') setResearchDepth(r.researchDepth);
       if (r.sourceQuality === 'high') setSourceQuality('high');
@@ -71,6 +72,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
       if (r.contextTokens) setContextTokens(String(r.contextTokens));
       if (r.s2ApiKey) setS2ApiKey(r.s2ApiKey);
       setWebFallback(r.chatWebFallback !== false);
+      setJinaEnabled(r.jinaReaderEnabled !== false);
       if (r.pageContextStrategy === 'router' || r.pageContextStrategy === 'agentic') setPageCtxStrategy(r.pageContextStrategy);
       if (typeof r.userLocation === 'string') setUserLocation(r.userLocation);
     });
@@ -130,7 +132,26 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
     saveSearchApiKeys(clean).catch(() => {});
   };
   const [mcpStatus, setMcpStatus] = useState<Record<string, string>>({});
+  const [mcpHealth, setMcpHealth] = useState<Record<string, boolean | undefined>>({});
+  const [mcpTokenEdits, setMcpTokenEdits] = useState<Record<string, string>>({});
+  const [copiedCommand, setCopiedCommand] = useState<string | null>(null);
   useEffect(() => { getMcpServers().then(setMcpServers); }, []);
+
+  // Auto-probe health endpoints for servers that declare one.
+  useEffect(() => {
+    const probe = () => {
+      for (const srv of mcpServers) {
+        if (!srv.healthUrl) continue;
+        fetch(srv.healthUrl, { method: 'GET', signal: AbortSignal.timeout(3000) })
+          .then(r => setMcpHealth(prev => ({ ...prev, [srv.id]: r.ok })))
+          .catch(() => setMcpHealth(prev => ({ ...prev, [srv.id]: false })));
+      }
+    };
+    probe();
+    const interval = setInterval(probe, 10000);
+    return () => clearInterval(interval);
+  }, [mcpServers]);
+
   const persistMcp = (list: McpServerConfig[]) => {
     setMcpServers(list);
     saveMcpServers(list).catch(() => {});
@@ -160,8 +181,14 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
         ...prev,
         [server.id]: tools.length > 0 ? `🟢 ${tools.length} tool(s): ${tools.slice(0, 4).map(t => t.name).join(', ')}` : '🟡 Connected, no tools'
       }));
+      if (server.healthUrl) {
+        setMcpHealth(prev => ({ ...prev, [server.id]: true }));
+      }
     } catch (e: any) {
       setMcpStatus(prev => ({ ...prev, [server.id]: `🔴 ${e.message}` }));
+      if (server.healthUrl) {
+        setMcpHealth(prev => ({ ...prev, [server.id]: false }));
+      }
     }
   };
 
@@ -286,11 +313,52 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
             role="switch"
             aria-checked={autoLinkCaptures}
             onClick={() => setAutoLinkCaptures(!autoLinkCaptures)}
-            className={`shrink-0 w-12 h-6 border transition-colors relative ${autoLinkCaptures ? 'bg-primary border-primary' : 'bg-muted border-border'}`}
+            className={`shrink-0 relative inline-flex h-5 w-9 items-center rounded-full transition-colors duration-200 focus:outline-none ${
+              autoLinkCaptures ? 'bg-primary' : 'bg-border'
+            }`}
             title="Toggle auto-add captures"
           >
-            <span className={`absolute top-0.5 w-4 h-4 bg-background transition-all ${autoLinkCaptures ? 'right-0.5' : 'left-0.5'}`} />
+            <span
+              className={`pointer-events-none block h-4 w-4 rounded-full bg-background shadow-sm transition-transform duration-200 ${
+                autoLinkCaptures ? 'translate-x-4.5' : 'translate-x-0.5'
+              }`}
+            />
           </button>
+        </div>
+      </Section>
+
+      {/* ── Keyboard Shortcuts ── */}
+      <Section id="shortcuts" title="Keyboard Shortcuts" subtitle="Configure keys to trigger assistant features instantly.">
+        <div className="space-y-4">
+          <div className="flex items-center justify-between gap-3">
+            <div className="min-w-0 flex-1">
+              <span className="text-xs font-semibold text-foreground">Toggle Side Panel</span>
+              <p className="text-[10px] text-muted-foreground font-mono mt-1 leading-normal">
+                Default: <kbd className="px-1.5 py-0.5 rounded bg-muted border border-border text-[9px] font-sans font-bold shadow-sm">Alt + M</kbd> (Mac: <kbd className="px-1.5 py-0.5 rounded bg-muted border border-border text-[9px] font-sans font-bold shadow-sm">Option + M</kbd>).
+              </p>
+            </div>
+            <Button
+              variant="outline"
+              size="sm"
+              className="h-8 text-xs shrink-0 rounded-lg border-primary/20 hover:border-primary/40 hover:bg-primary/5 text-primary font-medium"
+              onClick={() => {
+                if (typeof chrome !== 'undefined' && chrome.tabs) {
+                  chrome.tabs.create({ url: 'chrome://extensions/shortcuts' });
+                }
+              }}
+            >
+              Configure
+            </Button>
+          </div>
+
+          <div className="flex items-center justify-between gap-3 pt-3 border-t border-border/40">
+            <div className="min-w-0 flex-1">
+              <span className="text-xs font-semibold text-foreground">Capture Page Instantly</span>
+              <p className="text-[10px] text-muted-foreground font-mono mt-1 leading-normal">
+                Press <kbd className="px-1.5 py-0.5 rounded bg-muted border border-border text-[9px] font-sans font-bold shadow-sm">Alt + C</kbd> (Mac: <kbd className="px-1.5 py-0.5 rounded bg-muted border border-border text-[9px] font-sans font-bold shadow-sm">Option + C</kbd>) on any page to clip it to your active workspace with an on-page notification.
+              </p>
+            </div>
+          </div>
         </div>
       </Section>
 
@@ -308,10 +376,41 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
             role="switch"
             aria-checked={webFallback}
             onClick={() => { const next = !webFallback; setWebFallback(next); saveResearchSetting({ chatWebFallback: next }); }}
-            className={`shrink-0 w-12 h-6 border transition-colors relative ${webFallback ? 'bg-primary border-primary' : 'bg-muted border-border'}`}
+            className={`shrink-0 relative inline-flex h-5 w-9 items-center rounded-full transition-colors duration-200 focus:outline-none ${
+              webFallback ? 'bg-primary' : 'bg-border'
+            }`}
             title="Toggle web-search fallback"
           >
-            <span className={`absolute top-0.5 w-4 h-4 bg-background transition-all ${webFallback ? 'right-0.5' : 'left-0.5'}`} />
+            <span
+              className={`pointer-events-none block h-4 w-4 rounded-full bg-background shadow-sm transition-transform duration-200 ${
+                webFallback ? 'translate-x-4.5' : 'translate-x-0.5'
+              }`}
+            />
+          </button>
+        </div>
+
+        <div className="flex items-start justify-between gap-3">
+          <div className="min-w-0">
+            <span className="text-xs font-medium">Jina Reader proxy for research scraping</span>
+            <p className="text-[10px] text-muted-foreground font-mono mt-1 leading-normal">
+              ON: research scrapes pages through r.jina.ai (best keyless extraction for JS-heavy pages and PDFs) — that third party sees the URLs you research. OFF: direct fetch + local parsing only; some pages will extract worse or not at all.
+            </p>
+          </div>
+          <button
+            type="button"
+            role="switch"
+            aria-checked={jinaEnabled}
+            onClick={() => { const next = !jinaEnabled; setJinaEnabled(next); saveResearchSetting({ jinaReaderEnabled: next }); }}
+            className={`shrink-0 relative inline-flex h-5 w-9 items-center rounded-full transition-colors duration-200 focus:outline-none ${
+              jinaEnabled ? 'bg-primary' : 'bg-border'
+            }`}
+            title="Toggle Jina Reader proxy"
+          >
+            <span
+              className={`pointer-events-none block h-4 w-4 rounded-full bg-background shadow-sm transition-transform duration-200 ${
+                jinaEnabled ? 'translate-x-4.5' : 'translate-x-0.5'
+              }`}
+            />
           </button>
         </div>
 
@@ -542,7 +641,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
       {/* ── MCP Servers ── */}
       <Section id="mcp" title="MCP Servers" subtitle="External tools over Streamable HTTP — used by deep research." defaultOpen={false}>
         {mcpServers.map(server => (
-          <div key={server.id} className="rounded-md border border-border bg-background p-2 space-y-1">
+          <div key={server.id} className="rounded-md border border-border bg-background p-2 space-y-1.5">
             <div className="flex items-center gap-2">
               <div className="flex-1 min-w-0">
                 <div className="text-xs font-bold font-mono truncate">{server.name}</div>
@@ -573,6 +672,74 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                 Remove
               </button>
             </div>
+
+            {/* Health status for servers with a health endpoint */}
+            {server.healthUrl && (
+              <div className="text-[10px] font-mono flex items-center gap-1.5 mt-1.5 mb-1">
+                {mcpHealth[server.id] === undefined ? (
+                  <>
+                    <span className="w-1.5 h-1.5 rounded-full bg-muted-foreground animate-pulse" />
+                    <span className="text-muted-foreground">Checking…</span>
+                  </>
+                ) : mcpHealth[server.id] ? (
+                  <>
+                    <span className="relative flex h-1.5 w-1.5">
+                      <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                      <span className="relative inline-flex rounded-full h-1.5 w-1.5 bg-emerald-500"></span>
+                    </span>
+                    <span className="text-emerald-500 font-semibold">Running</span>
+                  </>
+                ) : (
+                  <>
+                    <span className="w-1.5 h-1.5 rounded-full bg-amber-500 animate-pulse" />
+                    <span className="text-amber-500 font-semibold">Not detected — setup required:</span>
+                  </>
+                )}
+              </div>
+            )}
+
+            {/* Setup hint with copy-paste commands */}
+            {server.setupHint && (!server.healthUrl || mcpHealth[server.id] === false) && (
+              <div className="rounded bg-muted/50 border border-border p-1.5 space-y-1">
+                {server.setupHint.split('\n').map((line, i) => (
+                  <div key={i} className="flex items-center gap-1 group">
+                    <code className="flex-1 text-[10px] font-mono text-foreground select-all">{line}</code>
+                    <button
+                      type="button"
+                      className={`shrink-0 text-[9px] transition-opacity duration-150 ${copiedCommand === line ? 'opacity-100 text-green-500 font-bold' : 'opacity-0 group-hover:opacity-100 text-muted-foreground hover:text-primary'}`}
+                      title={copiedCommand === line ? 'Copied!' : 'Copy'}
+                      onClick={() => {
+                        navigator.clipboard.writeText(line)
+                          .then(() => {
+                            setCopiedCommand(line);
+                            setTimeout(() => setCopiedCommand(null), 1500);
+                          })
+                          .catch(() => {});
+                      }}
+                    >
+                      {copiedCommand === line ? '✅' : '📋'}
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {/* Editable auth token */}
+            <div className="flex items-center gap-1.5">
+              <input
+                type="password"
+                placeholder="API key / token (optional)"
+                value={mcpTokenEdits[server.id] ?? server.authToken ?? ''}
+                onChange={e => setMcpTokenEdits(prev => ({ ...prev, [server.id]: e.target.value }))}
+                onBlur={() => {
+                  const val = (mcpTokenEdits[server.id] ?? '').trim() || undefined;
+                  persistMcp(mcpServers.map(x => x.id === server.id ? { ...x, authToken: val } : x));
+                  setMcpTokenEdits(prev => { const n = { ...prev }; delete n[server.id]; return n; });
+                }}
+                className="flex-1 rounded border border-border bg-background px-2 py-1 text-[10px] font-mono placeholder:text-muted-foreground focus:outline-none focus:border-primary"
+              />
+            </div>
+
             {mcpStatus[server.id] && <div className="text-[10px] font-mono text-muted-foreground break-all">{mcpStatus[server.id]}</div>}
           </div>
         ))}
@@ -591,7 +758,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
         <Button variant="secondary" onClick={addMcpServer} className="rounded-lg font-medium">Add server</Button>
         <p className="text-[10px] text-muted-foreground font-mono leading-normal">
           Extensions can't launch stdio MCP servers — run the server yourself and register its HTTP endpoint here.
-          Enabling a server permits deep research to call its search-like tools with your topic.
+          Enabling a server permits deep research to call its search-like tools with your topic. API keys stay in local storage and are only sent to the server itself.
         </p>
       </Section>
 

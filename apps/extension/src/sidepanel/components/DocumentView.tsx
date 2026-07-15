@@ -5,7 +5,7 @@ import remarkMath from 'remark-math';
 import rehypeKatex from 'rehype-katex';
 import { LocalDocument, ResolvedCitation } from '../types';
 import { Button } from '@/components/ui/button';
-import { ArrowLeft, ExternalLink, FileText, Check } from 'lucide-react';
+import { ArrowLeft, ExternalLink, FileText, Check, Tag } from 'lucide-react';
 import { splitFrontmatter, parseFrontmatterFields } from '../../lib/frontmatter';
 
 // Same inline anchor format the chat renderer uses: [d3ab01.s1.p2] / [d3.s0.p1.0].
@@ -27,6 +27,7 @@ interface DocumentViewProps {
   onOpenDocument?: (docId: string, anchorId?: string) => void;
   /** Resolve [anchor] markers to their source doc/chunk via the chunk store. */
   resolveCitations?: (text: string) => Promise<ResolvedCitation[]>;
+  onTagClick?: (tag: string) => void;
 }
 
 /** Shared markdown link renderer: `#cite:` anchors become chunk-jump chips;
@@ -104,6 +105,7 @@ export const DocumentView: React.FC<DocumentViewProps> = ({
   onOpenExternalLink,
   onOpenDocument,
   resolveCitations,
+  onTagClick,
 }) => {
   const [highlight, setHighlight] = useState<ChunkHighlight | null>(null);
   const [citeCopied, setCiteCopied] = useState(false);
@@ -120,6 +122,7 @@ export const DocumentView: React.FC<DocumentViewProps> = ({
     chrome.runtime.sendMessage(
       { action: 'GET_CHUNK_BY_ANCHOR', anchorId: highlightAnchorId },
       (res: any) => {
+        if (chrome.runtime.lastError) return;
         if (res?.success && res.chunk) {
           const chunkText: string = res.chunk.text || '';
           // Same string the view renders — offsets are only valid in it.
@@ -281,41 +284,71 @@ export const DocumentView: React.FC<DocumentViewProps> = ({
     }
     return v;
   };
+
+  const formatFmKey = (key: string): string => {
+    return key
+      .split(' ')
+      .map(word => word.charAt(0).toUpperCase() + word.slice(1))
+      .join(' ');
+  };
+
   // `created` duplicates `captured`'s date; skip it in the card
   const cardFields = fmFields.filter(([k]) => k !== 'title' && k !== 'created');
 
   const metadataCard = fmFields.length > 0 && (
-    <div className="card-rule mb-5 rounded-lg border border-border bg-card shadow-card px-4 py-3 pb-4">
-      <div className="flex items-baseline justify-between mb-2.5">
-        <div className="text-[11px] font-medium text-muted-foreground">Metadata</div>
+    <div className="mb-6 rounded-xl border border-border bg-card/60 backdrop-blur-sm shadow-sm p-4 animate-in fade-in slide-in-from-top-1 duration-200">
+      <div className="flex items-center justify-between border-b border-border/60 pb-2 mb-3">
+        <div className="text-xs font-semibold text-foreground flex items-center gap-1.5">
+          <FileText size={14} className="text-muted-foreground" />
+          Document Metadata
+        </div>
         <button
           type="button"
           onClick={() => setShowRaw(!showRaw)}
-          className="text-[10px] font-mono text-muted-foreground/60 hover:text-primary transition-colors"
+          className="text-[10px] font-medium text-muted-foreground/60 hover:text-primary hover:bg-accent px-1.5 py-0.5 rounded transition-all"
           title="Toggle raw markdown (with YAML frontmatter)"
         >
-          {showRaw ? 'rendered view' : 'raw'}
+          {showRaw ? 'Rendered view' : 'Raw Markdown'}
         </button>
       </div>
-      <dl className="grid grid-cols-[5.5rem_1fr] gap-x-3 gap-y-1.5 text-xs font-mono items-baseline">
+
+      <dl className="grid grid-cols-[6.5rem_1fr] gap-x-4 gap-y-2 text-xs items-center">
         {cardFields.map(([k, v]) => (
           <React.Fragment key={k}>
-            <dt className="text-muted-foreground text-[10px] truncate">{k}</dt>
-            <dd className="min-w-0">
-              {/^https?:\/\//.test(v)
-                ? <a href={v} target="_blank" rel="noreferrer" className="text-primary hover:underline break-all">{v}</a>
-                : <span className="break-words">{prettyFmValue(k, v)}</span>}
+            <dt className="text-muted-foreground font-medium truncate">{formatFmKey(k)}</dt>
+            <dd className="min-w-0 font-sans text-foreground">
+              {/^https?:\/\//.test(v) ? (
+                <a
+                  href={v}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="text-primary hover:underline break-all inline-flex items-center gap-1 group"
+                >
+                  {v}
+                  <ExternalLink size={10} className="opacity-0 group-hover:opacity-100 transition-opacity" />
+                </a>
+              ) : (
+                <span className="break-words font-medium">{prettyFmValue(k, v)}</span>
+              )}
             </dd>
           </React.Fragment>
         ))}
+
         {fmTags.length > 0 && (
           <>
-            <dt className="text-muted-foreground text-[10px]">tags</dt>
-            <dd className="min-w-0 flex flex-wrap gap-1">
+            <dt className="text-muted-foreground font-medium">Tags</dt>
+            <dd className="min-w-0 flex flex-wrap gap-1.5">
               {fmTags.map(t => (
-                <span key={t} className="px-1.5 py-0.5 rounded-full border border-primary/30 bg-primary/10 text-primary text-[10px]">
+                <button
+                  key={t}
+                  type="button"
+                  onClick={() => onTagClick?.(t)}
+                  className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md border border-primary/20 bg-primary/5 hover:bg-primary/10 text-primary text-[10px] font-semibold transition-all duration-200 hover:scale-105 active:scale-95 cursor-pointer shadow-sm"
+                  title={`Filter by tag "${t}"`}
+                >
+                  <Tag size={9} />
                   {t}
-                </span>
+                </button>
               ))}
             </dd>
           </>
@@ -328,23 +361,22 @@ export const DocumentView: React.FC<DocumentViewProps> = ({
   const renderContent = () => {
     if (!highlight || !document.content) {
       return (
-           <ReactMarkdown
-           remarkPlugins={[remarkGfm, remarkMath]}
-           rehypePlugins={[[rehypeKatex, { strict: false, throwOnError: false }]]}
-           urlTransform={(url) => url.startsWith('data:image/') ? url : defaultUrlTransform(url)}
-           components={mdComponents}
-         >
-           {showRaw ? contentToRender : linkifyAnchors(contentToRender)}
-         </ReactMarkdown>
+        <ReactMarkdown
+          remarkPlugins={[remarkGfm, remarkMath]}
+          rehypePlugins={[[rehypeKatex, { strict: false, throwOnError: false }]]}
+          urlTransform={(url) => url.startsWith('data:image/') ? url : defaultUrlTransform(url)}
+          components={mdComponents}
+        >
+          {showRaw ? contentToRender : linkifyAnchors(contentToRender)}
+        </ReactMarkdown>
       );
     }
 
     const { charStart, charEnd } = highlight;
-    const fullText = body;
+    const fmLength = showRaw ? (document.content.length - body.length) : 0;
+    const fullText = showRaw ? content : body;
 
-    // No reliable location found in the document (e.g. content edited since
-    // the chunk was indexed) — show the full doc, plus the cited excerpt as
-    // a standalone callout so the citation still points somewhere useful.
+    // No reliable location found in the document
     if (charStart < 0 || charEnd < 0) {
       return (
         <>
@@ -370,15 +402,15 @@ export const DocumentView: React.FC<DocumentViewProps> = ({
             urlTransform={(url) => url.startsWith('data:image/') ? url : defaultUrlTransform(url)}
             components={mdComponents}
           >
-            {linkifyAnchors(fullText)}
+            {showRaw ? content : linkifyAnchors(fullText)}
           </ReactMarkdown>
         </>
       );
     }
 
-    // Clamp to valid bounds
-    const start = Math.max(0, Math.min(charStart, fullText.length));
-    const end = Math.max(start, Math.min(charEnd, fullText.length));
+    // Clamp to valid bounds, adjusting by fmLength if showing raw frontmatter
+    const start = Math.max(0, Math.min(charStart + fmLength, fullText.length));
+    const end = Math.max(start, Math.min(charEnd + fmLength, fullText.length));
 
     const before = fullText.slice(0, start);
     const highlighted = fullText.slice(start, end);
@@ -393,7 +425,7 @@ export const DocumentView: React.FC<DocumentViewProps> = ({
             urlTransform={(url) => url.startsWith('data:image/') ? url : defaultUrlTransform(url)}
             components={mdComponents}
           >
-            {linkifyAnchors(before)}
+            {showRaw ? before : linkifyAnchors(before)}
           </ReactMarkdown>
         )}
         <div
@@ -409,7 +441,7 @@ export const DocumentView: React.FC<DocumentViewProps> = ({
             urlTransform={(url) => url.startsWith('data:image/') ? url : defaultUrlTransform(url)}
             components={mdComponents}
           >
-            {linkifyAnchors(highlighted)}
+            {showRaw ? highlighted : linkifyAnchors(highlighted)}
           </ReactMarkdown>
         </div>
         {after && (
@@ -419,7 +451,7 @@ export const DocumentView: React.FC<DocumentViewProps> = ({
             urlTransform={(url) => url.startsWith('data:image/') ? url : defaultUrlTransform(url)}
             components={mdComponents}
           >
-            {linkifyAnchors(after)}
+            {showRaw ? after : linkifyAnchors(after)}
           </ReactMarkdown>
         )}
       </>
@@ -434,14 +466,20 @@ export const DocumentView: React.FC<DocumentViewProps> = ({
           <ArrowLeft className="w-4 h-4 mr-2" />
           Back
         </Button>
-        {document.bibtex && (
+        {(document.bibtex || document.title) && (
           <Button
             variant="outline"
             size="sm"
             className="shrink-0 font-mono text-xs rounded-lg"
             title="Copy BibTeX citation to clipboard"
             onClick={() => {
-              navigator.clipboard.writeText(document.bibtex!).then(
+              const bib = document.bibtex || `@misc{magpie-ref-${document.id.slice(0, 8)},
+  title = {${document.title}},
+  howpublished = {\\url{${document.url || ''}}},
+  year = {${new Date(document.capturedAt).getFullYear() || new Date().getFullYear()}},
+  note = {Online; accessed ${new Date(document.capturedAt).toLocaleDateString()}}
+}`;
+              navigator.clipboard.writeText(bib).then(
                 () => setCiteCopied(true),
                 () => {}
               );
@@ -481,7 +519,7 @@ export const DocumentView: React.FC<DocumentViewProps> = ({
 
       {/* Content */}
       <div ref={contentRef} className="flex-1 overflow-y-auto p-6 bg-background">
-        <div className="prose prose-sm dark:prose-invert max-w-none prose-img:rounded-md prose-img:border prose-img:border-border prose-headings:font-bold prose-a:text-primary prose-pre:rounded-md">
+        <div className="prose prose-sans prose-sm dark:prose-invert max-w-none prose-img:rounded-md prose-img:border prose-img:border-border prose-headings:font-bold prose-a:text-primary prose-pre:rounded-md">
            <>
              {metadataCard}
              {renderContent()}

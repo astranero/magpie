@@ -390,30 +390,78 @@ export function resetSessionIndex(sessionId: string): void {
 }
 
 /**
- * Run an Orama search with optional vector and typo tolerance.
+ * Reciprocal Rank Fusion (RRF) combines lexical (BM25) and vector search ranks.
+ * Constant k = 60 is standard in information retrieval research.
  */
-async function runSearch(db: any, term: string, queryVector: number[] | null, limit: number, tolerance: number = 1): Promise<Chunk[]> {
-  const searchParams: any = {
-    term,
-    properties: ['text', 'heading', 'sectionPath'],
-    limit,
-    tolerance  // Orama fuzzy matching — allows N character edits per token
+export function reciprocalRankFusion(lexicalHits: Chunk[], vectorHits: Chunk[], k = 60): Chunk[] {
+  const scores = new Map<string, { chunk: Chunk; score: number }>();
+
+  const addHits = (hits: Chunk[]) => {
+    hits.forEach((chunk, index) => {
+      const key = chunk.id || chunk.anchorId || '';
+      if (!key) return;
+      const rank = index + 1;
+      const current = scores.get(key) || { chunk, score: 0 };
+      current.score += 1 / (k + rank);
+      scores.set(key, current);
+    });
   };
 
-  if (queryVector) {
-    searchParams.mode = 'hybrid';
-    searchParams.vector = {
-      value: queryVector,
-      property: 'embedding'
-    };
-  }
+  addHits(lexicalHits);
+  addHits(vectorHits);
 
+  return Array.from(scores.values())
+    .sort((a, b) => b.score - a.score)
+    .map(x => x.chunk);
+}
+
+/**
+ * Run an Orama search with optional vector and typo tolerance.
+ * Uses Reciprocal Rank Fusion (RRF) to fuse separate vector and lexical runs
+ * when queryVector is available.
+ */
+async function runSearch(db: any, term: string, queryVector: number[] | null, limit: number, tolerance: number = 1): Promise<Chunk[]> {
   try {
-    const results = await oramaSearch(db, searchParams);
-    return results.hits.map(hit => hit.document as unknown as Chunk);
+    // Pure Lexical Search (always run when term is non-empty, otherwise as fallback)
+    const runLexical = async (): Promise<Chunk[]> => {
+      if (!term.trim()) return [];
+      const res = await oramaSearch(db, {
+        term,
+        properties: ['text', 'heading', 'sectionPath'],
+        limit,
+        tolerance
+      });
+      return res.hits.map(hit => hit.document as unknown as Chunk);
+    };
+
+    // Pure Vector Search
+    const runVector = async (): Promise<Chunk[]> => {
+      if (!queryVector) return [];
+      const res = await oramaSearch(db, {
+        mode: 'vector',
+        vector: {
+          value: queryVector,
+          property: 'embedding'
+        },
+        limit
+      });
+      return res.hits.map(hit => hit.document as unknown as Chunk);
+    };
+
+    if (queryVector) {
+      const [lexicalHits, vectorHits] = await Promise.all([
+        runLexical().catch(err => { console.warn('Lexical branch failed:', err); return []; }),
+        runVector().catch(err => { console.warn('Vector branch failed:', err); return []; })
+      ]);
+      
+      if (lexicalHits.length === 0) return vectorHits;
+      if (vectorHits.length === 0) return lexicalHits;
+      return reciprocalRankFusion(lexicalHits, vectorHits).slice(0, limit);
+    }
+
+    return await runLexical();
   } catch (e) {
     console.warn('Orama search failed for term:', term, e);
     return [];
   }
 }
-

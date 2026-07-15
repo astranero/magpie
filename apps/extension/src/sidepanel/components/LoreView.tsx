@@ -29,6 +29,8 @@ interface LoreViewProps {
   importImageFiles: () => void;
   timeAgo: (iso: string) => string;
   onDocumentClick: (id: string, anchorId?: string) => void;
+  searchQuery: string;
+  setSearchQuery: (query: string) => void;
 }
 
 export const LoreView: React.FC<LoreViewProps> = ({
@@ -50,12 +52,13 @@ export const LoreView: React.FC<LoreViewProps> = ({
   importImageFiles,
   timeAgo,
   onDocumentClick,
+  searchQuery,
+  setSearchQuery,
 }) => {
   const [showLore, setShowLore] = useState(false);
 
   // ── Library search: title filter (instant) + semantic search (debounced) ──
   interface SearchHit { id: string; title: string; snippet: string; anchorId: string; capturedAt: string }
-  const [searchQuery, setSearchQuery] = useState('');
   const [searchHits, setSearchHits] = useState<SearchHit[] | null>(null);
   const [searching, setSearching] = useState(false);
   const searchTimer = useRef<number | null>(null);
@@ -67,6 +70,10 @@ export const LoreView: React.FC<LoreViewProps> = ({
     searchTimer.current = window.setTimeout(() => {
       if (typeof chrome === 'undefined' || !chrome.runtime?.sendMessage) { setSearching(false); return; }
       chrome.runtime.sendMessage({ action: 'SEARCH_LIBRARY', query: q }, (res: any) => {
+        if (chrome.runtime.lastError) {
+          setSearching(false);
+          return;
+        }
         setSearching(false);
         setSearchHits(Array.isArray(res?.results) ? res.results : []);
       });
@@ -81,10 +88,20 @@ export const LoreView: React.FC<LoreViewProps> = ({
   // filters on every render (a research run's dozens of large docs) locked the
   // main thread on unrelated re-renders (tab switch, progress toasts). Recompute
   // only when the docs or the filter actually change.
-  const docsToShow = useMemo(
-    () => (showLore ? globalDocuments : documents).filter(d => !titleFilter || d.title.toLowerCase().includes(titleFilter)),
-    [showLore, globalDocuments, documents, titleFilter]
-  );
+  const docsToShow = useMemo(() => {
+    const list = showLore ? globalDocuments : documents;
+    if (!titleFilter) return list;
+    if (titleFilter.startsWith('tag:')) {
+      const tagToMatch = titleFilter.slice(4).trim();
+      return list.filter(d => {
+        const contentLower = (d.content || '').toLowerCase();
+        // Match standard YAML format tag lists, e.g., 'tags: [tag1, tag2]' or 'tags:\n  - tag1'
+        return contentLower.includes(tagToMatch);
+      });
+    }
+    return list.filter(d => d.title.toLowerCase().includes(titleFilter));
+  }, [showLore, globalDocuments, documents, titleFilter]);
+
   const projectDocIds = useMemo(() => new Set(documents.map(d => d.id)), [documents]);
   const curatedDocs = useMemo(() => docsToShow.filter(d => !isResearchSource(d)), [docsToShow]);
   const researchSourceDocs = useMemo(() => docsToShow.filter(isResearchSource), [docsToShow]);
@@ -242,140 +259,148 @@ export const LoreView: React.FC<LoreViewProps> = ({
               return (
                 <div
                   key={doc.id}
-                  className="group flex flex-col gap-3 p-3 rounded-lg border border-border bg-card text-card-foreground shadow-card hover:border-primary/50 transition-colors"
+                  className={`group relative flex flex-col gap-1.5 p-2.5 rounded-lg border transition-all duration-200 ${
+                    doc.enabled !== false
+                      ? 'border-primary/20 bg-primary/[0.01] shadow-sm'
+                      : 'border-border bg-card/40 opacity-80 hover:opacity-100'
+                  } hover:border-primary/35 hover:shadow-sm`}
                 >
-                  <div className="flex items-start gap-3">
+                  {/* Top Line: Icon + Title + Toggle */}
+                  <div className="flex items-center gap-2.5 min-w-0">
                     {doc.favicon ? (
-                      <img className="w-5 h-5 mt-0.5 object-contain shrink-0" src={doc.favicon} alt="" />
+                      <img className="w-5 h-5 object-contain rounded shrink-0 bg-background p-0.5 shadow-sm" src={doc.favicon} alt="" />
                     ) : (
-                      <div className="w-5 h-5 mt-0.5 flex items-center justify-center text-muted-foreground shrink-0">
-                        <FileText size={14} />
+                      <div className="w-5 h-5 flex items-center justify-center rounded bg-muted text-muted-foreground shrink-0 shadow-sm">
+                        <FileText size={11} />
                       </div>
                     )}
+
                     <div className="flex-1 min-w-0">
-                      <div className="flex items-start justify-between gap-2">
-                        <div className="flex items-center gap-2 min-w-0">
-                          {!showLore && (
-                            <input
-                              type="checkbox"
-                              className="mt-0.5 w-3.5 h-3.5 border-input text-primary focus:ring-primary shrink-0"
-                              checked={doc.enabled !== false}
-                              onChange={(e) => toggleDoc(doc.id, e.target.checked)}
-                              title={`Include \"${doc.title}\" in chat context`}
-                              aria-label={`Include \"${doc.title}\" in chat context`}
-                            />
-                          )}
-                          <button
-                            className="flex items-center gap-1.5 hover:underline text-left min-w-0"
-                            onClick={() => onDocumentClick(doc.id)}
-                            title="Read Document"
-                          >
-                            <BookOpen className="w-3.5 h-3.5 text-primary shrink-0" />
-                            <span className="truncate font-display text-[15px] leading-snug">{doc.title}</span>
-                          </button>
-                        </div>
+                      <button
+                        className="group/btn text-left hover:text-primary transition-colors w-full min-w-0"
+                        onClick={() => onDocumentClick(doc.id)}
+                        title="Read Document"
+                      >
+                        <span className="block font-semibold text-xs text-foreground leading-tight group-hover/btn:underline break-words">
+                          {doc.title}
+                        </span>
+                      </button>
+                    </div>
+
+                    {/* Custom Switch Toggle */}
+                    {!showLore && (
+                      <div className="flex items-center gap-1.5 shrink-0 self-center" title={doc.enabled !== false ? "Active in Chat" : "Muted in Chat"}>
+                        <span className={`text-[8px] font-bold uppercase tracking-wider ${doc.enabled !== false ? 'text-primary/75' : 'text-muted-foreground/50'}`}>
+                          {doc.enabled !== false ? 'Active' : 'Muted'}
+                        </span>
+                        <button
+                          type="button"
+                          role="switch"
+                          aria-checked={doc.enabled !== false}
+                          onClick={() => toggleDoc(doc.id, doc.enabled === false)}
+                          className={`relative inline-flex h-3.5 w-6 shrink-0 cursor-pointer items-center rounded-full transition-colors duration-200 ease-in-out focus:outline-none ${
+                            doc.enabled !== false ? 'bg-primary' : 'bg-border'
+                          }`}
+                        >
+                          <span
+                            className={`pointer-events-none block h-2.5 w-2.5 rounded-full bg-background shadow-sm transition-transform duration-200 ease-in-out ${
+                              doc.enabled !== false ? 'translate-x-3' : 'translate-x-0.5'
+                            }`}
+                          />
+                        </button>
                       </div>
-                      <div className="flex items-center gap-2 mt-1 text-[10px] font-mono text-muted-foreground">
-                        <span className="tabular-nums">{doc.wordCount.toLocaleString()} words</span>
-                        <span aria-hidden="true">·</span>
-                        <span>{timeAgo(doc.capturedAt)}</span>
-                        {doc.syncedToDrive && (
-                          <>
-                            <span>·</span>
-                            <span title="Synced to Drive"><Cloud className="w-3 h-3 text-blue-400" /></span>
-                          </>
-                        )}
-                      </div>
+                    )}
+                  </div>
+
+                  {/* Bottom Line: Metadata OR Action buttons on hover */}
+                  <div className="flex items-center justify-between min-h-[20px] text-[10px] text-muted-foreground/75 font-mono">
+                    {/* Left: Metadata */}
+                    <div className="flex items-center gap-1.5 truncate mr-2">
+                      <span className="bg-muted px-1 py-0.2 rounded text-[8px] font-semibold uppercase tracking-wide">
+                        {doc.wordCount.toLocaleString()}w
+                      </span>
+                      <span>•</span>
+                      <span>{timeAgo(doc.capturedAt)}</span>
                       {doc.url && (
-                        <div className="text-[10px] text-muted-foreground truncate mt-0.5 opacity-70 group-hover:opacity-100 transition-opacity">
-                          {doc.url}
-                        </div>
+                        <>
+                          <span>•</span>
+                          <span className="truncate max-w-[120px]" title={doc.url}>
+                            {doc.url.replace(/^https?:\/\/(www\.)?/, '')}
+                          </span>
+                        </>
                       )}
                     </div>
-                  </div>
-                  <div className="flex items-center justify-end gap-1.5 opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition-opacity">
-                    {showLore ? (
-                      isLinked ? (
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          className="h-7 px-2 text-[10px] text-muted-foreground hover:bg-muted hover:text-foreground border-border"
-                          onClick={() => unlinkDocument(doc.id)}
-                          title="Remove from this workspace (document stays in library)"
-                        >
-                          <Minus size={12} className="mr-1" /> Unlink
-                        </Button>
+
+                    {/* Right: Actions (Visible on group-hover, hidden by default) */}
+                    <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity duration-200 shrink-0">
+                      {showLore ? (
+                        isLinked ? (
+                          <button
+                            className="h-5 px-1.5 text-[9px] font-semibold text-muted-foreground hover:bg-muted hover:text-foreground border border-border rounded transition-colors flex items-center gap-0.5"
+                            onClick={() => unlinkDocument(doc.id)}
+                            title="Remove from Workspace"
+                          >
+                            <Minus size={9} /> Unlink
+                          </button>
+                        ) : (
+                          <button
+                            className="h-5 px-1.5 text-[9px] font-semibold text-primary hover:bg-primary hover:text-primary-foreground border border-primary/20 rounded transition-colors flex items-center gap-0.5"
+                            onClick={() => linkDocument(doc.id)}
+                            title="Add to Workspace"
+                          >
+                            <Plus size={9} /> Add
+                          </button>
+                        )
                       ) : (
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          className="h-7 px-2 text-[10px] text-primary hover:bg-primary hover:text-primary-foreground border-primary/20"
-                          onClick={() => linkDocument(doc.id)}
-                          title="Add to this workspace"
+                        <button
+                          className="h-5 px-1.5 text-[9px] font-semibold text-muted-foreground hover:bg-muted hover:text-foreground border border-border rounded transition-colors flex items-center gap-0.5"
+                          onClick={() => unlinkDocument(doc.id)}
+                          title="Remove from Workspace"
                         >
-                          <Plus size={12} className="mr-1" /> Add
-                        </Button>
-                      )
-                    ) : (
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        className="h-7 px-2 text-[10px] text-muted-foreground hover:bg-muted hover:text-foreground border-border"
-                        onClick={() => unlinkDocument(doc.id)}
-                        title="Remove from this workspace (document stays in library)"
+                          <Minus size={9} /> Unlink
+                        </button>
+                      )}
+
+                      <button
+                        className="h-5 w-5 flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-muted rounded transition-colors"
+                        onClick={() => onDocumentClick(doc.id)}
+                        title="Read full document text"
                       >
-                        <Minus size={12} className="mr-1" /> Unlink
-                      </Button>
-                    )}
-                    <div className="flex-1" />
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      className="h-7 w-7 text-muted-foreground"
-                      onClick={() => onDocumentClick(doc.id)}
-                      title="Read Document"
-                      aria-label={`Read ${doc.title}`}
-                    >
-                      <BookOpen size={14} />
-                    </Button>
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      className="h-7 w-7 text-muted-foreground"
-                      onClick={() => downloadDoc(doc)}
-                      title="Download as Markdown"
-                      aria-label={`Download ${doc.title}`}
-                    >
-                      <Download size={14} />
-                    </Button>
-                    {doc.url && (
-                      <Button
-                        variant="ghost"
-                        size="icon"
-                        className="h-7 w-7 text-muted-foreground"
-                        onClick={() => window.open(doc.url, '_blank')}
-                        title="Open original source"
-                        aria-label={`Open source for ${doc.title}`}
+                        <BookOpen size={10} />
+                      </button>
+
+                      <button
+                        className="h-5 w-5 flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-muted rounded transition-colors"
+                        onClick={() => downloadDoc(doc)}
+                        title="Export as Markdown"
                       >
-                        <ExternalLink size={14} />
-                      </Button>
-                    )}
-                    {showLore && (
-                      <Button
-                        variant="ghost"
-                        size="icon"
-                        className="h-7 w-7 text-destructive hover:text-destructive hover:bg-destructive/10"
-                        onClick={() => deleteDoc(doc.id)}
-                        title="Permanently delete from library"
-                        aria-label={`Permanently delete ${doc.title}`}
-                      >
-                        <Trash2 size={14} />
-                      </Button>
-                    )}
+                        <Download size={10} />
+                      </button>
+
+                      {doc.url && (
+                        <button
+                          className="h-5 w-5 flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-muted rounded transition-colors"
+                          onClick={() => window.open(doc.url, '_blank')}
+                          title="Open original source"
+                        >
+                          <ExternalLink size={10} />
+                        </button>
+                      )}
+
+                      {showLore && (
+                        <button
+                          className="h-5 w-5 flex items-center justify-center text-destructive hover:text-destructive hover:bg-destructive/10 rounded transition-colors"
+                          onClick={() => deleteDoc(doc.id)}
+                          title="Permanently delete from library"
+                        >
+                          <Trash2 size={10} />
+                        </button>
+                      )}
                   </div>
                 </div>
-              );
-            })}
+              </div>
+            );
+          })}
 
             {/* Machine-gathered research sources — compact, collapsed group */}
             {researchSourceDocs.length > 0 && (

@@ -16,6 +16,10 @@ export interface McpServerConfig {
   enabled: boolean;
   /** Optional bearer token, sent as Authorization: Bearer <token>. */
   authToken?: string;
+  /** Shown in Settings to guide first-time setup (e.g. install + run commands). */
+  setupHint?: string;
+  /** GET endpoint to probe whether the server is running (e.g. /health). */
+  healthUrl?: string;
 }
 
 /** MCP URL policy: https anywhere, http only to loopback hosts. */
@@ -166,10 +170,12 @@ export class McpConnection {
 // ── Server registry (chrome.storage.local under `mcpServers`) ──
 
 /**
- * Recommended remote MCPs seeded once into a fresh install. Kept minimal and
- * deterministic (the "standard library" principle) — only remote HTTP servers
- * work in a browser extension. Seeded DISABLED: present with one-click enable,
- * so we never call a third party without the user opting in (local-first).
+ * Recommended MCPs seeded once into a fresh install. Kept minimal and
+ * deterministic (the "standard library" principle) — only Streamable HTTP
+ * servers work in a browser extension (no stdio). Includes both remote
+ * hosted servers and local servers the user can run themselves.
+ * Seeded DISABLED: present with one-click enable, so we never call
+ * a third party without the user opting in (local-first).
  */
 export const DEFAULT_MCP_SERVERS: McpServerConfig[] = [
   {
@@ -178,18 +184,32 @@ export const DEFAULT_MCP_SERVERS: McpServerConfig[] = [
     url: 'https://mcp.context7.com/mcp',
     enabled: false,   // opt-in: flip on in Config → MCP Servers
   },
+  {
+    id: 'default-biomcp',
+    name: 'BioMCP · biomedical research (local)',
+    url: 'http://localhost:8080/mcp',
+    enabled: false,
+    healthUrl: 'http://localhost:8080/health',
+    setupHint: 'pip install biomcp-cli\nbiomcp serve-http --port 8080',
+  },
 ];
+
+/**
+ * Bump this when new entries are added to DEFAULT_MCP_SERVERS. The seeding
+ * logic re-runs for any user whose stored version is lower, adding only
+ * servers whose URL isn't already present (so user removals are respected).
+ */
+const MCP_SEED_VERSION = 2;   // v1 = Context7, v2 = + BioMCP
 
 export async function getMcpServers(): Promise<McpServerConfig[]> {
   try {
-    const s = await chrome.storage.local.get(['mcpServers', 'mcpSeeded']);
+    const s = await chrome.storage.local.get(['mcpServers', 'mcpSeeded', 'mcpSeedVersion']);
     const existing: McpServerConfig[] = Array.isArray(s.mcpServers) ? s.mcpServers : [];
-    // Seed recommended defaults exactly once. After that the user's list is
-    // authoritative — if they remove a default, it stays removed.
-    if (!s.mcpSeeded) {
+    const storedVersion: number = typeof s.mcpSeedVersion === 'number' ? s.mcpSeedVersion : (s.mcpSeeded ? 1 : 0);
+    if (storedVersion < MCP_SEED_VERSION) {
       const haveUrls = new Set(existing.map(x => x.url));
       const merged = [...existing, ...DEFAULT_MCP_SERVERS.filter(d => !haveUrls.has(d.url))];
-      await chrome.storage.local.set({ mcpServers: merged, mcpSeeded: true });
+      await chrome.storage.local.set({ mcpServers: merged, mcpSeeded: true, mcpSeedVersion: MCP_SEED_VERSION });
       return merged;
     }
     return existing;

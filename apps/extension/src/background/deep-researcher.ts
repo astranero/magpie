@@ -48,6 +48,8 @@ let activeAcademicDepth: AcademicDepth = 'abstract';
  * is persisted and linked into the project, so citation chips in the report
  * are clickable and jump to the exact excerpt, exactly like chat citations.
  */
+import { compressText } from '../lib/citations';
+
 export function buildAnchoredContext(chunks: { anchorId: string; docId: string; heading: string; text: string }[], titleByDoc?: Map<string, string>): string {
   let context = '';
   let currentDocId = '';
@@ -57,7 +59,8 @@ export function buildAnchoredContext(chunks: { anchorId: string; docId: string; 
       context += `\n[Source: ${label || c.docId}]\n`;
       currentDocId = c.docId;
     }
-    context += `<c>${c.anchorId}</c> ${c.heading ? `${c.heading}\n` : ''}${c.text}\n\n`;
+    const compressed = compressText(c.text);
+    context += `<c>${c.anchorId}</c> ${c.heading ? `${c.heading}\n` : ''}${compressed}\n\n`;
   }
   return context;
 }
@@ -421,7 +424,7 @@ async function performWebSearch(query: string, signal?: AbortSignal): Promise<Se
     console.warn(`Direct web search failed for "${query}"`, e);
   }
 
-  if (urls.size === 0) {
+  if (urls.size === 0 && await isJinaEnabled()) {
     try {
       urls = extractSearchUrls(await fetchText(`https://r.jina.ai/${ddgUrl}`, 20000, signal));
     } catch (e) {
@@ -431,7 +434,7 @@ async function performWebSearch(query: string, signal?: AbortSignal): Promise<Se
 
   // site:-scoped queries frequently return nothing through the DDG scrape
   // chain — retry once with the operator stripped before giving up.
-  if (urls.size === 0 && /\bsite:\S+/i.test(query)) {
+  if (urls.size === 0 && /\bsite:\S+/i.test(query) && await isJinaEnabled()) {
     const bare = query.replace(/\bsite:\S+\s*/gi, '').trim();
     if (bare.length > 3) {
       try {
@@ -491,6 +494,24 @@ async function searchGoogleNewsRss(query: string, signal?: AbortSignal): Promise
  * and extracts text from PDFs, returns clean markdown.
  * Fallback: local fetch + offscreen Readability parse.
  */
+
+// Jina Reader privacy toggle: the proxy sees every URL we scrape through it
+// (a third party learns the research trail). Default ON (it is the best
+// keyless scraper for JS pages/PDFs); users can opt out in Settings — the
+// pipeline then uses direct fetch + local parsing only. Cached briefly:
+// scrapeUrl runs hundreds of times per research run.
+let jinaEnabledCache: { v: boolean; ts: number } | null = null;
+async function isJinaEnabled(): Promise<boolean> {
+  if (jinaEnabledCache && Date.now() - jinaEnabledCache.ts < 60_000) return jinaEnabledCache.v;
+  let v = true;
+  try {
+    const s = await chrome.storage.local.get(['jinaReaderEnabled']);
+    v = s.jinaReaderEnabled !== false;
+  } catch { /* non-extension context (tests) → default on */ }
+  jinaEnabledCache = { v, ts: Date.now() };
+  return v;
+}
+
 export async function scrapeUrl(url: string, signal?: AbortSignal): Promise<ParsedPage | null> {
   let parsed: ParsedPage | null = null;
 
@@ -517,8 +538,9 @@ export async function scrapeUrl(url: string, signal?: AbortSignal): Promise<Pars
     } catch { /* keep the original URL; the local path below still tries */ }
   }
 
-  // 1) Jina Reader (skipped for unresolved Google News redirects — known 403)
-  if (!/news\.google\.com/i.test(url)) {
+  // 1) Jina Reader (skipped for unresolved Google News redirects — known 403,
+  //    and entirely when the user disabled the proxy in Settings)
+  if (!/news\.google\.com/i.test(url) && await isJinaEnabled()) {
     try {
       const md = await fetchText(`https://r.jina.ai/${url}`, 20000, signal);
       const cleaned = md.trim();
@@ -2050,6 +2072,10 @@ export function formatEvaluationBlock(ev: EvaluationResult, revised: boolean): s
     `> ${ev.recommendation}`,
     ``,
   ];
+  if (ev.dimensions) {
+    const d = ev.dimensions;
+    lines.push(`*Coverage ${d.coverage} · Evidence ${d.evidence} · Depth ${d.depthPerSection} · Honesty ${d.epistemicHonesty} · Structure ${d.structure}*`, '');
+  }
   if (ev.strengths.length) {
     lines.push(`**Strengths:**`);
     ev.strengths.forEach(s => lines.push(`- ${s}`));

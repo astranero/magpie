@@ -76,5 +76,14 @@
       ]
     }
   ],
+  "commands": {
+    "_execute_action": {
+      "suggested_key": {
+        "default": "Alt+M",
+        "mac": "Alt+M"
+      },
+      "description": "Toggle the Magpie side panel"
+    }
+  },
   "short_name": "Magpie"
 }
