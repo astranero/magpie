@@ -62,6 +62,110 @@ function spawnInferenceWorker(): void {
 }
 spawnInferenceWorker();
 
+// ── HTML parse worker proxy ──
+// HTML→Markdown extraction (DOMParser + Readability + Turndown) runs in ITS OWN
+// worker isolate so the ~40-90 MB DOM it builds per page never touches this main
+// thread's heap — which is the isolate that climbed to the V8 cap and OOM-crashed
+// the renderer. Recycled every N parses to reset its isolate (cheap — no model to
+// reload, unlike the inference worker). See parse.worker.ts.
+let parseWorker: Worker;
+let parseReqSeq = 0;
+const parsePending = new Map<number, { resolve: (v: any) => void; reject: (e: any) => void }>();
+let parseCount = 0;
+const PARSE_RECYCLE_EVERY = 15;
+let parseRespawns = 0;
+let parseRespawnWindowStart = Date.now();
+
+function spawnParseWorker(): void {
+  parseWorker = new Worker(new URL('./parse.worker.ts', import.meta.url), { type: 'module' });
+  parseWorker.onmessage = (e: MessageEvent<any>) => {
+    const { id, ok, error, ...rest } = e.data || {};
+    const p = parsePending.get(id);
+    if (!p) return;
+    parsePending.delete(id);
+    ok ? p.resolve(rest) : p.reject(new Error(error || 'parse worker error'));
+  };
+  parseWorker.onerror = (e) => {
+    crumb('offscreen', 'parse worker crashed', e.message || 'unknown');
+    for (const [, p] of parsePending) p.reject(new Error(e.message || 'parse worker crashed'));
+    parsePending.clear();
+    try { parseWorker.terminate(); } catch { /* already gone */ }
+    if (Date.now() - parseRespawnWindowStart > 60_000) { parseRespawns = 0; parseRespawnWindowStart = Date.now(); }
+    if (++parseRespawns <= 5) spawnParseWorker();
+  };
+}
+spawnParseWorker();
+
+const PARSE_CALL_TIMEOUT_MS = 30_000;
+function callParseWorker<T>(html: string, url: string): Promise<T> {
+  const id = ++parseReqSeq;
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      if (parsePending.delete(id)) reject(new Error('parse worker timed out'));
+    }, PARSE_CALL_TIMEOUT_MS);
+    parsePending.set(id, {
+      resolve: (v: any) => { clearTimeout(timer); resolve(v); },
+      reject: (e: any) => { clearTimeout(timer); reject(e); },
+    });
+    parseWorker.postMessage({ type: 'parse', id, html, url });
+  });
+}
+
+/** Reset the parse worker's isolate heap every N parses (cheap — no model). */
+function maybeRecycleParseWorker(): void {
+  if (++parseCount % PARSE_RECYCLE_EVERY === 0) {
+    try { parseWorker.terminate(); } catch { /* ignore */ }
+    spawnParseWorker();
+    crumb('offscreen', 'parse worker recycled', { after: parseCount });
+  }
+}
+
+/**
+ * Cheap main-thread pre-processing done on the STRING (no DOM) before the HTML is
+ * handed to the parse worker: cap the size, and strip the elements that either bloat
+ * the DOM or trigger Chrome resource/CSP loads. Kept on the main thread precisely
+ * because it's string-only (no heap-heavy DOM) — and it shrinks the payload copied
+ * to the worker.
+ */
+function prestripHtml(rawHtml: string): string {
+  // A giant scraped page (multi-MB HTML) expands 5–10× as a DOM; 3 MB is ample for
+  // article extraction, so truncate the boilerplate tail.
+  const MAX_HTML = 3_000_000;
+  let html = rawHtml.length > MAX_HTML ? rawHtml.slice(0, MAX_HTML) : rawHtml;
+  // <script>/<link>/<style> would make Chrome fire CSP "script blocked" + preload
+  // fetches even in a DOMParser doc; <svg> sprites/<template>/comments just bloat.
+  return html
+    .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, '')
+    .replace(/<script\b[^>]*\/?>/gi, '')
+    .replace(/<link\b[^>]*>/gi, '')
+    .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, '')
+    .replace(/<svg\b[^>]*>[\s\S]*?<\/svg>/gi, '')
+    .replace(/<template\b[^>]*>[\s\S]*?<\/template>/gi, '')
+    .replace(/<!--[\s\S]*?-->/g, '');
+}
+
+/**
+ * MAIN-THREAD fallback extractor — identical logic to parse.worker.ts, used ONLY
+ * when the parse worker errors/times out so a hiccup never drops a source. This is
+ * the heap-heavy path we moved off-thread, so it runs rarely, for one page.
+ */
+function parseHtmlInline(html: string, url: string): { title: string; markdown: string; wordCount: number } {
+  const parsed = new DOMParser().parseFromString(html, 'text/html');
+  parsed.querySelectorAll('script, noscript, style, link, iframe, object, embed')
+    .forEach(el => el.parentNode?.removeChild(el));
+  const base = parsed.createElement('base');
+  base.href = url;
+  parsed.head?.prepend(base);
+  const article = new Readability(parsed, { keepClasses: true }).parse();
+  const htmlContent: string = article?.content || parsed.body?.innerHTML || '';
+  const title: string = article?.title || parsed.title || 'Untitled';
+  const turndown = new TurndownService({ headingStyle: 'atx', codeBlockStyle: 'fenced' });
+  let markdown = turndown.turndown(htmlContent).replace(/\n{4,}/g, '\n\n\n').trim();
+  const wordCount = markdown.split(/\s+/).filter(w => w.length > 0).length;
+  try { parsed.documentElement.innerHTML = ''; } catch { /* ignore */ }
+  return { title, markdown, wordCount };
+}
+
 // IMPORTANT: an offscreen document exposes ONLY chrome.runtime — chrome.storage
 // is undefined here, and reading it at top level throws and kills the whole doc
 // (embeds/rerank/PDF parse all die). So we ask the service worker (which DOES
@@ -319,73 +423,22 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
   }
 
   if (request?.action === 'OFFSCREEN_PARSE_HTML') {
-    try {
-      const { html: rawHtml, url } = request as { html: string; url: string };
-      // A giant scraped page (some sites serve multi-MB HTML) expands to 5–10× in
-      // the DOM that DOMParser + Readability build on this main thread — big
-      // enough to OOM/crash the offscreen renderer mid-research. 3 MB is ample for
-      // article extraction; truncate the tail (boilerplate/comments) rather than
-      // risk the whole run.
-      const MAX_HTML = 3_000_000;
-      let html = rawHtml.length > MAX_HTML ? rawHtml.slice(0, MAX_HTML) : rawHtml;
-
-      // Strip <script>/<link>/<style> from the RAW STRING before DOMParser. These
-      // never execute in a DOMParser doc (no browsing context), BUT Chrome still
-      // fires a CSP "Loading the script … has been blocked" console violation for
-      // each <script src> element the moment parseFromString creates it — noisy
-      // when a scraped page (e.g. a Cloudflare bot-check) is script-heavy. Removing
-      // them from the string means the elements are never created, so no report.
-      // Also drop the heaviest non-article nodes BEFORE building the DOM: inline
-      // <svg> icon sprites (often 100s of KB), HTML comments, and <template>
-      // payloads. Readability would discard them anyway, but only AFTER they've
-      // inflated the parsed DOM on this main thread — the heap we're bounding.
-      html = html
-        .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, '')
-        .replace(/<script\b[^>]*\/?>/gi, '')
-        .replace(/<link\b[^>]*>/gi, '')
-        .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, '')
-        .replace(/<svg\b[^>]*>[\s\S]*?<\/svg>/gi, '')
-        .replace(/<template\b[^>]*>[\s\S]*?<\/template>/gi, '')
-        .replace(/<!--[\s\S]*?-->/g, '');
-
-      const parsed = new DOMParser().parseFromString(html, 'text/html');
-
-      // Belt-and-suspenders: drop any residual resource-referencing nodes before
-      // Readability/Turndown touch innerHTML.
-      parsed.querySelectorAll('script, noscript, style, link, iframe, object, embed')
-        .forEach(el => el.parentNode?.removeChild(el));
-
-      // Resolve relative URLs against the source page
-      const base = parsed.createElement('base');
-      base.href = url;
-      parsed.head?.prepend(base);
-
-      const reader = new Readability(parsed, { keepClasses: true });
-      const article = reader.parse();
-
-      const htmlContent: string = article?.content || parsed.body?.innerHTML || '';
-      const title: string = article?.title || parsed.title || 'Untitled';
-
-      const turndown = new TurndownService({
-        headingStyle: 'atx',
-        codeBlockStyle: 'fenced'
+    const { html: rawHtml, url } = request as { html: string; url: string };
+    // Cheap string-only pre-processing stays on the main thread; the heap-heavy DOM
+    // build (DOMParser + Readability + Turndown) runs in the parse WORKER isolate so
+    // it can't grow this main isolate toward its V8-cap OOM. Fall back to an inline
+    // parse only if the worker errors/times out, so a hiccup never drops a source.
+    const html = prestripHtml(rawHtml);
+    callParseWorker<{ title: string; markdown: string; wordCount: number }>(html, url)
+      .then(res => { maybeRecycleParseWorker(); sendResponse({ ok: true, ...res }); })
+      .catch(() => {
+        try {
+          crumb('offscreen', 'parse worker fallback → inline', { url: url.slice(0, 70) });
+          sendResponse({ ok: true, ...parseHtmlInline(html, url) });
+        } catch (err) {
+          sendResponse({ ok: false, error: err instanceof Error ? err.message : String(err) });
+        }
       });
-
-      let markdown = turndown.turndown(htmlContent);
-      markdown = markdown.replace(/\n{4,}/g, '\n\n\n').trim();
-
-      const wordCount = markdown.split(/\s+/).filter(w => w.length > 0).length;
-
-      // Help V8 reclaim the (up to 3 MB) parsed DOM promptly. This offscreen
-      // parses hundreds of pages per run and its main-thread heap climbs toward an
-      // OOM that no mid-run recreate/worker-recycle can free; emptying the parsed
-      // document breaks the largest retained graph so GC can drop it sooner.
-      try { parsed.documentElement.innerHTML = ''; } catch { /* ignore */ }
-
-      sendResponse({ ok: true, title, markdown, wordCount });
-    } catch (err) {
-      sendResponse({ ok: false, error: err instanceof Error ? err.message : String(err) });
-    }
     return true;
   }
 

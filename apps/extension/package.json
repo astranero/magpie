@@ -21,6 +21,7 @@
     "clsx": "^2.1.1",
     "idb-keyval": "^6.3.0",
     "katex": "^0.17.0",
+    "linkedom": "^0.18.13",
     "lucide-react": "^1.24.0",
     "pdfjs-dist": "^4.7.76",
     "react": "^18.3.1",
