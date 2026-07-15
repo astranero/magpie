@@ -747,6 +747,28 @@ export function sourceTier(url: string, citations?: number): SourceTier {
   return 'standard';
 }
 
+/**
+ * Source-quality boost added to a chunk's relevance logit when selecting which
+ * excerpts feed the report. Modest by design: reranker relevance is in logit space
+ * (relevant ≳ 0, gate at −4), so a ~0–3 boost reorders the top-k toward high-tier /
+ * well-cited sources WITHOUT overpowering relevance — and it only ever reorders
+ * chunks that already cleared the relevance gate (see gateRerankedChunks).
+ */
+export function qualityBoostValue(tier: SourceTier, citations?: number): number {
+  return (tier === 'high' ? 1.5 : 0) + 0.4 * Math.log10(1 + Math.max(0, citations ?? 0));
+}
+
+/**
+ * Retracted/withdrawn work is the opposite of a quality source. Databases
+ * (Semantic Scholar, CrossRef, journals) flag it by prefixing/tagging the title
+ * ("RETRACTED:", "WITHDRAWN:", "Retraction Note:", "(Retracted)"). A full check
+ * would need per-paper OpenAlex `is_retracted` (too many API calls per run); this
+ * title heuristic catches the DB-flagged common case cheaply.
+ */
+export function isRetractedTitle(title?: string): boolean {
+  return !!title && /^\s*(retracted|withdrawn)\b|\bretraction\s*(note|of|:)|\(retracted\b/i.test(title);
+}
+
 /** Dedupe records: same document (docId) or same URL = same source. */
 export function dedupeSourceRecords(records: SourceRecord[]): SourceRecord[] {
   const seen = new Set<string>();
@@ -1329,6 +1351,14 @@ async function runAcademicAgent(
     activeLimits.s2Limit + activeLimits.hfLimit,
     Math.floor(activeLimits.totalSourcesCap / 2)
   );
+  // Always drop retracted/withdrawn papers (quality guard, any mode).
+  const retracted = deduped.filter(p => isRetractedTitle(p.title));
+  if (retracted.length > 0) {
+    const cleaned = deduped.filter(p => !isRetractedTitle(p.title));
+    deduped.length = 0;
+    deduped.push(...cleaned);
+    onProgress(`[ACADEMIC] Dropped ${retracted.length} retracted/withdrawn paper(s)`);
+  }
   if (activeQuality === 'high') {
     const nowYear = new Date().getFullYear();
     const before = deduped.length;
@@ -2252,16 +2282,18 @@ async function synthesizeStageBrief(
   labelByDoc: Map<string, AgentLabel>,
   llmChatFn: LlmChatFn,
   specPreamble = '',
-  handoffContext = ''
+  handoffContext = '',
+  qualityBoost: (docId: string) => number = () => 0
 ): Promise<string> {
   if (stageDocIds.length === 0) return '';
 
-  // Retrieve chunks only from this stage's new docs
-  const rawChunks = await searchSessionChunks(projectId, topic, 30, stageDocIds);
+  // Retrieve chunks only from this stage's new docs — quality-weighted so the brief
+  // leans on the stage's highest-tier / most-cited sources among the relevant ones.
+  const rawChunks = await searchSessionChunks(projectId, topic, 30, stageDocIds, { qualityBoost });
   // Also fetch chunks for each sub-question to get better coverage
   const extra: any[] = [];
   for (const q of subQuestions) {
-    const hits = await searchSessionChunks(projectId, q, 15, stageDocIds);
+    const hits = await searchSessionChunks(projectId, q, 15, stageDocIds, { qualityBoost });
     hits.forEach(c => extra.push(c));
   }
   // Merge + deduplicate by chunk id
@@ -2431,6 +2463,11 @@ async function runDeeperResearch(
   const agents: AgentOutcome[] = [];
   // labelByDoc persists across stages so later briefs can tag source types
   const labelByDoc = new Map<string, AgentLabel>();
+  // docId → quality boost, so retrieval favors high-tier / well-cited sources
+  const qualityByDoc = new Map<string, number>();
+  const recordQuality = (o: AgentOutcome) =>
+    o.sources.forEach(s => qualityByDoc.set(s.docId, qualityBoostValue(s.tier, s.citations)));
+  const qualityBoost = (docId: string) => qualityByDoc.get(docId) ?? 0;
 
   let stageQueries = webQueries.slice(0, activeLimits.webQueries);
 
@@ -2482,6 +2519,7 @@ async function runDeeperResearch(
       if (o.status === 'fulfilled') {
         if (o.value.label === 'MCP' && o.value.docIds.length === 0) continue;
         agents.push(o.value);
+        recordQuality(o.value);
         stageDocIds.push(...o.value.docIds);
         o.value.docIds.forEach(d => labelByDoc.set(d, o.value.label));
       } else {
@@ -2499,6 +2537,7 @@ async function runDeeperResearch(
         const refOutcome = await followReferences(projectId, topic, refs, refBudget, onProgress, signal);
         if (refOutcome.docIds.length > 0) {
           agents.push(refOutcome);
+          recordQuality(refOutcome);
           stageDocIds.push(...refOutcome.docIds);
           refOutcome.docIds.forEach(d => labelByDoc.set(d, refOutcome.label));
         }
@@ -2517,7 +2556,8 @@ async function runDeeperResearch(
         stage, rounds, topic, subQuestions,
         uniqueStageDocIds, projectId, labelByDoc, llmChatFn,
         specPreamble,    // Improvement 3: spec-driven
-        handoffContext   // Improvement 2: context reset handoff
+        handoffContext,  // Improvement 2: context reset handoff
+        qualityBoost     // favor high-tier / well-cited sources in the brief
       ).catch(err => {
         onProgress(`[STAGE ${stage}/${rounds}] Brief synthesis failed: ${err?.message || err}`);
         return '';
@@ -2630,7 +2670,7 @@ async function runDeeperResearch(
     const uniqueDocIds = Array.from(new Set(allDocIds));
     for (const q of [topic, ...subQuestions]) {
       if (signal?.aborted) throw new Error('AbortError');
-      const chunks = await searchSessionChunks(projectId, q, activeLimits.chunksPerAngle, uniqueDocIds);
+      const chunks = await searchSessionChunks(projectId, q, activeLimits.chunksPerAngle, uniqueDocIds, { qualityBoost });
       chunks.forEach(c => chunkSet.set(c.id, c));
     }
     const charBudget = await getSynthesisCharBudget();

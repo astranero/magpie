@@ -18,7 +18,13 @@ export interface RankablePaper {
   citations?: number;
   influentialCitations?: number;
   hasFullText?: boolean;
+  venue?: string;
 }
+
+// Top-tier venues (name fragments) — a prestige signal orthogonal to raw citation
+// count that lets a strong paper from a landmark venue outrank a heavily-cited one
+// from an obscure outlet. Matched case-insensitively as a substring of the venue.
+const TOP_VENUES = /\b(nature|science|cell|lancet|nejm|new england journal|pnas|neurips|nips|\bicml\b|\biclr\b|\bcvpr\b|\biccv\b|\beccv\b|\bacl\b|emnlp|naacl|siggraph|\bkdd\b|the web conference|www '|\bchi\b|usenix|ieee symposium on security|oakland|\bsosp\b|\bosdi\b|\bfse\b|\bicse\b)\b/i;
 
 export function paperQualityScore(p: RankablePaper, nowYear: number): number {
   const year = Number(p.year) || 0;
@@ -30,8 +36,9 @@ export function paperQualityScore(p: RankablePaper, nowYear: number): number {
   const influential = Math.log10(1 + (p.influentialCitations ?? 0)) * 0.5;
   const recency = year > 0 ? Math.max(0, 1 - (nowYear - year) / 10) : 0; // 0 … 1
   const fullText = p.hasFullText ? 0.5 : 0;                      // extractable > abstract-only
+  const venue = p.venue && TOP_VENUES.test(p.venue) ? 1.0 : 0;   // landmark-venue prestige
 
-  return citeScore + velocity + influential + recency + fullText;
+  return citeScore + velocity + influential + recency + fullText + venue;
 }
 
 /**

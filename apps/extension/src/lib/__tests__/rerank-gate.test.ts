@@ -63,3 +63,18 @@ describe('isConfidentMatch (chat: ground on workspace vs go to web)', () => {
     expect(isConfidentMatch([{}, {}])).toBe(true);
   });
 });
+
+describe('gateRerankedChunks — quality boost', () => {
+  const mkc = (id: string, score: number) => ({ chunk: id, score });
+  it('reorders RELEVANT chunks by relevance + boost', () => {
+    // both clear the gate (>-4); the boost lifts the lower-relevance one on top
+    const boost = (c: string) => (c === 'cited' ? 3 : 0);
+    const out = gateRerankedChunks([mkc('fresh', 1), mkc('cited', -1)], 2, boost);
+    expect(out[0]).toBe('cited'); // -1 + 3 = 2 > 1
+    expect(out).toContain('fresh');
+  });
+  it('boost NEVER admits a chunk below the relevance gate', () => {
+    const out = gateRerankedChunks([mkc('offtopic', -9)], 5, () => 100);
+    expect(out).not.toContain('offtopic'); // gate is on raw relevance, boost can't override
+  });
+});

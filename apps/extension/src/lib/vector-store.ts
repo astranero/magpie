@@ -152,7 +152,7 @@ export async function searchSessionChunks(
   query: string,
   limit: number = 20,
   filterDocIds?: string[],
-  opts?: { priority?: boolean }
+  opts?: { priority?: boolean; qualityBoost?: (docId: string) => number }
 ): Promise<Chunk[]> {
   // Rehydrate persisted chunks lost to a service worker restart
   await ensureProjectIndexed(sessionId);
@@ -219,7 +219,12 @@ export async function searchSessionChunks(
         chunk,
         score: rerankRes.scores[idx] ?? 0
       }));
-      const selected = gateRerankedChunks(scored, limit);
+      // Source-quality boost (citations/tier) reorders the top-k AMONG relevant
+      // chunks — never admits an off-topic one (the gate stays on raw relevance).
+      const boost = opts?.qualityBoost
+        ? (c: Chunk) => opts.qualityBoost!((c as any).docId)
+        : undefined;
+      const selected = gateRerankedChunks(scored, limit, boost);
       // Tag each survivor with its rerank score so callers can judge
       // confidence (e.g. chat's web fallback fires when the best match is only
       // borderline noise). Additive field — chunk shape is otherwise unchanged.
@@ -273,14 +278,24 @@ export function isConfidentMatch(chunks: Array<{ rerankScore?: number }>): boole
  */
 const RERANK_CLIFF = 7;
 
-export function gateRerankedChunks<T>(scored: Array<{ chunk: T; score: number }>, limit: number): T[] {
+export function gateRerankedChunks<T>(
+  scored: Array<{ chunk: T; score: number }>,
+  limit: number,
+  boost?: (chunk: T) => number,
+): T[] {
   const sorted = [...scored].sort((a, b) => b.score - a.score);
   let relevant = sorted.filter(s => s.score > RERANK_MIN_SCORE);
   if (relevant.length > 0 && relevant[0].score > 0) {
     relevant = relevant.filter(s => s.score > relevant[0].score - RERANK_CLIFF);
   }
   if (relevant.length > 0) {
-    return relevant.slice(0, limit).map(s => s.chunk);
+    // Reorder the RELEVANT survivors by relevance + source-quality boost so the
+    // report leans on high-citation / high-authority sources. The relevance GATE
+    // above is untouched, so a high-quality but off-topic chunk still never enters.
+    const ranked = boost
+      ? [...relevant].sort((a, b) => (b.score + boost(b.chunk)) - (a.score + boost(a.chunk)))
+      : relevant;
+    return ranked.slice(0, limit).map(s => s.chunk);
   }
   // Nothing cleared the gate. Keep the 2 best only if they're at least
   // borderline — a query with no relevant sources should return none.

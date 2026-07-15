@@ -58,3 +58,17 @@ describe('rankPapers', () => {
     expect(new Set(out.map(p => p.title)).size).toBe(12);
   });
 });
+
+describe('venue prestige', () => {
+  it('a landmark venue outscores an obscure one, all else equal', () => {
+    const base = { title: 'x', year: '2020', citations: 10 };
+    const top = paperQualityScore({ ...base, venue: 'NeurIPS 2020' }, NOW);
+    const obscure = paperQualityScore({ ...base, venue: 'Intl. Workshop on Things' }, NOW);
+    expect(top).toBeGreaterThan(obscure);
+    expect(top - obscure).toBeCloseTo(1.0, 5);
+  });
+  it('no venue = no venue bonus', () => {
+    const base = { title: 'x', year: '2020', citations: 10 };
+    expect(paperQualityScore(base, NOW)).toBe(paperQualityScore({ ...base, venue: 'Random Journal' }, NOW));
+  });
+});
