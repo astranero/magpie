@@ -14,11 +14,17 @@
 // the main thread runs unchanged. Pure JS, no eval/wasm → fine under the offscreen
 // CSP (`script-src 'self' 'wasm-unsafe-eval'`).
 
-import { DOMParser } from 'linkedom';
+import { DOMParser, parseHTML } from 'linkedom';
 import { Readability } from '@mozilla/readability';
 import TurndownService from 'turndown';
 
-// Turndown parses HTML strings via a global `DOMParser`; give it linkedom's.
+// A Web Worker has NO `document` and NO `DOMParser`. Turndown falls back to
+// `document.implementation.createHTMLDocument()` when it can't find a usable
+// DOMParser, so without a global `document` it throws "document is not defined"
+// (the captured worker error) and every parse fell back to cheap string extraction.
+// Provide linkedom's DOM globals so Turndown + Readability run exactly as on a page.
+const { document } = parseHTML('<!DOCTYPE html><html><head></head><body></body></html>');
+(globalThis as any).document = document;
 (globalThis as any).DOMParser = DOMParser;
 
 interface ParseReq { type: 'parse'; id: number; html: string; url: string }
@@ -38,8 +44,15 @@ function extract(html: string, url: string): { title: string; markdown: string; 
   const htmlContent: string = article?.content || parsed.body?.innerHTML || '';
   const title: string = article?.title || parsed.title || 'Untitled';
 
+  // Pass turndown a NODE, not a string. Turndown's STRING path calls an internal
+  // HTML parser that needs a global DOMParser/document a Worker lacks (the captured
+  // "document is not defined" error). Handing it an already-parsed linkedom node
+  // skips that path entirely — turndown just clones and walks the node. Verified:
+  // the node path works with no window/document globals present.
+  const contentDoc: any = new (DOMParser as any)().parseFromString(`<div id="td-root">${htmlContent}</div>`, 'text/html');
+  const contentNode = contentDoc.getElementById('td-root') || contentDoc.body;
   const turndown = new TurndownService({ headingStyle: 'atx', codeBlockStyle: 'fenced' });
-  let markdown = turndown.turndown(htmlContent);
+  let markdown = turndown.turndown(contentNode as any);
   markdown = markdown.replace(/\n{4,}/g, '\n\n\n').trim();
 
   const wordCount = markdown.split(/\s+/).filter(w => w.length > 0).length;
