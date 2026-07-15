@@ -70,6 +70,7 @@ export const LoreView: React.FC<LoreViewProps> = ({
     searchTimer.current = window.setTimeout(() => {
       if (typeof chrome === 'undefined' || !chrome.runtime?.sendMessage) { setSearching(false); return; }
       chrome.runtime.sendMessage({ action: 'SEARCH_LIBRARY', query: q }, (res: any) => {
+        if (chrome.runtime.lastError) { return; } // dead SW — search silently no-ops
         if (chrome.runtime.lastError) {
           setSearching(false);
           return;

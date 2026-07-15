@@ -4,9 +4,15 @@
 // Extracted from service-worker.ts. Depends only on chrome.storage config +
 // fetch — no DB, caches, or worker state. Guarded by e2e/chat.spec.ts.
 
+import { BUILTIN_GEMINI_SENTINEL } from '../lib/provider-detect';
+
 export async function getProviderSettings(): Promise<Record<string, string>> {
   const s = await chrome.storage.local.get(['customUrl', 'customKey', 'customModel', 'visionModel']);
-  const endpoint = s.customUrl ? (s.customUrl.endsWith('/chat/completions') ? s.customUrl : `${s.customUrl.replace(/\/+$/, '')}/chat/completions`) : '';
+  // Built-in Gemini sentinel passes through untouched — it's a client branch,
+  // not a URL (appending /chat/completions to it would corrupt the check).
+  const endpoint = s.customUrl === BUILTIN_GEMINI_SENTINEL
+    ? BUILTIN_GEMINI_SENTINEL
+    : s.customUrl ? (s.customUrl.endsWith('/chat/completions') ? s.customUrl : `${s.customUrl.replace(/\/+$/, '')}/chat/completions`) : '';
   return {
     apiKey: s.customKey || '',
     endpoint,
@@ -15,10 +21,61 @@ export async function getProviderSettings(): Promise<Record<string, string>> {
   };
 }
 
+// ── Chrome built-in Gemini (Prompt API / Gemini Nano) ──────────────────────
+// Zero-install on-device fallback for users with no key and no Ollama. NOT
+// OpenAI-compatible, so it gets its own branch. Small context — long research
+// prompts may exceed its quota; the error message steers users to BYOK, which
+// is always the preferred path when configured.
+async function builtinGeminiSession(systemPrompt: string): Promise<any> {
+  const LM: any = (globalThis as any).LanguageModel;
+  if (!LM?.create) throw new Error('Built-in Gemini is not available in this Chrome. Set an API endpoint in Settings.');
+  return LM.create({ initialPrompts: [{ role: 'system', content: systemPrompt }] });
+}
+
+function builtinPrompt(history: any[], userPrompt: string): string {
+  // Prompt API sessions take turns; fold history into one turn for simplicity.
+  const past = history.map(h => `${h.role === 'assistant' ? 'Assistant' : 'User'}: ${typeof h.content === 'string' ? h.content : ''}`).join('\n');
+  return past ? `${past}\nUser: ${userPrompt}` : userPrompt;
+}
+
+function builtinGeminiError(err: unknown): Error {
+  const msg = String((err as any)?.message || err);
+  if (/quota|too large|input.*long/i.test(msg)) {
+    return new Error('Built-in Gemini ran out of context (it is a small on-device model). For research and long chats, set an API endpoint in Settings — your own key is always preferred.');
+  }
+  return new Error(`Built-in Gemini error: ${msg}`);
+}
+
+async function chatWithBuiltinGemini(systemPrompt: string, history: any[], userPrompt: string, signal?: AbortSignal, onDelta?: (d: string) => void): Promise<string> {
+  let session: any = null;
+  try {
+    session = await builtinGeminiSession(systemPrompt);
+    const prompt = builtinPrompt(history, userPrompt);
+    if (onDelta) {
+      let full = '';
+      const stream = session.promptStreaming(prompt, { signal });
+      // Newer Chrome yields deltas; older yields cumulative text. Handle both.
+      let last = '';
+      for await (const chunk of stream as AsyncIterable<string>) {
+        const piece = chunk.startsWith(last) && last.length > 0 ? chunk.slice(last.length) : chunk;
+        last = chunk.startsWith(last) ? chunk : last + chunk;
+        full += piece;
+        onDelta(piece);
+      }
+      return full;
+    }
+    return await session.prompt(prompt, { signal });
+  } catch (err) {
+    throw builtinGeminiError(err);
+  } finally {
+    try { session?.destroy?.(); } catch { /* session already gone */ }
+  }
+}
 
 export async function chatWithCustom(systemPrompt: string, history: any[], userPrompt: string, signal?: AbortSignal): Promise<string> {
   const { apiKey, endpoint, model } = await getProviderSettings();
   if (!endpoint) throw new Error('Custom endpoint missing.');
+  if (endpoint === BUILTIN_GEMINI_SENTINEL) return chatWithBuiltinGemini(systemPrompt, history, userPrompt, signal);
 
   const headers: Record<string, string> = {
     'Content-Type': 'application/json'
@@ -93,6 +150,11 @@ export async function chatWithCustomStream(
 
   const { apiKey, endpoint, model } = await getProviderSettings();
   if (!endpoint) throw new Error('Custom endpoint missing.');
+  if (endpoint === BUILTIN_GEMINI_SENTINEL) {
+    await chatWithBuiltinGemini(systemPrompt, history, userPrompt, signal, onDelta);
+    flush();
+    return;
+  }
 
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
   if (apiKey) headers['Authorization'] = `Bearer ${apiKey}`;
@@ -216,6 +278,7 @@ export async function chatWithTools(
 
 export async function handleFetchCustomModels(request: Record<string, unknown>): Promise<Record<string, unknown>> {
   const url = request.url as string;
+  if (url === BUILTIN_GEMINI_SENTINEL) return { models: ['gemini-nano'] };
   const apiKey = request.apiKey as string;
   if (!url) throw new Error('Missing Custom Base URL');
 

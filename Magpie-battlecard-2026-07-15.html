@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Battlecard: Magpie vs NotebookLM — July 2026</title>
+<style>
+:root{
+  --bg:#0a0d14; --elev:#0f131c; --surface:#161b28; --hover:#1e2536;
+  --text:#fff; --text2:rgba(255,255,255,.72); --muted:rgba(255,255,255,.5);
+  --accent:#3b82f6; --accent2:#2563eb;
+  --win:#10b981; --lose:#ef4444; --tie:#f59e0b;
+  --border:rgba(255,255,255,.09); --radius:12px;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--text);font:15px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;padding:0 0 80px}
+header{padding:36px 24px 20px;max-width:1060px;margin:0 auto}
+header h1{font-size:26px;letter-spacing:-.02em}
+header h1 .vs{color:var(--muted);font-weight:400}
+header p{color:var(--muted);font-size:13px;margin-top:6px}
+.wrap{max-width:1060px;margin:0 auto;padding:0 24px}
+nav.tabs{display:flex;gap:8px;margin:14px 0 22px;flex-wrap:wrap}
+.tab{background:var(--surface);border:1px solid var(--border);color:var(--text2);padding:9px 18px;border-radius:999px;cursor:pointer;font-size:13.5px;font-weight:600;transition:all .2s}
+.tab:hover{background:var(--hover);color:var(--text)}
+.tab.active{background:var(--accent);border-color:var(--accent);color:#fff}
+.tab-content{display:none}
+.tab-content.active{display:block;animation:fade .25s ease}
+@keyframes fade{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
+h2{font-size:19px;margin:26px 0 12px;letter-spacing:-.01em}
+h3{font-size:15px;margin:20px 0 8px;color:var(--text)}
+.card{background:var(--elev);border:1px solid var(--border);border-radius:var(--radius);padding:20px 22px;margin-bottom:16px}
+table{width:100%;border-collapse:collapse;font-size:13.5px;background:var(--elev);border-radius:var(--radius);overflow:hidden}
+th,td{text-align:left;padding:11px 14px;border-bottom:1px solid var(--border);vertical-align:top}
+th{background:var(--surface);font-size:12px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);position:sticky;top:0}
+td:first-child{color:var(--text2);font-weight:600;width:24%}
+.w{color:var(--win);font-weight:700}
+.l{color:var(--lose);font-weight:700}
+.t{color:var(--tie);font-weight:700}
+.pill{display:inline-block;font-size:11px;font-weight:700;padding:2px 10px;border-radius:999px;margin-right:6px}
+.pill.win{background:rgba(16,185,129,.14);color:var(--win)}
+.pill.lose{background:rgba(239,68,68,.14);color:var(--lose)}
+.pill.info{background:rgba(59,130,246,.14);color:var(--accent)}
+ul{padding-left:20px;color:var(--text2)}
+li{margin:6px 0}
+li strong{color:var(--text)}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+@media(max-width:760px){.grid2{grid-template-columns:1fr}}
+.q{background:var(--surface);border-left:3px solid var(--accent);padding:10px 14px;border-radius:0 8px 8px 0;margin:8px 0;color:var(--text2);font-style:italic}
+.q b{color:var(--text);font-style:normal}
+.small{font-size:12px;color:var(--muted)}
+a{color:var(--accent);text-decoration:none}
+a:hover{text-decoration:underline}
+.honest{border-left:3px solid var(--tie);padding-left:14px;color:var(--text2);margin:10px 0}
+</style>
+</head>
+<body>
+<header>
+  <h1>Magpie <span class="vs">vs</span> NotebookLM</h1>
+  <p>Competitive battlecard · Generated 2026-07-15 · Sources: public web research (Google blog, G2, third-party guides) + Magpie repo</p>
+</header>
+<div class="wrap">
+<nav class="tabs">
+  <button class="tab active" data-tab="matrix">Comparison Matrix</button>
+  <button class="tab" data-tab="nblm">NotebookLM</button>
+  <button class="tab" data-tab="magpie">Magpie</button>
+</nav>
+
+<!-- ═══════════ MATRIX ═══════════ -->
+<section id="matrix" class="tab-content active">
+  <h2>Head-to-head</h2>
+  <table>
+    <tr><th>Dimension</th><th>Magpie</th><th>NotebookLM (Jul 2026)</th><th>Edge</th></tr>
+    <tr><td>Data location</td><td>100% on-device (IndexedDB, local ONNX models). No first-party backend, no telemetry.</td><td>Google Cloud only. No offline mode on any plan.</td><td class="w">Magpie</td></tr>
+    <tr><td>Model choice</td><td>BYO: Ollama (fully local), OpenRouter, Gemini, OpenAI — any OpenAI-compatible endpoint.</td><td>Gemini 3.5 only, same model every tier.</td><td class="w">Magpie</td></tr>
+    <tr><td>Citations</td><td>Chunk-level anchors — every claim clicks through to the exact highlighted passage; reranker faithfulness verification drops unsupported citations.</td><td>Source-grounded inline citations; strong fidelity, but no independent verification pass; export friction.</td><td class="w">Magpie</td></tr>
+    <tr><td>Deep research</td><td>Staged agentic pipeline: perspective planning → outline co-evolution → section-scoped synthesis → faithfulness check → weighted quality audit. Web + academic (S2/CrossRef/arXiv + BibTeX) + news + MCP.</td><td>Deep Research (Nov 2025): agentic web source discovery + summary. Rate-limited by tier (10/mo free → 75/day Ultra).</td><td class="t">Tie — different strengths</td></tr>
+    <tr><td>Capture while browsing</td><td>Native: one-click page capture, YouTube transcripts, PDFs, images (vision OCR), page-context chat with link following.</td><td>None — upload/import model (Drive sync auto-updates docs). No browser-page awareness.</td><td class="w">Magpie</td></tr>
+    <tr><td>Cross-corpus query</td><td>One global library ("Lore"); workspaces reference it; query spans everything.</td><td>Notebooks are silos — no cross-notebook search on any tier (top G2 complaint).</td><td class="w">Magpie</td></tr>
+    <tr><td>Media outputs</td><td>None.</td><td>Audio Overviews (80 languages, 4 formats), Video Overviews, Cinematic video (Veo 3, Ultra), slides, quizzes, flashcards, data tables.</td><td class="l">NotebookLM</td></tr>
+    <tr><td>Agentic compute</td><td>No code execution.</td><td>Per-notebook secure cloud computer, code execution, 100+ skills (Jun 2026 — Ultra/Workspace first).</td><td class="l">NotebookLM</td></tr>
+    <tr><td>Collaboration</td><td>Single-user. Optional Drive/local-folder sync of markdown.</td><td>Sharing + collaboration from Plus tier; Workspace Studio integration.</td><td class="l">NotebookLM</td></tr>
+    <tr><td>Cost</td><td>Free + your own API usage (or free with local Ollama).</td><td>Free tier (capped) → Plus $4.99 → Pro $19.99 → Ultra $99.99/$200 per month.</td><td class="t">Depends on usage</td></tr>
+    <tr><td>Limits</td><td>No source caps; per-session working set ~2000 chunks; scraping-dependent extraction.</td><td>50–600 sources/notebook, 50–5000 chats/day, 500k words per source — hard caps by tier.</td><td class="t">Different shapes</td></tr>
+    <tr><td>Polish / maturity</td><td>Pre-release indie project.</td><td>Google-scale product, rapid shipping cadence, huge user base.</td><td class="l">NotebookLM</td></tr>
+  </table>
+
+  <h2>Quick win/loss guide</h2>
+  <div class="grid2">
+    <div class="card">
+      <span class="pill win">MAGPIE WINS WHEN</span>
+      <ul>
+        <li>Privacy is non-negotiable — regulated data, proprietary research, FERPA-adjacent, or "nothing leaves my machine".</li>
+        <li>User lives in the browser and wants to <strong>capture as they read</strong> (pages, YouTube, PDFs) instead of uploading files.</li>
+        <li>Citations must be <strong>verifiable to the exact passage</strong> — audit-grade reports.</li>
+        <li>They want their own model (local Ollama, or a specific frontier model via key).</li>
+        <li>One permanent, exportable, cross-queryable library beats siloed notebooks.</li>
+      </ul>
+    </div>
+    <div class="card">
+      <span class="pill lose">NOTEBOOKLM WINS WHEN</span>
+      <ul>
+        <li>Audio/video overviews are the draw (students, commuter learning, content teams).</li>
+        <li>Team collaboration and sharing matter.</li>
+        <li>Zero-setup, polished, free-tier product is required — no API keys, no extension install.</li>
+        <li>They need agentic code execution over sources (data analysis in-notebook).</li>
+        <li>Google Workspace shop with Drive-native workflows.</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════ NOTEBOOKLM ═══════════ -->
+<section id="nblm" class="tab-content">
+  <div class="card">
+    <h2 style="margin-top:0">Profile</h2>
+    <ul>
+      <li><strong>What it is:</strong> Google's source-grounded AI research notebook — upload/import sources, chat with citations, generate study/media artifacts.</li>
+      <li><strong>Positioning:</strong> "Do your best research" — understanding & learning from YOUR sources, now expanding agentic (Gemini 3.5 + Antigravity, cloud compute).</li>
+      <li><strong>Pricing (post-I/O May 2026):</strong> Free · Plus $4.99/mo (dropped from $7.99 in June) · Pro $19.99 ($9.99 students) · Ultra $99.99 / $200.</li>
+      <li><strong>Model:</strong> Gemini 3.5, 1M-token context on every tier (limits scale, intelligence doesn't).</li>
+    </ul>
+  </div>
+
+  <div class="card">
+    <h2 style="margin-top:0">Recent releases (last ~90 days)</h2>
+    <ul>
+      <li><strong>Jun 8:</strong> Agentic upgrade — Gemini 3.5 + Antigravity, per-notebook secure cloud computer (code execution), 100+ skills, agentic source discovery, PDF/DOCX/XLSX/PPTX/chart exports. <em>Ultra + Workspace business first; no expansion schedule announced.</em></li>
+      <li><strong>Jun 9:</strong> Plus price cut $7.99 → $4.99/mo.</li>
+      <li><strong>May (I/O):</strong> Auto Drive sync (living documents), Ultra split into $99.99/$200 SKUs, Workspace Studio "Ask NotebookLM" automation step.</li>
+      <li><strong>Apr:</strong> Source auto-labeling, bulk sharing, flashcard mastery tracking.</li>
+    </ul>
+    <p class="small">Strategy read: Google is pushing NotebookLM from "study tool" toward an agentic research workspace — but gating the new capabilities behind Ultra/Workspace, which widens the price gap Magpie can exploit.</p>
+  </div>
+
+  <div class="grid2">
+    <div class="card">
+      <h2 style="margin-top:0">Where they win</h2>
+      <ul>
+        <li><strong>Media generation</strong> — audio (80 langs), video, cinematic (Veo 3), slides, quizzes. Nothing comparable in Magpie. <em>Counter: "those are presentation formats — is the underlying research verifiable?"</em></li>
+        <li><strong>Polish + zero setup</strong> — sign in and go. <em>Counter: setup is one extension + one key; the trade is ownership.</em></li>
+        <li><strong>Cloud code execution</strong> — real data analysis over sources. <em>Counter: Ultra-only ($99.99+); most users never see it.</em></li>
+        <li><strong>Collaboration/sharing</strong> — Plus+ tiers, Workspace integration. <em>Counter: single-researcher workflows don't need it; markdown export is portable.</em></li>
+      </ul>
+    </div>
+    <div class="card">
+      <h2 style="margin-top:0">Where you win</h2>
+      <ul>
+        <li><strong>Local-first privacy</strong> — their docs live on Google Cloud, no offline mode, "walled garden" is a recurring review complaint. Magpie: everything on-device, verifiable in code.</li>
+        <li><strong>Siloed notebooks</strong> — top G2 complaint: no cross-notebook query, export friction. Magpie: one global library, everything queryable, plain markdown export.</li>
+        <li><strong>Verification pipeline</strong> — Magpie's reranker faithfulness pass + quality audit; NotebookLM warns it "may hallucinate" with no verification layer.</li>
+        <li><strong>Browser-native capture</strong> — Magpie captures the page/video/PDF you're reading; NotebookLM requires upload/import.</li>
+        <li><strong>Hard caps</strong> — 50 sources/notebook free, chat quotas daily. Magpie has no per-notebook caps.</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2 style="margin-top:0">Talk tracks</h2>
+    <h3>Early mention ("we already use NotebookLM")</h3>
+    <p class="honest">"NotebookLM is genuinely good at what it does — especially the audio overviews. Magpie solves a different problem: it's for research you can't or won't put on Google's servers, captured while you browse, with citations you can audit down to the exact sentence. Many researchers use both."</p>
+    <h3>Displacement (they hit NotebookLM's walls)</h3>
+    <p class="honest">Probe the three known walls: source caps, notebook silos, export. "What happens when a project outgrows one notebook? Can you search across all of them? Can you take your library with you?" Magpie's answer to all three is structural, not a bigger quota.</p>
+    <h3>Late addition (NotebookLM added to their eval)</h3>
+    <p class="honest">Reframe on verifiability + ownership: "Both cite sources. Ours are chunk-anchored and machine-verified before the report ships; and the corpus is a folder of markdown on your disk, not an account you rent."</p>
+  </div>
+
+  <div class="card">
+    <h2 style="margin-top:0">Landmine questions</h2>
+    <div class="q"><b>Data:</b> "Where does your research corpus physically live, and what's your offline story?"</div>
+    <div class="q"><b>Silos:</b> "Can you ask one question across all of your notebooks at once?"</div>
+    <div class="q"><b>Exit:</b> "If you leave, how do you take your sources, notes, and citations with you?"</div>
+    <div class="q"><b>Caps:</b> "What does the workflow look like the day a project needs source #51 on the free tier?"</div>
+    <div class="q"><b>Verification:</b> "When it cites a source, what checks that the passage actually supports the claim?"</div>
+    <div class="q"><b>Capture:</b> "You read something great in your browser right now — how many steps until it's in your notebook?"</div>
+    <div class="q"><b>Tiers:</b> "The agentic features from June — which plan do those actually require?"</div>
+  </div>
+
+  <div class="card">
+    <h2 style="margin-top:0">Objection handling</h2>
+    <ul>
+      <li><strong>"It's Google — it'll always be better."</strong> → Different axis: Google optimizes for cloud scale and media; Magpie optimizes for ownership, verifiability, and browser-native capture. Google structurally can't do local-first.</li>
+      <li><strong>"NotebookLM is free."</strong> → Free tier = 50 sources, 50 chats/day, 10 deep-research/month. Magpie is free software; with local Ollama the entire stack costs $0 and stays offline.</li>
+      <li><strong>"We need audio overviews."</strong> → Concede honestly — that's NotebookLM's killer feature. Position Magpie as the research layer; export markdown wherever you like (including into NotebookLM for the podcast).</li>
+      <li><strong>"Setup looks technical."</strong> → One extension install + paste one API key. Fair trade for owning the data; Ollama path needs no key at all.</li>
+    </ul>
+  </div>
+</section>
+
+<!-- ═══════════ MAGPIE ═══════════ -->
+<section id="magpie" class="tab-content">
+  <div class="card">
+    <h2 style="margin-top:0">What Magpie is</h2>
+    <p style="color:var(--text2)">Local-first research assistant living in the browser: capture anything you read (pages, YouTube transcripts, PDFs, images), build a permanent on-device library with local embeddings, chat with it with chunk-level verified citations, and run agentic deep research — with any model you choose.</p>
+  </div>
+  <div class="card">
+    <h2 style="margin-top:0">Recent releases (this cycle)</h2>
+    <ul>
+      <li><strong>SOTA research pipeline:</strong> perspective-guided planning, outline–search co-evolution, section-scoped synthesis with capstone (exec summary + contradictions + verdict) — reports 2-3× deeper.</li>
+      <li><strong>Verification layer:</strong> reranker faithfulness pass on every citation + weighted LLM-judge audit (depth/evidence/honesty rubric) + honest "Remaining questions" display.</li>
+      <li><strong>Source quality ranking:</strong> citation counts, venue prestige, tiered domain authority (w3/arXiv/ACM → MDN/NN/g → .gov/.edu), retraction filtering.</li>
+      <li><strong>Security hardening:</strong> prompt-injection sandwich defense, MCP https-only policy, Jina proxy opt-out — all three tracked trust decisions closed.</li>
+      <li><strong>Crash-proof jobs:</strong> research runs survive browser/worker restarts and resume mid-synthesis; per-tab sidepanel; live progress for every command.</li>
+      <li><strong>In flight:</strong> /academic mode — papers-only research (S2/CrossRef/arXiv + BibTeX) that refuses to pad with blogs.</li>
+    </ul>
+  </div>
+  <div class="card">
+    <h2 style="margin-top:0">Key differentiators (proof points)</h2>
+    <ul>
+      <li><strong>Nothing leaves the device</strong> unless you choose the endpoint — inspectable in the code (SECURITY.md documents every egress).</li>
+      <li><strong>Click any citation → the exact highlighted source passage.</strong> Machine-verified before the report ships.</li>
+      <li><strong>One library, every project</strong> — global Lore, cross-workspace retrieval, plain-markdown export, optional Drive/local-folder sync.</li>
+      <li><strong>BYO intelligence</strong> — local Ollama to frontier models; the tool doesn't gatekeep capability behind tiers.</li>
+    </ul>
+    <p class="small">Honest gaps to own: no audio/video artifacts, single-user, pre-release polish, scraping-dependent extraction on hostile sites.</p>
+  </div>
+</section>
+</div>
+<script>
+document.querySelectorAll('.tab').forEach(t=>t.addEventListener('click',()=>{
+  document.querySelectorAll('.tab').forEach(x=>x.classList.remove('active'));
+  document.querySelectorAll('.tab-content').forEach(x=>x.classList.remove('active'));
+  t.classList.add('active');
+  document.getElementById(t.dataset.tab).classList.add('active');
+}));
+</script>
+</body>
+</html>

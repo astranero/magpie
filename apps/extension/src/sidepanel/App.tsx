@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { get, set } from 'idb-keyval';
+import { autoConfigureProvider } from '../lib/provider-detect';
 
 // Collision-free message ids. `Date.now()` and `Date.now()+1` for a paired
 // user+assistant bubble collide whenever the clock ticks between the two reads,
@@ -474,6 +475,16 @@ export default function App() {
   useEffect(() => {
     loadProjects();
     loadSettings();
+    // Zero-config first run: nothing configured → adopt a detected local
+    // provider (Ollama, else Chrome built-in Gemini). Never touches an
+    // existing BYOK setup — a user-set endpoint/key always wins.
+    autoConfigureProvider().then(adopted => {
+      if (!adopted) return;
+      loadSettings(); // pull the just-written config into the form state
+      showToast('success', adopted === 'ollama'
+        ? 'Connected to your local Ollama — chat is ready. Set your own API key in Config anytime.'
+        : "Using Chrome's built-in Gemini (on-device) — set your own API key in Config for full-strength research.");
+    }).catch(() => {});
     trySilentAuth();
 
     const messageListener = (m: any) => {

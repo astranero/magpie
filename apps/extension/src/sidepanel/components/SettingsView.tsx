@@ -1,3 +1,4 @@
+import { detectProviders, pickOllamaModel, OLLAMA_OPENAI_URL, BUILTIN_GEMINI_SENTINEL, type DetectedProviders } from '../../lib/provider-detect';
 import React, { useEffect, useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -56,6 +57,8 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   // Chat web-search fallback — default ON; only an explicit false disables it.
   const [webFallback, setWebFallback] = useState(true);
   const [jinaEnabled, setJinaEnabled] = useState(true);
+  const [detected, setDetected] = useState<DetectedProviders | null>(null);
+  useEffect(() => { detectProviders().then(setDetected).catch(() => {}); }, []);
   // How chat gathers extra detail from the open page (repo files / links).
   const [pageCtxStrategy, setPageCtxStrategy] = useState<'semantic' | 'router' | 'agentic'>('semantic');
   const [inferenceDevice, setInferenceDevice] = useState<'wasm' | 'webgpu'>('wasm');
@@ -218,6 +221,41 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
 
       {/* ── Custom Provider ── */}
       <Section id="provider" title="AI Provider Configuration" subtitle="Connect to any OpenAI-compatible API.">
+          {detected && (detected.ollama.available || detected.builtinGemini.available) && (
+            <div className="rounded-lg border border-primary/30 bg-primary/5 px-3 py-2.5 space-y-2">
+              <div className="text-[11px] font-semibold text-primary">Detected on this machine</div>
+              {detected.ollama.available && (
+                <button
+                  type="button"
+                  className="w-full text-left rounded-md border border-border bg-card px-2.5 py-2 text-xs hover:border-primary transition-colors"
+                  onClick={() => {
+                    const model = pickOllamaModel(detected.ollama.models);
+                    setCustomUrl(OLLAMA_OPENAI_URL); setCustomModel(model); setCustomKey('');
+                    setTimeout(saveSettings, 0);
+                  }}
+                >
+                  <span className="font-semibold">Use Ollama</span>
+                  <span className="text-muted-foreground"> — fully local{detected.ollama.models.length ? `, ${pickOllamaModel(detected.ollama.models)}` : ''}. No key, nothing leaves this machine.</span>
+                </button>
+              )}
+              {detected.builtinGemini.available && (
+                <button
+                  type="button"
+                  className="w-full text-left rounded-md border border-border bg-card px-2.5 py-2 text-xs hover:border-primary transition-colors"
+                  onClick={() => {
+                    setCustomUrl(BUILTIN_GEMINI_SENTINEL); setCustomModel('gemini-nano'); setCustomKey('');
+                    setTimeout(saveSettings, 0);
+                  }}
+                >
+                  <span className="font-semibold">Use Chrome's built-in Gemini</span>
+                  <span className="text-muted-foreground"> — on-device, zero setup. Good for chat; small context (research works better with a key).</span>
+                </button>
+              )}
+              <p className="text-[10px] text-muted-foreground font-mono leading-normal">
+                Your own OpenAI-compatible endpoint below is always preferred when set — these are zero-setup local options.
+              </p>
+            </div>
+          )}
           <div className="space-y-1.5">
             <label className="text-xs font-medium">Base URL</label>
             <Input 
@@ -777,7 +815,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
               onClick={() => {
                 if (!window.confirm('Re-chunk and re-embed all documents? Existing chat citations into old chunks will lose their exact highlight position.')) return;
                 if (typeof chrome !== 'undefined' && chrome.runtime?.sendMessage) {
-                  chrome.runtime.sendMessage({ action: 'REINDEX_LIBRARY' });
+                  chrome.runtime.sendMessage({ action: 'REINDEX_LIBRARY' }, () => void chrome.runtime.lastError);
                 }
               }}
             >
