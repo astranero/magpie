@@ -1826,6 +1826,14 @@ ${RESEARCH_CITATION_RULES}`;
  * Evaluate → optionally revise once → append the collapsed audit block.
  * Returns the final report text. Used by both quick and deep modes.
  */
+/** Current offscreen renderer main-thread heap (MB), or undefined if unavailable. */
+async function getOffscreenHeap(): Promise<number | undefined> {
+  try {
+    const res = await sendToOffscreen<{ ok: boolean; heapMB?: number }>({ action: 'OFFSCREEN_GET_HEAP' }, 10_000);
+    return res?.heapMB;
+  } catch { return undefined; }
+}
+
 /**
  * Reranker-backed faithfulness check: drop [anchor] citations whose source chunk
  * doesn't support the claim. Reuses the offscreen ms-marco reranker (already
@@ -2434,6 +2442,25 @@ async function runDeeperResearch(
     // from OOM-ing the renderer while still feeding synthesized context onward.
     onProgress(`[STAGE ${stage}/${rounds}] Reclaiming memory before next stage…`);
     resetSessionIndex(projectId);
+
+    // GUARANTEED reset. Measured truth: mid-SW-life closeDocument()+recreate does
+    // NOT free the renderer — Chrome pools the process, so the ~40 MB/source parse
+    // heap ratchets up ACROSS stages (920→1359→1267→2658 MB observed) until it
+    // hard-crashes the renderer at ~2.9 GB. The only thing that truly resets it is
+    // a full extension restart (which Chrome's ~5-min SW recycle does involuntarily
+    // — every resume in the logs recovers cleanly from the stage checkpoint). So if
+    // the offscreen heap is already in the danger zone at this checkpoint, restart
+    // proactively via chrome.runtime.reload() BEFORE the next stage pushes it over.
+    // The run resumes from the just-saved brief and skips completed stages.
+    const heapMB = await getOffscreenHeap();
+    if (heapMB !== undefined && heapMB >= 1800) {
+      crumb('research', 'preemptive reload — heap in danger zone', { heapMB, stage });
+      onProgress(`[STAGE ${stage}/${rounds}] Memory high (${heapMB} MB) — restarting to reclaim (resumes automatically)…`);
+      await updateJob({ phase: 'gathering' }).catch(() => {});
+      chrome.runtime.reload();
+      // reload() tears down this context; nothing after here runs.
+      await new Promise(() => {}); // park until the reload lands
+    }
     await recreateOffscreen().catch(() => {});
   }
 

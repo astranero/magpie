@@ -363,6 +363,13 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
     return true;
   }
 
+  // Report the renderer main-thread heap so the SW can decide whether a stage
+  // boundary needs a hard reset (chrome.runtime.reload) vs a cheap recreate.
+  if (request?.action === 'OFFSCREEN_GET_HEAP') {
+    sendResponse({ ok: true, heapMB: heapMB() });
+    return true;
+  }
+
   // Service worker pushes device changes here (we can't watch chrome.storage).
   if (request?.action === 'SET_INFERENCE_DEVICE') {
     workerDevice = request.device === 'webgpu' ? 'webgpu' : 'wasm';

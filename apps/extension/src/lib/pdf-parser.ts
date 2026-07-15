@@ -41,16 +41,20 @@ export async function recreateOffscreen(): Promise<void> {
     const had = await off.hasDocument?.();
     if (had) {
       await off.closeDocument?.();
-      // closeDocument() RESOLVES BEFORE the renderer is actually torn down. If we
-      // let ensureOffscreen() run now, its hasDocument() can still see the dying
-      // doc, SKIP createDocument(), and reuse the OLD renderer with its full ~2 GB
-      // heap — this is the between-stage OOM. Poll until the doc is really gone so
-      // the next ensureOffscreen() builds a genuinely fresh (low-heap) renderer.
+      // closeDocument() RESOLVES BEFORE the renderer is actually torn down. Poll
+      // until hasDocument() flips false so we don't reuse a dying doc.
       let stillThere = true;
       for (let i = 0; i < 30 && stillThere; i++) {
         stillThere = !!(await off.hasDocument?.());
         if (stillThere) await new Promise(r => setTimeout(r, 100));
       }
+      // …but even after the doc reports closed, Chrome POOLS the renderer process
+      // and reuses it if we createDocument() immediately — so usedJSHeapSize
+      // carries the previous stage's ~2 GB across the "reclaim" (measured: heap
+      // ratcheted 920→1359→1267→2658 MB across reclaimed stage boundaries, never
+      // resetting mid-SW-life). A settle delay lets Chrome actually reap the
+      // renderer process, so the next createDocument() spawns a FRESH low-heap one.
+      await new Promise(r => setTimeout(r, 1500));
       crumb('offscreen', 'recreate: closed', { stillThere });
     }
   } catch (e: any) {
