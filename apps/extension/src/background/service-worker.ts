@@ -34,6 +34,7 @@ import {
   clearJob as clearResearchJob, appendJobLog, incrementResumeAttempts,
   markJobActive, markJobFinished, updateHeartbeat, JOB_MAX_AGE_MS, HEARTBEAT_STALE_MS
 } from '../lib/research-store';
+import { enqueueResearch, dequeueResearch, getResearchQueue, clearResearchQueue } from '../lib/research-queue';
 
 // ─────────────────────────────────────────────
 // Robust error handling & offscreen management
@@ -92,7 +93,7 @@ installCrashHandlers('sw');
 installCrumbReceiver();
 dumpCrashLog('[Magpie crashlog]').catch(() => {});
 const SW_BOOT_AT = Date.now();
-crumb('sw', 'service worker started', { build: 'source-quality-rank' });
+crumb('sw', 'service worker started', { build: 'research-queue' });
 
 // The offscreen doc can't read chrome.storage to learn the inference device, and
 // can't watch it for changes — so we push changes to it from here (this context
@@ -1136,6 +1137,13 @@ async function handleCancelTask(request: Record<string, unknown>): Promise<Recor
     // zombie promise ever settles, its own cleanup is a no-op.
     await markJobFinished().catch(() => {});
     await clearResearchJob().catch(() => {});
+    // Stop means stop ALL research — also drop anything queued behind this run, so
+    // the aborted run's finally-drain doesn't auto-start the next one.
+    const queuedBeforeStop = await getResearchQueue().catch(() => []);
+    await clearResearchQueue().catch(() => {});
+    if (queuedBeforeStop.length > 0) {
+      chrome.runtime.sendMessage({ action: 'DEEP_RESEARCH_LOG', projectId, status: `[QUEUE] Stopped — cleared ${queuedBeforeStop.length} queued research run(s).` }).catch(() => {});
+    }
     // User pressed Stop — neutral cancel, not a failure or a success. (A live
     // run's own finally also broadcasts; the panel dedupes the pair.)
     chrome.runtime.sendMessage({ action: 'DEEP_RESEARCH_DONE', projectId, cancelled: true }).catch(() => {});
@@ -2446,33 +2454,65 @@ Return ONLY the JSON.`;
   return { cmd: finalCmd, desc, systemPrompt };
 }
 
+/** Is a research run genuinely active right now? Reclaims a stale (dead-heartbeat)
+ *  job so the queue can't wedge forever behind a worker that was killed. */
+async function isResearchActive(): Promise<boolean> {
+  const job = await getResearchJob().catch(() => null) as any;
+  if (!job?.active) return false;
+  const fresh = job.lastHeartbeatAt && (Date.now() - job.lastHeartbeatAt) < HEARTBEAT_STALE_MS;
+  if (fresh) return true;
+  console.warn('[RESEARCH] Reclaiming stale active job (heartbeat dead)');
+  await clearResearchJob().catch(() => {});
+  return false;
+}
+
+/** Resolve the topic, checkpoint + mark the job active, and run it. Shared by the
+ *  direct-start path and the queue drainer. */
+async function startResearchRun(params: { projectId: string; chatId?: string; topic: string; mode: 'quick' | 'deep' }): Promise<Record<string, unknown>> {
+  const { projectId, chatId, topic, mode } = params;
+  const chatFn = (s: string, u: string) => chatWithCustom(s, [], u);
+  let effectiveTopic = topic;
+  try {
+    effectiveTopic = await resolveResearchTopic(topic, chatId, projectId, chatFn);
+  } catch (e) {
+    console.warn('Topic resolution failed, using raw topic', e);
+  }
+  // Checkpoint so a worker/browser death can resume it; mark active BEFORE running
+  // so resumePendingResearch only resumes jobs that actually started.
+  await startResearchJob({ projectId, chatId, topic, effectiveTopic, mode }).catch(() => {});
+  await markJobActive().catch(() => {});
+  return executeResearch({ projectId, chatId, topic, effectiveTopic, mode });
+}
+
+// One research run at a time (the job checkpoint is a singleton). Rather than
+// erroring on a second /deepresearch, PARK it in a persisted queue and drain it
+// as each run finishes. `queueDraining` serializes the drainer so two starts can't
+// race for the single job slot.
+let queueDraining = false;
+async function drainResearchQueue(): Promise<void> {
+  if (queueDraining) return;
+  queueDraining = true;
+  try {
+    if (abortControllers.size > 0 || await isResearchActive()) return; // still busy
+    const next = await dequeueResearch();
+    if (!next) return;
+    chrome.runtime.sendMessage({ action: 'DEEP_RESEARCH_LOG', projectId: next.projectId, status: '[QUEUE] Starting next queued research…' }).catch(() => {});
+    await startResearchRun(next); // runs to completion; its finally re-schedules a drain
+  } catch (e) {
+    console.warn('[QUEUE] drain failed', e);
+  } finally {
+    queueDraining = false;
+  }
+}
+function scheduleQueueDrain(): void { setTimeout(() => { void drainResearchQueue(); }, 0); }
+
 async function handleDeepResearch(request: Record<string, unknown>): Promise<Record<string, unknown>> {
   const { projectId, topic, chatId } = request;
   const mode = (request.mode as 'quick' | 'deep') || 'quick';
   if (!projectId || !topic) throw new Error('projectId and topic are required');
 
-  // One research run at a time: the job checkpoint is a singleton, and a
-  // second run would stomp the first one's resume state. Chat stays usable
-  // during a run — this only guards research-on-research. Crucially, the
-  // guard has an escape hatch: an `active` record whose heartbeat went
-  // stale is a DEAD run (worker killed, or wedged past its heartbeat), and
-  // must be reclaimed here or no research can ever start again.
-  if (abortControllers.has(projectId as string)) {
-    throw new Error('A research run is already active. Press Stop first, or wait for it to finish.');
-  }
-  const runningJob = await getResearchJob().catch(() => null) as any;
-  if (runningJob?.active) {
-    const fresh = runningJob.lastHeartbeatAt && (Date.now() - runningJob.lastHeartbeatAt) < HEARTBEAT_STALE_MS;
-    if (fresh) {
-      throw new Error('A research run is already active. Press Stop first, or wait for it to finish.');
-    }
-    console.warn('[RESEARCH] Reclaiming stale active job (heartbeat dead) before new start');
-    await clearResearchJob().catch(() => {});
-  }
-
-  const chatFn = (s: string, u: string) => chatWithCustom(s, [], u);
-
-  // Persist the command in chat history so the conversation survives reloads
+  // Persist the command in chat first so it shows in the conversation whether it
+  // starts now or gets queued.
   if (chatId) {
     await saveChatMessage({
       chatId: chatId as string,
@@ -2483,33 +2523,33 @@ async function handleDeepResearch(request: Record<string, unknown>): Promise<Rec
     });
   }
 
-  // Resolve conversational references into a standalone topic
-  let effectiveTopic = topic as string;
-  try {
-    effectiveTopic = await resolveResearchTopic(topic as string, chatId as string | undefined, projectId as string, chatFn);
-  } catch (e) {
-    console.warn('Topic resolution failed, using raw topic', e);
+  // If a run is already active, queue this one instead of erroring — it starts
+  // automatically when the current run finishes.
+  const busy = abortControllers.has(projectId as string) || await isResearchActive();
+  if (busy) {
+    const position = await enqueueResearch({
+      projectId: projectId as string,
+      chatId: chatId as string | undefined,
+      topic: topic as string,
+      mode
+    });
+    if (chatId) {
+      await saveChatMessage({
+        chatId: chatId as string,
+        role: 'system',
+        text: `🕓 Queued (position ${position}) — this research will start automatically when the current run finishes.`,
+        timestamp: new Date().toISOString(),
+        provider: 'custom'
+      }).catch(() => {});
+    }
+    chrome.runtime.sendMessage({ action: 'DEEP_RESEARCH_QUEUED', projectId, position }).catch(() => {});
+    return { success: true, queued: true, position };
   }
 
-  // Checkpoint the job so a worker/browser death can resume it
-  await startResearchJob({
+  return startResearchRun({
     projectId: projectId as string,
     chatId: chatId as string | undefined,
     topic: topic as string,
-    effectiveTopic,
-    mode
-  }).catch(() => {});
-
-  // Mark the job as actively running BEFORE starting executeResearch.
-  // resumePendingResearch will only resume jobs marked active, preventing
-  // spurious re-execution of jobs that haven't started yet.
-  await markJobActive().catch(() => {});
-
-  return executeResearch({
-    projectId: projectId as string,
-    chatId: chatId as string | undefined,
-    topic: topic as string,
-    effectiveTopic,
     mode
   });
 }
@@ -2702,6 +2742,8 @@ async function executeResearch({ projectId, chatId, topic, effectiveTopic, mode 
       cancelled: doneError === 'Cancelled'
     }).catch(() => {});
     notifySidepanelSync();
+    // This run is done + the job cleared — start the next queued research, if any.
+    scheduleQueueDrain();
   }
 }
 
@@ -2776,6 +2818,11 @@ async function resumePendingResearch(): Promise<void> {
     });
   } catch (e) {
     console.warn('Research resume failed', e);
+  } finally {
+    // On startup, if nothing resumed/started, kick off any queued research. (A run
+    // that DID resume self-drains from its own finally; drainResearchQueue no-ops
+    // while that's still busy, so this is harmless in that case.)
+    scheduleQueueDrain();
   }
 }
 // Give the worker a moment to settle, then check for an interrupted job.
