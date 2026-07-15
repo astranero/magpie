@@ -814,14 +814,15 @@ async function scrapeUrlList(
   signal: AbortSignal | undefined,
   label: AgentLabel
 ): Promise<AgentOutcome> {
-  // Per-STAGE source cap: 20 (or the depth's total, whichever is smaller). The
-  // offscreen renderer's MAIN-thread heap grows ~65 MB per indexed source from
-  // HTML/PDF parsing and CANNOT be reliably freed mid-run (neither closeDocument
-  // nor a worker recycle drops it — measured), so a segment's peak ≈ sources ×
-  // 65 MB. 20 keeps that ≈1.5 GB, under the ~2.7 GB that hard-crashes the
-  // renderer, while still ~80 sources over a deep run (Gemini-scale). The heap
-  // fully resets only at each run/resume start (offscreen idle → recreate works).
-  const cap = Math.min(20, activeLimits.totalSourcesCap);
+  // Per-STAGE source cap: 15 (or the depth's total, whichever is smaller). The
+  // offscreen renderer's MAIN-thread heap grows ~65-90 MB per indexed source from
+  // HTML/PDF parsing. recreateOffscreen() between stages now REALLY resets it
+  // (it waits for hasDocument() to flip false before the next ensure rebuilds a
+  // fresh renderer — the old code raced and reused the dying doc, freeing only a
+  // sliver), so each stage peaks independently: 15 × ~90 MB ≈ 1.35 GB, a safe
+  // margin under the ~2.7 GB that hard-crashes the renderer. Still ~90 sources
+  // over a 6-stage deep run (Gemini-scale).
+  const cap = Math.min(15, activeLimits.totalSourcesCap);
   const urlList = [...new Set(urls)].filter(u => !isJunkUrl(u)).slice(0, cap);
   const sources: SourceRecord[] = [];
   const docIds: string[] = [];

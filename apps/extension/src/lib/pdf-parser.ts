@@ -7,6 +7,7 @@
 // without circular imports.
 
 import { sendToOffscreen } from './offscreen-client';
+import { crumb } from './crash-log';
 
 /** Convert an ArrayBuffer to a base64 string without stack overflow on large files. */
 import { looksLikeOcrGarbage } from './quality-gate';
@@ -33,7 +34,28 @@ let offscreenReady: Promise<void> | null = null;
  * renderer heap climbs to ~2.7 GB; recreating it drops that back to a few MB.
  */
 export async function recreateOffscreen(): Promise<void> {
-  try { await (chrome.offscreen as any).closeDocument?.(); } catch { /* not open */ }
+  const off = chrome.offscreen as any;
+  // Block reuse first: any concurrent ensureOffscreen() must re-decide, not race us.
+  offscreenReady = null;
+  try {
+    const had = await off.hasDocument?.();
+    if (had) {
+      await off.closeDocument?.();
+      // closeDocument() RESOLVES BEFORE the renderer is actually torn down. If we
+      // let ensureOffscreen() run now, its hasDocument() can still see the dying
+      // doc, SKIP createDocument(), and reuse the OLD renderer with its full ~2 GB
+      // heap — this is the between-stage OOM. Poll until the doc is really gone so
+      // the next ensureOffscreen() builds a genuinely fresh (low-heap) renderer.
+      let stillThere = true;
+      for (let i = 0; i < 30 && stillThere; i++) {
+        stillThere = !!(await off.hasDocument?.());
+        if (stillThere) await new Promise(r => setTimeout(r, 100));
+      }
+      crumb('offscreen', 'recreate: closed', { stillThere });
+    }
+  } catch (e: any) {
+    crumb('offscreen', 'recreate: error', { err: String(e?.message || e) });
+  }
   offscreenReady = null;
 }
 
