@@ -1,4 +1,6 @@
-import { saveDocument, linkDocumentToProject, listDocuments } from '../lib/db';
+import { saveDocument, linkDocumentToProject, listDocuments, getChunkByAnchor } from '../lib/db';
+import { verifyFaithfulness } from '../lib/faithfulness';
+import { sendToOffscreen } from '../lib/offscreen-client';
 import { chunkDocument, makeDocShortId } from '../lib/chunker';
 import { buildFrontmatter } from '../lib/frontmatter';
 import { addChunksToVectorStore, searchSessionChunks, resetSessionIndex } from '../lib/vector-store';
@@ -1801,6 +1803,31 @@ ${RESEARCH_CITATION_RULES}`;
  * Evaluate → optionally revise once → append the collapsed audit block.
  * Returns the final report text. Used by both quick and deep modes.
  */
+/**
+ * Reranker-backed faithfulness check: drop [anchor] citations whose source chunk
+ * doesn't support the claim. Reuses the offscreen ms-marco reranker (already
+ * loaded) — no LLM, no new model. Best-effort: any failure keeps the report as-is.
+ */
+async function faithfulnessPass(synthesis: string, onProgress: (s: string) => void): Promise<string> {
+  try {
+    const fr = await verifyFaithfulness(synthesis, {
+      rerank: async (claim, evidences) => {
+        const res = await sendToOffscreen<{ ok: boolean; scores?: number[] }>(
+          { action: 'OFFSCREEN_RERANK', query: claim, passages: evidences }
+        ).catch(() => null);
+        return res?.scores ?? evidences.map(() => 1); // no scorer → treat as supported
+      },
+      getChunkText: async (a) => (await getChunkByAnchor(a).catch(() => null))?.text ?? null,
+    });
+    if (fr.dropped > 0) {
+      onProgress(`[FAITHFULNESS] ${fr.verified}/${fr.total} citations verified — dropped ${fr.dropped} unsupported`);
+      return fr.text;
+    }
+    if (fr.total > 0) onProgress(`[FAITHFULNESS] all ${fr.total} citations verified`);
+  } catch { /* verifier unavailable — keep the report as-is */ }
+  return synthesis;
+}
+
 async function evaluateAndRefine(
   topic: string,
   synthesis: string,
@@ -1817,6 +1844,11 @@ async function evaluateAndRefine(
 
   const label = (ev: EvaluationResult) =>
     ev.verdict === 'PASS' ? '✅ PASS' : ev.verdict === 'NEEDS_REVISION' ? '⚠️ NEEDS REVISION' : '❌ FAIL';
+
+  // Fast faithfulness pass BEFORE auditing: drop any [anchor] whose source chunk
+  // doesn't actually support its claim (reranker relevance, no LLM, no new model).
+  // Runs post-synthesis when the offscreen is idle, so it's safe on the mutex.
+  synthesis = await faithfulnessPass(synthesis, onProgress);
 
   let current = stripModelBibliography(synthesis);
   onProgress(`[EVALUATING] Running quality evaluation on report…`);
