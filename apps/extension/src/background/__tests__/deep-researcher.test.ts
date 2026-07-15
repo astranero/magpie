@@ -32,6 +32,7 @@ import {
   formatEvaluationBlock,
   buildCleanedPdfDoc,
   linkifyReportCitations,
+  isJunkUrl,
   SourceRecord,
 } from '../deep-researcher';
 
@@ -420,5 +421,33 @@ Neither side disputes the underlying data.`;
     const { stripModelBibliography } = await import('../deep-researcher');
     const report = 'Just a normal report [a1b2c3d.s0.p1] with citations.';
     expect(stripModelBibliography(report)).toBe(report);
+  });
+});
+
+describe('isJunkUrl — reader-proxy dead ends', () => {
+  it('skips domains that jina reliably returns empty for', () => {
+    for (const u of [
+      'https://dl.acm.org/doi/10.1145/3746059.3747721',
+      'https://dl.acm.org/doi/epdf/10.1145/3795154.3795331',
+      'https://www.linkedin.com/pulse/performance-testing-abc',
+      'https://static.licdn.com/aero-v1/sc/h/xyz',
+      'https://www.researchgate.net/figure/Compute-requirements_fig4_391',
+      'https://www.researchgate.net/profile/Some-Author',
+      'https://www.aimodels.fyi/papers/arxiv/streaming-fast-slow',
+    ]) {
+      expect(isJunkUrl(u), u).toBe(true);
+    }
+  });
+
+  it('does NOT block hosts that returned real content in the logs', () => {
+    for (const u of [
+      'https://arxiv.org/pdf/2507.22352',
+      'https://ieeexplore.ieee.org/document/10589417',
+      'https://www.tandfonline.com/doi/full/10.1080/0144929X.2026.2692099',
+      'https://www.researchgate.net/publication/387223217_Optimizing_LLM_Latency',
+      'https://www.nngroup.com/articles/generative-ui/',
+    ]) {
+      expect(isJunkUrl(u), u).toBe(false);
+    }
   });
 });

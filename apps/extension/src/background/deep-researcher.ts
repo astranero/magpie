@@ -800,10 +800,20 @@ export function linkifyReportCitations(
  * files, tracker endpoints. These leak in from link extraction on scraped
  * pages (e.g. http://www.w3.org/TR/html4/loose.dtd).
  */
+// Reader-proxy (jina) dead ends — URLs it CONSISTENTLY returns 0 bytes for
+// (paywall / hard bot-block), each proven in the crash logs. Every one still costs
+// a full ~10-13 s fetch before failing, so a single stage stuffed with them (e.g. a
+// `site:acm.org` query returning 12 ACM DOI links) burns >2 min doing nothing,
+// blows the ~5-min SW lifetime cap mid-stage, and the stage restarts on resume →
+// an infinite re-gather loop. Skip them up front. Kept evidence-based: hosts that
+// returned real content elsewhere in the logs (ieeexplore, tandfonline) are NOT here.
+const DEAD_READER_HOSTS = /\/\/([^/]*\.)?dl\.acm\.org\/|\/\/([^/]*\.)?linkedin\.com\/|\/\/static\.licdn\.com\/|\/\/([^/]*\.)?aimodels\.fyi\/|\/\/([^/]*\.)?researchgate\.net\/(figure|profile)\//i;
+
 export function isJunkUrl(url: string): boolean {
   if (!/^https?:\/\//i.test(url)) return true;
   if (/\.(dtd|xsd|css|js|ico|woff2?|ttf|svg|png|jpe?g|gif|webp)(\?|$)/i.test(url)) return true;
   if (/\/\/(www\.)?(w3\.org|schema\.org|purl\.org|xmlns\.com|ogp\.me)\//i.test(url)) return true;
+  if (DEAD_READER_HOSTS.test(url)) return true;
   return false;
 }
 
@@ -1835,6 +1845,30 @@ async function getOffscreenHeap(): Promise<number | undefined> {
 }
 
 /**
+ * GUARANTEED heap reset. Mid-SW-life the renderer heap only RATCHETS UP — Chrome
+ * pools the renderer process so closeDocument()+recreate doesn't free it (measured:
+ * heap grew across every reclaimed stage boundary). The ONLY real reset is a full
+ * extension restart, which Chrome's ~5-min SW recycle does involuntarily and the
+ * run resumes cleanly from its per-stage checkpoint. So before a stage that would
+ * push an already-high heap over the ~2.9 GB renderer-crash ceiling, restart
+ * proactively. Runs at the TOP of every stage (incl. stage 1, which can inherit a
+ * hot offscreen from a just-finished run in the same SW life). Returns true if it
+ * triggered a reload (caller should stop — this context is being torn down).
+ */
+async function guardHeapOrReload(stage: number, rounds: number, onProgress: (s: string) => void): Promise<boolean> {
+  const heapMB = await getOffscreenHeap();
+  if (heapMB !== undefined && heapMB >= 1800) {
+    crumb('research', 'preemptive reload — heap in danger zone', { heapMB, stage });
+    onProgress(`[STAGE ${stage}/${rounds}] Memory high (${heapMB} MB) — restarting to reclaim (resumes automatically)…`);
+    await updateJob({ phase: 'gathering' }).catch(() => {});
+    chrome.runtime.reload(); // tears down this context; nothing after here runs
+    await new Promise(() => {}); // park until the reload lands
+    return true;
+  }
+  return false;
+}
+
+/**
  * Reranker-backed faithfulness check: drop [anchor] citations whose source chunk
  * doesn't support the claim. Reuses the offscreen ms-marco reranker (already
  * loaded) — no LLM, no new model. Best-effort: any failure keeps the report as-is.
@@ -1850,11 +1884,21 @@ async function faithfulnessPass(synthesis: string, onProgress: (s: string) => vo
       },
       getChunkText: async (a) => (await getChunkByAnchor(a).catch(() => null))?.text ?? null,
     });
-    if (fr.dropped > 0) {
+    // MISCALIBRATION GATE: the ms-marco sigmoid score for a (claim, 1200-char
+    // chunk) pair is often low even when the chunk DOES support the claim, so a
+    // fixed threshold can nuke most citations (observed: 29/32 dropped, which
+    // destroys the report). If the pass wants to drop more than a quarter of
+    // citations, distrust it — report the anomaly and keep the report intact.
+    // Only apply the strip when it's a small, plausible cleanup.
+    if (fr.dropped > 0 && fr.dropped <= Math.ceil(fr.total * 0.25)) {
       onProgress(`[FAITHFULNESS] ${fr.verified}/${fr.total} citations verified — dropped ${fr.dropped} unsupported`);
       return fr.text;
     }
-    if (fr.total > 0) onProgress(`[FAITHFULNESS] all ${fr.total} citations verified`);
+    if (fr.dropped > 0) {
+      onProgress(`[FAITHFULNESS] check skipped — flagged ${fr.dropped}/${fr.total} (over-broad, likely miscalibrated); keeping all citations`);
+    } else if (fr.total > 0) {
+      onProgress(`[FAITHFULNESS] all ${fr.total} citations verified`);
+    }
   } catch { /* verifier unavailable — keep the report as-is */ }
   return synthesis;
 }
@@ -1878,10 +1922,10 @@ async function evaluateAndRefine(
 
   // Fast faithfulness pass BEFORE auditing: drop any [anchor] whose source chunk
   // doesn't actually support its claim (reranker relevance, no LLM, no new model).
-  // Reclaim the offscreen FIRST so this rerank pass runs on a fresh, low-heap
-  // renderer instead of stacking on whatever the last gather stage left behind.
+  // Do NOT reclaim the offscreen first: reranking adds negligible heap, and a
+  // fresh recreate cold-starts the reranker mid-model-load → garbage scores →
+  // over-dropping (this is what dropped 29/32 citations once).
   crumb('eval', 'faithfulness pass', {});
-  await recreateOffscreen().catch(() => {});
   synthesis = await faithfulnessPass(synthesis, onProgress);
 
   let current = stripModelBibliography(synthesis);
@@ -2308,6 +2352,11 @@ async function runDeeperResearch(
       continue;
     }
 
+    // Reset the heap BEFORE this stage if it's already in the danger zone (a hot
+    // offscreen inherited from a prior stage/run that mid-life reclaim couldn't
+    // free). Reloads + resumes from checkpoint; nothing after this runs if so.
+    if (await guardHeapOrReload(stage, rounds, onProgress)) return { synthesis: '', sources: [] };
+
     onProgress(`[STAGE ${stage}/${rounds}] Gathering: ${stageQueries.length} quer${stageQueries.length === 1 ? 'y' : 'ies'}…`);
 
     // ── Gather ────────────────────────────────────────────────────────────
@@ -2440,27 +2489,12 @@ async function runDeeperResearch(
     // offscreen document — the next stage starts from a clean heap and rehydrates
     // only what it needs from IndexedDB. This is what keeps a long multi-stage run
     // from OOM-ing the renderer while still feeding synthesized context onward.
+    // Cheap between-stage reclaim (drops the in-memory index; attempts an offscreen
+    // recreate). The GUARANTEED reset — a proactive reload when the heap is actually
+    // in the danger zone — runs at the TOP of the next stage via guardHeapOrReload,
+    // so a hot inherited offscreen is caught there whether or not this recreate freed.
     onProgress(`[STAGE ${stage}/${rounds}] Reclaiming memory before next stage…`);
     resetSessionIndex(projectId);
-
-    // GUARANTEED reset. Measured truth: mid-SW-life closeDocument()+recreate does
-    // NOT free the renderer — Chrome pools the process, so the ~40 MB/source parse
-    // heap ratchets up ACROSS stages (920→1359→1267→2658 MB observed) until it
-    // hard-crashes the renderer at ~2.9 GB. The only thing that truly resets it is
-    // a full extension restart (which Chrome's ~5-min SW recycle does involuntarily
-    // — every resume in the logs recovers cleanly from the stage checkpoint). So if
-    // the offscreen heap is already in the danger zone at this checkpoint, restart
-    // proactively via chrome.runtime.reload() BEFORE the next stage pushes it over.
-    // The run resumes from the just-saved brief and skips completed stages.
-    const heapMB = await getOffscreenHeap();
-    if (heapMB !== undefined && heapMB >= 1800) {
-      crumb('research', 'preemptive reload — heap in danger zone', { heapMB, stage });
-      onProgress(`[STAGE ${stage}/${rounds}] Memory high (${heapMB} MB) — restarting to reclaim (resumes automatically)…`);
-      await updateJob({ phase: 'gathering' }).catch(() => {});
-      chrome.runtime.reload();
-      // reload() tears down this context; nothing after here runs.
-      await new Promise(() => {}); // park until the reload lands
-    }
     await recreateOffscreen().catch(() => {});
   }
 
