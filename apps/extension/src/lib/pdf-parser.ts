@@ -24,6 +24,19 @@ export function bufToBase64(buf: ArrayBuffer): string {
 // Module-level promise so concurrent callers wait for a single creation attempt.
 let offscreenReady: Promise<void> | null = null;
 
+/**
+ * Tear down the offscreen document to reclaim its renderer memory, then let the
+ * next ensureOffscreen() recreate it fresh. The offscreen is a STATELESS
+ * parser/embedder proxy — every durable thing (source chunks in IndexedDB, stage
+ * briefs/handoff in the worker) lives elsewhere — so this is safe to call between
+ * research stages. Over one stage of continuous embedding + PDF/HTML parsing the
+ * renderer heap climbs to ~2.7 GB; recreating it drops that back to a few MB.
+ */
+export async function recreateOffscreen(): Promise<void> {
+  try { await (chrome.offscreen as any).closeDocument?.(); } catch { /* not open */ }
+  offscreenReady = null;
+}
+
 /** Ensure the offscreen document exists (idempotent). */
 export async function ensureOffscreen(): Promise<void> {
   if (!offscreenReady) {

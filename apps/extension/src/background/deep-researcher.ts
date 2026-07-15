@@ -1,9 +1,9 @@
 import { saveDocument, linkDocumentToProject, listDocuments } from '../lib/db';
 import { chunkDocument, makeDocShortId } from '../lib/chunker';
 import { buildFrontmatter } from '../lib/frontmatter';
-import { addChunksToVectorStore, searchSessionChunks } from '../lib/vector-store';
+import { addChunksToVectorStore, searchSessionChunks, resetSessionIndex } from '../lib/vector-store';
 import { getJob, updateJob, getPage, savePage, listPages } from '../lib/research-store';
-import { pdfUrlToBody } from '../lib/pdf-parser';
+import { pdfUrlToBody, recreateOffscreen } from '../lib/pdf-parser';
 import { checkContentQuality, extractDoi } from '../lib/quality-gate';
 import { isAcademicQuery } from '../lib/query-intent';
 import { getResearchLimits, getResearchDepth, getSynthesisCharBudget, getSourceQuality, getAcademicDepth, RESEARCH_LIMITS, ResearchLimits, SourceQuality, AcademicDepth } from '../lib/research-limits';
@@ -2304,6 +2304,18 @@ async function runDeeperResearch(
       }
       await updateJob({ webQueries: stageQueries }).catch(() => {});
     }
+
+    // ── Reclaim heavy memory before the next stage ───────────────────────────
+    // Everything that carries forward is now safe: the stage brief is indexed and
+    // checkpointed, and the compressed handoff holds the cross-stage context. The
+    // raw per-stage chunks/vectors (in-memory Orama) and the offscreen renderer's
+    // ~2.7 GB working set are no longer needed, so drop the index and recreate the
+    // offscreen document — the next stage starts from a clean heap and rehydrates
+    // only what it needs from IndexedDB. This is what keeps a long multi-stage run
+    // from OOM-ing the renderer while still feeding synthesized context onward.
+    onProgress(`[STAGE ${stage}/${rounds}] Reclaiming memory before next stage…`);
+    resetSessionIndex(projectId);
+    await recreateOffscreen().catch(() => {});
   }
 
   // ── Phase 3: final paper synthesis ───────────────────────────────────────
