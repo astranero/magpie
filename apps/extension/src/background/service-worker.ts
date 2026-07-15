@@ -92,7 +92,7 @@ installCrashHandlers('sw');
 installCrumbReceiver();
 dumpCrashLog('[Magpie crashlog]').catch(() => {});
 const SW_BOOT_AT = Date.now();
-crumb('sw', 'service worker started', { build: 'cap12' });
+crumb('sw', 'service worker started', { build: 'synth-crumbs' });
 
 // The offscreen doc can't read chrome.storage to learn the inference device, and
 // can't watch it for changes — so we push changes to it from here (this context

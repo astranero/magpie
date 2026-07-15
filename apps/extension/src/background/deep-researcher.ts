@@ -1870,10 +1870,14 @@ async function evaluateAndRefine(
 
   // Fast faithfulness pass BEFORE auditing: drop any [anchor] whose source chunk
   // doesn't actually support its claim (reranker relevance, no LLM, no new model).
-  // Runs post-synthesis when the offscreen is idle, so it's safe on the mutex.
+  // Reclaim the offscreen FIRST so this rerank pass runs on a fresh, low-heap
+  // renderer instead of stacking on whatever the last gather stage left behind.
+  crumb('eval', 'faithfulness pass', {});
+  await recreateOffscreen().catch(() => {});
   synthesis = await faithfulnessPass(synthesis, onProgress);
 
   let current = stripModelBibliography(synthesis);
+  crumb('eval', 'evaluate start', {});
   onProgress(`[EVALUATING] Running quality evaluation on report…`);
   let ev = await evaluateReport(topic, current, evaluatorFn).catch(() => null);
   if (!ev) return current;
@@ -2223,7 +2227,10 @@ ${PRESCRIPTIVE_GUIDANCE}
 ${RESEARCH_CITATION_RULES}`;
 
   const userMsg = `RESEARCH BRIEFS:\n\n${briefsBlock}`;
-  return (synthesisFn ?? llmChatFn)(sys, userMsg);
+  crumb('synth', 'final merge start', { briefs: stageBriefs.length, chars: briefsBlock.length });
+  const out = await (synthesisFn ?? llmChatFn)(sys, userMsg);
+  crumb('synth', 'final merge done', { words: out.split(/\s+/).length });
+  return out;
 }
 
 async function runDeeperResearch(
