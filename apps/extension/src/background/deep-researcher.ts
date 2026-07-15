@@ -899,12 +899,21 @@ async function scrapeUrlList(
         docIds.push(docId);
         sources.push({ url, title: title || url, label, docId, tier: sourceTier(url) });
         onProgress(`[${label}] ✓ Captured "${title}"`);
-        // NB: no mid-stage offscreen/worker reclaim — measured useless. The heap
-        // that climbs is the offscreen MAIN thread (HTML/PDF parsing), not the
-        // worker's WASM (recycling the worker didn't drop heapMB) and not
-        // reachable by closeDocument mid-run (only frees ~300 MB while the doc is
-        // busy). Per-segment growth is bounded instead by the source cap (~65
-        // MB/source) plus the reliable idle reset at each run/resume start.
+
+        // MID-STAGE heap guard. The offscreen renderer's MAIN-thread parse heap
+        // (HTML/PDF, ~40-90 MB/source, unfreeable mid-SW-life — Chrome pools the
+        // process) can climb past the ~2.9 GB renderer-crash ceiling WITHIN a
+        // single stage of heavy sources, before the between-stage guard ever runs
+        // (measured: 625→2569 MB across 8 reads, crash on the 9th). So if the heap
+        // is already in the danger zone, stop reading more URLs this stage and let
+        // it brief on what we have — the stage still completes + checkpoints, and
+        // the stage-top guard resets (reload) before the next one.
+        const heapMB = await getOffscreenHeap();
+        if (heapMB !== undefined && heapMB >= 2100) {
+          crumb('research', 'stage cut short — heap high', { heapMB, got: sources.length, of: urlList.length });
+          onProgress(`[${label}] Memory high (${heapMB} MB) — ending this stage early with ${sources.length} source(s)`);
+          break;
+        }
       } else {
         onProgress(`[${label}] ✗ No readable content: ${url}`);
       }
