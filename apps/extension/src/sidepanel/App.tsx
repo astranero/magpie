@@ -1385,15 +1385,26 @@ export default function App() {
       const topic = text.slice('/recall '.length).trim();
       if (!topic) { showToast('error', 'Please provide a topic after /recall'); return; }
       setInput('');
-      const res = await msg('RECALL_DOCS', { query: topic, projectId: activeProjectId });
-      const linked = (res.linked as Array<{ id: string; title: string; snippet: string }>) || [];
-      const body = linked.length === 0
-        ? `No relevant documents found in your Global Lore for "${topic}".`
-        : `Pulled ${linked.length} document${linked.length === 1 ? '' : 's'} into this workspace — now available for chat:\n\n${linked.map(d => `- **${d.title}**${d.snippet ? `\n  …${d.snippet}…` : ''}`).join('\n')}`;
+      // PROGRESS INDICATION: this search embeds the query (cold start can take
+      // a minute while the model downloads) — a silent await read as a dead
+      // command. Echo the command + show a live pending row, then replace it
+      // in place with the result.
+      const pendingId = uid();
       setMessages(prev => ({
         ...prev,
-        [activeChatId]: [...(prev[activeChatId] || []), { id: uid(), role: 'system' as const, text: body }]
+        [activeChatId]: [...(prev[activeChatId] || []),
+          { id: uid(), role: 'user' as const, text },
+          { id: pendingId, role: 'system' as const, text: `Searching your Global Lore for "${topic}"…`, streaming: true },
+        ]
       }));
+      const res = await msg('RECALL_DOCS', { query: topic, projectId: activeProjectId });
+      const linked = (res.linked as Array<{ id: string; title: string; snippet: string }>) || [];
+      const body = res.success === false
+        ? `Recall failed${res.error ? `: ${res.error}` : ''}.`
+        : linked.length === 0
+          ? `No relevant documents found in your Global Lore for "${topic}".`
+          : `Pulled ${linked.length} document${linked.length === 1 ? '' : 's'} into this workspace — now available for chat:\n\n${linked.map(d => `- **${d.title}**${d.snippet ? `\n  …${d.snippet}…` : ''}`).join('\n')}`;
+      updateMessage(activeChatId, pendingId, m => ({ ...m, text: body, streaming: false }));
       if (linked.length > 0) loadDocuments(activeProjectId);
       return;
     }

@@ -18,6 +18,20 @@ export interface McpServerConfig {
   authToken?: string;
 }
 
+/** MCP URL policy: https anywhere, http only to loopback hosts. */
+export function isAllowedMcpUrl(url: string): boolean {
+  try {
+    const u = new URL(url);
+    if (u.protocol === 'https:') return true;
+    if (u.protocol === 'http:') {
+      return u.hostname === 'localhost' || u.hostname === '127.0.0.1' || u.hostname === '[::1]' || u.hostname === '::1';
+    }
+    return false;
+  } catch {
+    return false;
+  }
+}
+
 export interface McpTool {
   name: string;
   description?: string;
@@ -66,6 +80,13 @@ export class McpConnection {
   constructor(private config: McpServerConfig) {}
 
   private async rpc(method: string, params?: Record<string, unknown>): Promise<any> {
+    // URL policy: https, or http only to loopback (local dev servers). A plain
+    // http remote would ship the research topic — and any bearer token — in
+    // cleartext to an arbitrary host. Enforced at call time so it also covers
+    // configs registered before this policy existed.
+    if (!isAllowedMcpUrl(this.config.url)) {
+      throw new Error(`MCP server ${this.config.name}: blocked URL (${this.config.url}) — use https://, or http:// only for localhost`);
+    }
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), RPC_TIMEOUT_MS);
     try {

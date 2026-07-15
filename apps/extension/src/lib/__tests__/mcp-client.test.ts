@@ -1,5 +1,16 @@
 import { describe, it, expect, vi } from 'vitest';
-import { McpConnection, isSearchLikeTool, topicArgFor, argsForQuery } from '../mcp-client';
+import { McpConnection, isSearchLikeTool, topicArgFor, argsForQuery, isAllowedMcpUrl } from '../mcp-client';
+
+describe('isAllowedMcpUrl (URL policy: https or loopback-http)', () => {
+  it('allows https anywhere and http on loopback only', () => {
+    expect(isAllowedMcpUrl('https://mcp.context7.com/mcp')).toBe(true);
+    expect(isAllowedMcpUrl('http://localhost:3920/mcp')).toBe(true);
+    expect(isAllowedMcpUrl('http://127.0.0.1:8080/mcp')).toBe(true);
+    expect(isAllowedMcpUrl('http://evil.example.com/mcp')).toBe(false);
+    expect(isAllowedMcpUrl('ws://localhost:3920')).toBe(false);
+    expect(isAllowedMcpUrl('not a url')).toBe(false);
+  });
+});
 
 describe('argsForQuery', () => {
   it('maps the query onto a non-generic REQUIRED param (Context7 resolve-library-id)', () => {
