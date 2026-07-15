@@ -2345,6 +2345,13 @@ You have ${stageBriefs.length} research briefs from a staged investigation, each
 
 Write ONE long, comprehensive, decision-useful report — the kind a reader pays for because it saves them weeks. Depth and structure matter as much as accuracy.
 
+LENGTH & DEPTH — the #1 failure of these reports is being too SHORT. Target 1800–3000 words. Hit it by PRESERVING detail, not padding:
+- Do NOT summarise the briefs into a short digest. The briefs are your raw material — carry their SPECIFIC findings, mechanisms, numbers, named examples, and trade-offs into the report in full.
+- Every distinct point from the briefs earns its own sentence with its citation — do NOT collapse several distinct findings into one line.
+- Every sub-question gets its OWN multi-paragraph section (3–6 paragraphs), not a sentence or two.
+- For each recommendation or trade-off, give the mechanism AND the downside/cost, not just the headline.
+- If your draft is under ~1800 words, you have compressed too much — go back and restore the detail the briefs contain.
+
 STRUCTURE — adapt it to the subject; do NOT use a rigid template:
 - Do NOT write a top-level title / H1 (no "# Professional Report: …", no "Report on …") — the document already has a title, and a second one renders as an ugly double header. Start directly with the body.
 - Open with a strong 1–2 paragraph executive overview that frames the whole finding (no "Abstract:" label — write it as authoritative prose).
