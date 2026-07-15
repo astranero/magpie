@@ -81,7 +81,7 @@ export const LinkPreview: React.FC<LinkPreviewProps> = ({ preview, onClose, onCa
           <div className="prose prose-sm dark:prose-invert max-w-none prose-img:rounded-md prose-headings-display prose-a:text-primary">
             <ReactMarkdown
               remarkPlugins={[remarkGfm, remarkMath]}
-              rehypePlugins={[[rehypeKatex, { strict: false }]]}
+              rehypePlugins={[[rehypeKatex, { strict: false, throwOnError: false }]]}
               urlTransform={(url) => url.startsWith('data:image/') ? url : defaultUrlTransform(url)}
               components={{
                 a: ({ href, children, ...props }) => {

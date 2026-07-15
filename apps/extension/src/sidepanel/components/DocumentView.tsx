@@ -248,7 +248,7 @@ export const DocumentView: React.FC<DocumentViewProps> = ({
       return (
            <ReactMarkdown
            remarkPlugins={[remarkGfm, remarkMath]}
-           rehypePlugins={[[rehypeKatex, { strict: false }]]}
+           rehypePlugins={[[rehypeKatex, { strict: false, throwOnError: false }]]}
            urlTransform={(url) => url.startsWith('data:image/') ? url : defaultUrlTransform(url)}
            components={mdComponents}
          >
@@ -275,7 +275,7 @@ export const DocumentView: React.FC<DocumentViewProps> = ({
             </div>
             <ReactMarkdown
               remarkPlugins={[remarkGfm, remarkMath]}
-              rehypePlugins={[[rehypeKatex, { strict: false }]]}
+              rehypePlugins={[[rehypeKatex, { strict: false, throwOnError: false }]]}
               urlTransform={(url) => url.startsWith('data:image/') ? url : defaultUrlTransform(url)}
               components={mdComponents}
             >
@@ -284,7 +284,7 @@ export const DocumentView: React.FC<DocumentViewProps> = ({
           </div>
           <ReactMarkdown
             remarkPlugins={[remarkGfm, remarkMath]}
-            rehypePlugins={[[rehypeKatex, { strict: false }]]}
+            rehypePlugins={[[rehypeKatex, { strict: false, throwOnError: false }]]}
             urlTransform={(url) => url.startsWith('data:image/') ? url : defaultUrlTransform(url)}
             components={mdComponents}
           >
@@ -307,7 +307,7 @@ export const DocumentView: React.FC<DocumentViewProps> = ({
         {before && (
           <ReactMarkdown
             remarkPlugins={[remarkGfm, remarkMath]}
-            rehypePlugins={[[rehypeKatex, { strict: false }]]}
+            rehypePlugins={[[rehypeKatex, { strict: false, throwOnError: false }]]}
             urlTransform={(url) => url.startsWith('data:image/') ? url : defaultUrlTransform(url)}
             components={mdComponents}
           >
@@ -323,7 +323,7 @@ export const DocumentView: React.FC<DocumentViewProps> = ({
           </div>
           <ReactMarkdown
             remarkPlugins={[remarkGfm, remarkMath]}
-            rehypePlugins={[[rehypeKatex, { strict: false }]]}
+            rehypePlugins={[[rehypeKatex, { strict: false, throwOnError: false }]]}
             urlTransform={(url) => url.startsWith('data:image/') ? url : defaultUrlTransform(url)}
             components={mdComponents}
           >
@@ -333,7 +333,7 @@ export const DocumentView: React.FC<DocumentViewProps> = ({
         {after && (
           <ReactMarkdown
             remarkPlugins={[remarkGfm, remarkMath]}
-            rehypePlugins={[[rehypeKatex, { strict: false }]]}
+            rehypePlugins={[[rehypeKatex, { strict: false, throwOnError: false }]]}
             urlTransform={(url) => url.startsWith('data:image/') ? url : defaultUrlTransform(url)}
             components={mdComponents}
           >
