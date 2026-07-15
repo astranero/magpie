@@ -849,6 +849,7 @@ async function scrapeUrlList(
         // unbounded within a long stage (see OFFSCREEN_RECLAIM_EVERY).
         if (++sourcesSinceOffscreenReclaim >= OFFSCREEN_RECLAIM_EVERY) {
           sourcesSinceOffscreenReclaim = 0;
+          crumb('offscreen', 'reclaim (mid-stage)', { after: i });
           await recreateOffscreen().catch(() => {});
         }
       } else {
