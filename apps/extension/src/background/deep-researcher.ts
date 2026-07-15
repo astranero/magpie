@@ -2285,20 +2285,24 @@ async function synthesizeStageBrief(
   handoffContext = '',
   qualityBoost: (docId: string) => number = () => 0
 ): Promise<string> {
-  if (stageDocIds.length === 0) return '';
+  if (stageDocIds.length === 0) { crumb('brief', 'empty: no stage docs', { stage }); return ''; }
 
   // Retrieve chunks only from this stage's new docs — quality-weighted so the brief
   // leans on the stage's highest-tier / most-cited sources among the relevant ones.
-  const rawChunks = await searchSessionChunks(projectId, topic, 30, stageDocIds, { qualityBoost });
+  // stageDocIds is passed as priority so these freshly-scraped docs are indexed even
+  // when the session cap is already full of earlier stages (which starved late-stage
+  // briefs → "No brief generated").
+  const rawChunks = await searchSessionChunks(projectId, topic, 30, stageDocIds, { qualityBoost, priorityDocIds: stageDocIds });
   // Also fetch chunks for each sub-question to get better coverage
   const extra: any[] = [];
   for (const q of subQuestions) {
-    const hits = await searchSessionChunks(projectId, q, 15, stageDocIds, { qualityBoost });
+    const hits = await searchSessionChunks(projectId, q, 15, stageDocIds, { qualityBoost, priorityDocIds: stageDocIds });
     hits.forEach(c => extra.push(c));
   }
   // Merge + deduplicate by chunk id
   const chunkMap = new Map<string, any>();
   [...rawChunks, ...extra].forEach(c => chunkMap.set(c.id, c));
+  crumb('brief', 'retrieved', { stage, docs: stageDocIds.length, raw: rawChunks.length, extra: extra.length, unique: chunkMap.size });
 
   // Balance across source types and pack up to context budget
   const byLabel = new Map<string, any[]>();
@@ -2327,13 +2331,17 @@ async function synthesizeStageBrief(
     if (!added) break;
   }
 
-  if (selected.length === 0) return '';
+  if (selected.length === 0) {
+    crumb('brief', 'empty: retrieval returned no chunks', { stage, docs: stageDocIds.length, candidates: chunkMap.size });
+    return '';
+  }
 
   const anchoredChunks = selected.map(c => ({
     ...c,
     heading: `[${labelByDoc.get(c.docId) || 'WEB'}] ${c.heading || ''}`.trim()
   }));
   const contextText = buildAnchoredContext(anchoredChunks, await docTitleMap(projectId)).trim();
+  crumb('brief', 'synth start', { stage, selected: selected.length, ctxChars: contextText.length });
 
   const sys =
     `You are a research analyst writing Stage ${stage} of ${totalStages} in a staged investigation of: "${topic}".
@@ -2352,7 +2360,9 @@ Requirements:
 
 ${RESEARCH_CITATION_RULES}`;
 
-  return llmChatFn(sys, `SOURCE EXCERPTS — STAGE ${stage}:\n\n${contextText}`);
+  const brief = await llmChatFn(sys, `SOURCE EXCERPTS — STAGE ${stage}:\n\n${contextText}`);
+  crumb('brief', 'synth done', { stage, words: brief.trim().split(/\s+/).filter(Boolean).length });
+  return brief;
 }
 
 /**
@@ -2630,6 +2640,7 @@ async function runDeeperResearch(
     // in the danger zone — runs at the TOP of the next stage via guardHeapOrReload,
     // so a hot inherited offscreen is caught there whether or not this recreate freed.
     onProgress(`[STAGE ${stage}/${rounds}] Reclaiming memory before next stage…`);
+    crumb('research', 'stage end', { stage, sources: agents.reduce((n, a) => n + a.sources.length, 0), briefWords: (stageBriefs[stage - 1] || '').split(/\s+/).filter(Boolean).length });
     resetSessionIndex(projectId);
     await recreateOffscreen().catch(() => {});
   }
@@ -2657,6 +2668,7 @@ async function runDeeperResearch(
   // staged path, the packed excerpts on the fallback path.
   let revisionContext = '';
 
+  crumb('research', 'synthesis phase', { briefs: completedBriefs.length, ofStages: rounds, docs: allDocIds.length });
   if (completedBriefs.length > 0) {
     // Staged path: merge all stage briefs into one comprehensive paper
     onProgress(`[SYNTHESIZING] Merging ${completedBriefs.length} stage brief(s) into final paper…`);

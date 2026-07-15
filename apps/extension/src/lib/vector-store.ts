@@ -83,12 +83,12 @@ async function insertChunks(db: any, chunks: Chunk[]) {
 // Prevent concurrent rehydration (chat question + research both calling this)
 const rehydrating = new Map<string, Promise<void>>();
 
-export async function ensureProjectIndexed(projectId: string, maxChunks = 2000): Promise<void> {
+export async function ensureProjectIndexed(projectId: string, maxChunks = 2000, priorityDocIds?: string[]): Promise<void> {
   // If already rehydrating this session, wait for it to finish
   const existing = rehydrating.get(projectId);
   if (existing) return existing;
 
-  const promise = _ensureProjectIndexedInner(projectId, maxChunks);
+  const promise = _ensureProjectIndexedInner(projectId, maxChunks, priorityDocIds);
   rehydrating.set(projectId, promise);
   try {
     await promise;
@@ -97,7 +97,7 @@ export async function ensureProjectIndexed(projectId: string, maxChunks = 2000):
   }
 }
 
-async function _ensureProjectIndexedInner(projectId: string, maxChunks: number): Promise<void> {
+async function _ensureProjectIndexedInner(projectId: string, maxChunks: number, priorityDocIds?: string[]): Promise<void> {
   const db = await getSessionDB(projectId);
   const indexed = getIndexedSet(projectId);
 
@@ -105,15 +105,28 @@ async function _ensureProjectIndexedInner(projectId: string, maxChunks: number):
   const missing = docs.filter(d => !indexed.has(d.id)).map(d => d.id);
   if (missing.length === 0) return;
 
-  const chunks = await getChunksForDocs(missing);
+  let chunks = await getChunksForDocs(missing);
+
+  // Insert the caller's priority docs FIRST. Without this, the cap fills in
+  // document (chronological) order, so a later research stage's freshly-scraped
+  // docs get capped out and its retrieval returns nothing → "No brief generated".
+  // Ordering priority chunks to the front guarantees they fit under the cap.
+  if (priorityDocIds?.length) {
+    const prio = new Set(priorityDocIds);
+    chunks = [...chunks.filter(c => prio.has(c.docId)), ...chunks.filter(c => !prio.has(c.docId))];
+  }
 
   // Index ALL chunks (not just one per doc), capped at maxChunks
   const cur = sessionChunkCount.get(projectId) ?? 0;
   const toInsert = chunks.slice(0, Math.max(0, maxChunks - cur));
   await insertChunks(db, toInsert);
   sessionChunkCount.set(projectId, cur + toInsert.length);
-  // Mark all docs as indexed (even if some chunks were cut by the cap)
-  missing.forEach(docId => indexed.add(docId));
+  // Mark only the docs we actually inserted chunks for as indexed. Docs whose
+  // chunks were cut by the cap stay "missing" so a later call (with them as
+  // priority, or after a reset) can still index them — the old code marked ALL
+  // missing docs indexed even when capped, permanently starving them.
+  const insertedDocs = new Set(toInsert.map(c => c.docId));
+  missing.forEach(docId => { if (insertedDocs.has(docId)) indexed.add(docId); });
 }
 
 /**
@@ -152,10 +165,12 @@ export async function searchSessionChunks(
   query: string,
   limit: number = 20,
   filterDocIds?: string[],
-  opts?: { priority?: boolean; qualityBoost?: (docId: string) => number }
+  opts?: { priority?: boolean; qualityBoost?: (docId: string) => number; priorityDocIds?: string[] }
 ): Promise<Chunk[]> {
-  // Rehydrate persisted chunks lost to a service worker restart
-  await ensureProjectIndexed(sessionId);
+  // Rehydrate persisted chunks lost to a service worker restart. Pass the caller's
+  // priority docs (e.g. the current research stage's fresh docs) so they're indexed
+  // even when the session cap is already full of earlier docs.
+  await ensureProjectIndexed(sessionId, MAX_SESSION_CHUNKS, opts?.priorityDocIds);
   const db = await getSessionDB(sessionId);
 
   let queryVector: number[] | null = null;
