@@ -138,3 +138,24 @@ describe('research-store heartbeat & resume gate', () => {
     expect(count).toBe(0);
   });
 });
+
+describe('SOTA checkpoint fields round-trip (outline / drafts / docIds / spec)', () => {
+  it('updateJob merge-patches the new cross-stage fields and getJob returns them', async () => {
+    mockStorage.set(researchStore.JOB_KEY, makeJob({ currentStage: 2 }));
+    const outline = { version: 2, sections: [{ id: 's1', heading: 'H', goal: 'g', keyTerms: ['k'], evidenceNotes: ['n [d1.s1.p1]'], status: 'thin' as const }] };
+    await researchStore.updateJob({
+      outline,
+      handoffContext: '## Established Facts\n- f',
+      researchSpec: '{"scope":"x"}',
+      gatheredDocIds: ['doc-a', 'doc-b'],
+      sectionDrafts: { s1: '## H\n\ndraft text' },
+    });
+    const job = (await researchStore.getJob())!;
+    expect(job.currentStage).toBe(2);              // merge, not replace
+    expect(job.outline).toEqual(outline);
+    expect(job.handoffContext).toContain('Established Facts');
+    expect(job.researchSpec).toBe('{"scope":"x"}');
+    expect(job.gatheredDocIds).toEqual(['doc-a', 'doc-b']);
+    expect(job.sectionDrafts).toEqual({ s1: '## H\n\ndraft text' });
+  });
+});

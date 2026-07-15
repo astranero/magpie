@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { paperQualityScore, rankPapers } from '../paper-rank';
+import { paperQualityScore, rankPapers, webDomainAuthority } from '../paper-rank';
 
 const NOW = 2026;
 
@@ -70,5 +70,27 @@ describe('venue prestige', () => {
   it('no venue = no venue bonus', () => {
     const base = { title: 'x', year: '2020', citations: 10 };
     expect(paperQualityScore(base, NOW)).toBe(paperQualityScore({ ...base, venue: 'Random Journal' }, NOW));
+  });
+});
+
+describe('webDomainAuthority', () => {
+  it('tiers: standards body > canonical docs > gov/edu > unknown', () => {
+    expect(webDomainAuthority('https://www.w3.org/TR/WCAG22/')).toBe(1.0);
+    expect(webDomainAuthority('https://arxiv.org/abs/2402.14207')).toBe(1.0);
+    expect(webDomainAuthority('https://developer.mozilla.org/en-US/docs/Web')).toBe(0.7);
+    expect(webDomainAuthority('https://www.nngroup.com/articles/x/')).toBe(0.7);
+    expect(webDomainAuthority('https://www.nasa.gov/report')).toBe(0.4);
+    expect(webDomainAuthority('https://cs.stanford.edu/paper')).toBe(0.4);
+    expect(webDomainAuthority('https://random-seo-blog.com/post')).toBe(0);
+  });
+  it('subdomains match; lookalike domains do not', () => {
+    expect(webDomainAuthority('https://dl.acm.org/doi/10.1145/1')).toBe(1.0);
+    expect(webDomainAuthority('https://not-acm.org.evil.com/x')).toBe(0);
+    expect(webDomainAuthority('https://fakearxiv.org/abs/1')).toBe(0);
+  });
+  it('malformed / empty URLs return 0 without throwing', () => {
+    expect(webDomainAuthority('')).toBe(0);
+    expect(webDomainAuthority('not a url')).toBe(0);
+    expect(webDomainAuthority('w3.org/TR/x')).toBe(1.0); // scheme-less still resolves host
   });
 });

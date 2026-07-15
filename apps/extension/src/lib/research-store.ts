@@ -29,6 +29,19 @@ export interface ResearchJob {
   stageBriefs?: string[];
   /** Index (1-based) of the last fully completed stage. 0 = none done yet. */
   currentStage?: number;
+  /** Living report outline (co-evolves with gathering) — trimmed ≤8k serialized. */
+  outline?: import('./outline').ResearchOutline;
+  /** Rendered handoff markdown for the next stage's brief prompt. */
+  handoffContext?: string;
+  /** Research spec JSON — was silently LOST on resume before this field. */
+  researchSpec?: string;
+  /** All source docIds gathered so far — final-synthesis retrieval scope on resume
+   *  (without it, a resumed synthesis had an empty filter and could pull prior
+   *  runs' reports into the new one). */
+  gatheredDocIds?: string[];
+  /** Section-scoped synthesis: outline-section id → written markdown, so a SW
+   *  death mid-final-synthesis resumes without rewriting finished sections. */
+  sectionDrafts?: Record<string, string>;
   logs: string[];
   resumeAttempts?: number;
   active?: boolean;

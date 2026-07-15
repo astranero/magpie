@@ -33,6 +33,10 @@ import {
   buildCleanedPdfDoc,
   linkifyReportCitations,
   isJunkUrl,
+  weightedEvalScore,
+  normalizeSection,
+  stripLeadingTitle,
+  reflectOnStage,
   SourceRecord,
 } from '../deep-researcher';
 
@@ -450,5 +454,102 @@ describe('isJunkUrl — reader-proxy dead ends', () => {
     ]) {
       expect(isJunkUrl(u), u).toBe(false);
     }
+  });
+});
+
+describe('weightedEvalScore', () => {
+  it('computes the weighted sum over the five dimensions', () => {
+    // 8*.20 + 6*.20 + 4*.25 + 10*.20 + 5*.15 = 1.6+1.2+1.0+2.0+0.75 = 6.55 → 7
+    expect(weightedEvalScore({ coverage: 8, evidence: 6, depthPerSection: 4, epistemicHonesty: 10, structure: 5 })).toBe(7);
+  });
+  it('all-10s → 10, all-0s → 0', () => {
+    expect(weightedEvalScore({ coverage: 10, evidence: 10, depthPerSection: 10, epistemicHonesty: 10, structure: 10 })).toBe(10);
+    expect(weightedEvalScore({ coverage: 0, evidence: 0, depthPerSection: 0, epistemicHonesty: 0, structure: 0 })).toBe(0);
+  });
+  it('rejects missing, out-of-range, or non-numeric dimensions (falls back to model score)', () => {
+    expect(weightedEvalScore(undefined)).toBeNull();
+    expect(weightedEvalScore({ coverage: 8 })).toBeNull();
+    expect(weightedEvalScore({ coverage: 11, evidence: 6, depthPerSection: 4, epistemicHonesty: 10, structure: 5 })).toBeNull();
+    expect(weightedEvalScore({ coverage: '8', evidence: 6, depthPerSection: 4, epistemicHonesty: 10, structure: 5 })).toBeNull();
+  });
+  it('depth is the heaviest dimension — zeroing it hurts more than zeroing structure', () => {
+    const depthZeroed = weightedEvalScore({ coverage: 10, evidence: 10, depthPerSection: 0, epistemicHonesty: 10, structure: 10 })!;   // 7.5 → 8
+    const structZeroed = weightedEvalScore({ coverage: 10, evidence: 10, depthPerSection: 10, epistemicHonesty: 10, structure: 0 })!;  // 8.5 → 9
+    expect(structZeroed).toBeGreaterThan(depthZeroed);
+  });
+});
+
+describe('stripLeadingTitle (sectioned-report hardening)', () => {
+  it('still strips a leading H1 title', () => {
+    expect(stripLeadingTitle('# Professional Report: Coffee\n\nBody text.')).toBe('Body text.');
+  });
+  it('strips a restated-title H2 ("Deep Research: …" / "Report on …")', () => {
+    expect(stripLeadingTitle('## Deep Research: Coffee Health\n\nBody.')).toBe('Body.');
+    expect(stripLeadingTitle('## Report on Coffee\n\nBody.')).toBe('Body.');
+  });
+  it('strips an H2 that heavily overlaps the topic (restated title)', () => {
+    const out = stripLeadingTitle('## Health Effects of Coffee Consumption\n\nBody.', 'health effects of coffee consumption on adults');
+    expect(out).toBe('Body.');
+  });
+  it('KEEPS a real section heading (the sectioned-report opener)', () => {
+    const src = '## Demand and Pain Points\n\nUsers report…';
+    expect(stripLeadingTitle(src, 'weaknesses of AI chat interfaces')).toBe(src);
+  });
+});
+
+describe('normalizeSection', () => {
+  const long = 'Analytical prose about the finding. '.repeat(10);
+  it('prepends the canonical heading when missing', () => {
+    expect(normalizeSection(long, 'My Section')!.startsWith('## My Section\n\n')).toBe(true);
+  });
+  it('replaces a divergent leading heading with the canonical one', () => {
+    const out = normalizeSection(`## Some Other Title\n\n${long}`, 'My Section')!;
+    expect(out.startsWith('## My Section\n\n')).toBe(true);
+    expect(out).not.toContain('Some Other Title');
+  });
+  it('strips a stray H1 and rejects near-empty output', () => {
+    expect(normalizeSection(`# Report\n\n${long}`, 'S')).not.toContain('# Report\n');
+    expect(normalizeSection('too short', 'S')).toBeNull();
+  });
+});
+
+describe('reflectOnStage', () => {
+  const subQs = ['Q1', 'Q2'];
+  const reflectJson = JSON.stringify({
+    outline: { sections: [
+      { id: 's1', heading: 'Alpha', goal: 'g', keyTerms: ['alpha'], evidenceNotes: ['n [d1.s1.p1]'], status: 'adequate' },
+      { id: 's2', heading: 'Beta', goal: 'g', keyTerms: [], evidenceNotes: [], status: 'thin' },
+      { id: 's3', heading: 'Gamma', goal: 'g', keyTerms: [], evidenceNotes: [], status: 'empty' },
+    ] },
+    handoff: { establishedFacts: ['f [d1.s1.p1]'], openGaps: ['g1'], contradictions: [], focusNext: 'beta' },
+    queries: ['beta failure modes', 'gamma empirical studies', 'alpha independent replication'],
+  });
+
+  it('parses a good reflect and returns outline + handoff + queries', async () => {
+    const llm = vi.fn().mockResolvedValue(reflectJson);
+    const r = await reflectOnStage(2, 8, 'topic', subQs, 'brief text', null, llm);
+    expect(r!.outline.sections).toHaveLength(3);
+    expect(r!.outline.version).toBe(2);
+    expect(r!.queries).toHaveLength(3);
+  });
+
+  it('tops up queries from thin sections when the model under-delivers', async () => {
+    const under = JSON.parse(reflectJson); under.queries = ['only one query'];
+    const llm = vi.fn().mockResolvedValue(JSON.stringify(under));
+    const r = await reflectOnStage(2, 8, 'mytopic', subQs, 'brief', null, llm);
+    expect(r!.queries.length).toBeGreaterThanOrEqual(3);
+    expect(r!.queries.some(q => q.includes('mytopic'))).toBe(true);
+  });
+
+  it('returns null on garbage (caller falls back to old pipeline behavior)', async () => {
+    const llm = vi.fn().mockResolvedValue('no json here at all');
+    expect(await reflectOnStage(1, 8, 't', subQs, 'brief', null, llm)).toBeNull();
+  });
+
+  it('final stage: keeps empty queries empty (no top-up)', async () => {
+    const fin = JSON.parse(reflectJson); fin.queries = [];
+    const llm = vi.fn().mockResolvedValue(JSON.stringify(fin));
+    const r = await reflectOnStage(8, 8, 't', subQs, 'brief', null, llm);
+    expect(r!.queries).toEqual([]);
   });
 });

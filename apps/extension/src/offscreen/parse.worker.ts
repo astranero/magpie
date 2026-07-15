@@ -14,18 +14,14 @@
 // the main thread runs unchanged. Pure JS, no eval/wasm → fine under the offscreen
 // CSP (`script-src 'self' 'wasm-unsafe-eval'`).
 
-import { DOMParser, parseHTML } from 'linkedom';
+// FIRST: install linkedom DOM globals (window/document/DOMParser/…) so the two
+// libs below bind to them at module-eval time. Import order is load order — this
+// side-effect import MUST stay above readability/turndown, else they capture an
+// undefined `document` and every parse throws "document is not defined".
+import './worker-dom-globals';
+import { DOMParser } from 'linkedom';
 import { Readability } from '@mozilla/readability';
 import TurndownService from 'turndown';
-
-// A Web Worker has NO `document` and NO `DOMParser`. Turndown falls back to
-// `document.implementation.createHTMLDocument()` when it can't find a usable
-// DOMParser, so without a global `document` it throws "document is not defined"
-// (the captured worker error) and every parse fell back to cheap string extraction.
-// Provide linkedom's DOM globals so Turndown + Readability run exactly as on a page.
-const { document } = parseHTML('<!DOCTYPE html><html><head></head><body></body></html>');
-(globalThis as any).document = document;
-(globalThis as any).DOMParser = DOMParser;
 
 interface ParseReq { type: 'parse'; id: number; html: string; url: string }
 

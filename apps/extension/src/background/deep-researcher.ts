@@ -13,9 +13,14 @@ import { generateBibtex } from '../lib/bibtex';
 import { harvestReferences, partitionRefs, HarvestedRef } from '../lib/reference-harvest';
 import { getMcpServers, McpConnection, isSearchLikeTool, argsForQuery } from '../lib/mcp-client';
 import { searchWithProviders, jinaWebSearch, getSearchApiKeys, SearchHit } from '../lib/search-providers';
-import { rankPapers } from '../lib/paper-rank';
+import { rankPapers, webDomainAuthority } from '../lib/paper-rank';
 import { semaphore } from '../lib/semaphore';
 import { crumb } from '../lib/crash-log';
+import {
+  parseReflect, mergeOutlines, trimOutline, formatOutlineSkeleton, formatHandoff,
+  selectBriefExcerpts, sectionQueriesFallback,
+  type ResearchOutline, type ReflectResult,
+} from '../lib/outline';
 
 // F9: serial indexing — one document at a time through the ONNX embedding
 // pipeline. Even concurrency=2 causes WASM integer-overflow crashes when
@@ -93,6 +98,25 @@ const PRESCRIPTIVE_GUIDANCE =
   `- Cover the FULL scope the question names (every sub-topic / taxonomy it lists), not only the parts with the most sources.\n` +
   `- Synthesise the guidance FROM the evidence; never end with "the sources do not provide a unified workflow". Note a genuine gap in at most one short clause.\n`;
 
+// Epistemic honesty requirements — the difference between a report that reads
+// authoritative and one that IS trustworthy. SOTA research agents make claim
+// confidence, contradictions, and evidence independence explicit instead of
+// papering over them (multi-source concurrence from a shared origin is
+// repetition, not confirmation). Appended to every synthesis-family prompt.
+const EPISTEMIC_RULES =
+  `EPISTEMIC RULES (how to represent certainty — violating these reads as overclaiming):\n` +
+  `- Express confidence in PROSE, never bracket tags: "corroborated by independent sources [a][b]" vs "a single source reports… [a]" vs "contested: X finds…, while Y finds… [a][b]". (Citation rule 4 still applies — no confidence labels in brackets.)\n` +
+  `- Any load-bearing claim (one a recommendation or the Verdict depends on) supported by only ONE source must say so in prose: "…though this rests on a single source [a]."\n` +
+  `- CONCURRENCE IS NOT PROOF: sources restating the same origin (same paper, same press release, same vendor) count as ONE source. When shared provenance is visible, note it instead of presenting an echo as consensus.\n` +
+  `- Where sources genuinely conflict, present BOTH positions with their anchors and, when the evidence allows, say which is stronger and why. Disagreement is signal — never manufacture consensus.\n` +
+  `- Preserve the uncertainty the sources themselves state (preliminary results, small samples, preprints) — do not upgrade "suggests" to "shows".\n`;
+
+// The final report must also carry an explicit epistemic section — enforced in
+// the section/capstone/merge prompts (not in per-stage briefs, which have their
+// own Open Questions contract).
+const CONTRADICTIONS_SECTION_RULE =
+  `The report MUST include a "## Contradictions & Open Questions" section: where sources disagree (and which side is stronger), which load-bearing claims rest on a single source, and what a reader would still need to verify.\n`;
+
 /**
  * Models sometimes append a hand-written "Bibliography"/"References" section
  * of bare doc-ids despite rule 9 — those aren't anchors, render as dead
@@ -114,13 +138,31 @@ export function stripModelBibliography(synthesis: string): string {
 /**
  * The report already carries a document title ("Deep Research: <topic>"), so a
  * top-level H1 the synthesis model writes anyway ("# Professional Report: …")
- * renders as an ugly double header. Strip a single leading H1/H2 heading (only if
- * it's the very first content), leaving the executive overview as the opener.
+ * renders as an ugly double header. Strip a single leading H1 (only if it's the
+ * very first content), leaving the executive overview as the opener.
+ *
+ * H2s are stripped ONLY when they look like a restated title ("Report on …",
+ * "Deep Research: …", or heavy token overlap with the topic) — a sectioned
+ * report legitimately BEGINS with a real `## Section` heading when its
+ * capstone/exec-summary is absent, and eating that heading maimed the report.
  */
-export function stripLeadingTitle(synthesis: string): string {
+export function stripLeadingTitle(synthesis: string, topic = ''): string {
   const s = synthesis.replace(/^﻿?\s*/, '');
-  const m = s.match(/^#{1,2}\s+.+\n+/);
-  return m ? s.slice(m[0].length) : s;
+  const h1 = s.match(/^#\s+.+\n+/);
+  if (h1) return s.slice(h1[0].length);
+  const h2 = s.match(/^##\s+(.+)\n+/);
+  if (!h2) return s;
+  const text = h2[1].trim();
+  if (/^(deep\s+)?research\b|^report\b|\breport\s*(on|:)/i.test(text)) return s.slice(h2[0].length);
+  if (topic) {
+    const topicToks = new Set(topic.toLowerCase().split(/[^a-z0-9]+/).filter(t => t.length > 3));
+    const headToks = text.toLowerCase().split(/[^a-z0-9]+/).filter(t => t.length > 3);
+    if (headToks.length > 0 && topicToks.size > 0) {
+      const overlap = headToks.filter(t => topicToks.has(t)).length / headToks.length;
+      if (overlap >= 0.6) return s.slice(h2[0].length); // restated title, not a section
+    }
+  }
+  return s; // a real section heading — keep it
 }
 
 // ─────────────────────────────────────────────
@@ -635,9 +677,17 @@ Return ONLY a JSON array of strings, nothing else. Example: ["query 1", "query 2
 }
 
 export async function generateSubQuestions(topic: string, llmChatFn: (sys: string, user: string) => Promise<string>): Promise<string[]> {
-  const sysPrompt = `${todayLine()} You are a research strategist. Decompose the given topic into 5-7 research directives that together give comprehensive coverage: core mechanisms, current state of the art, applications, limitations, open debates, and recent developments.
+  // STORM-style perspective-guided decomposition (Shao et al., NAACL 2024):
+  // directly asking a model for questions yields generic ones; making it first
+  // adopt distinct expert PERSPECTIVES yields diverse, deeper directives — and
+  // guarantees at least one targets disagreements/failure modes.
+  const sysPrompt = `${todayLine()} You are a research strategist. Decompose the given topic into 5-7 research directives.
+
+STEP 1 (think, do not output): identify 3-5 DISTINCT expert perspectives whose concerns differ for this topic — choose topic-appropriate ones, e.g. the practitioner/implementer, the skeptic/critic, the researcher/empiricist, the business/economics analyst, the standards author or historian, the end-user advocate, the security/safety reviewer.
+
+STEP 2 (output): derive 5-7 research directives such that EVERY perspective's core concern is covered by at least one directive, and AT LEAST ONE directive explicitly targets disagreements, failure modes, or evidence against the mainstream view.
 Each directive is ONE sentence that starts with an action verb (Analyze / Investigate / Compare / Evaluate / Survey / Trace / Synthesize), names WHAT to examine, and ends with a purpose clause ("… to determine/extract/identify …"). Directives must be concrete enough to search on — name the specific systems, methods, or populations involved.
-Return ONLY a JSON array of strings, nothing else.`;
+Return ONLY a JSON array of directive strings, nothing else.`;
   const res = await llmChatFn(sysPrompt, topic);
   try {
     const start = res.indexOf('[');
@@ -754,8 +804,10 @@ export function sourceTier(url: string, citations?: number): SourceTier {
  * well-cited sources WITHOUT overpowering relevance — and it only ever reorders
  * chunks that already cleared the relevance gate (see gateRerankedChunks).
  */
-export function qualityBoostValue(tier: SourceTier, citations?: number): number {
-  return (tier === 'high' ? 1.5 : 0) + 0.4 * Math.log10(1 + Math.max(0, citations ?? 0));
+export function qualityBoostValue(tier: SourceTier, citations?: number, url?: string): number {
+  return (tier === 'high' ? 1.5 : 0)
+    + 0.4 * Math.log10(1 + Math.max(0, citations ?? 0))
+    + webDomainAuthority(url ?? '');   // standards bodies / canonical docs / empirical UX research
 }
 
 /**
@@ -1564,7 +1616,7 @@ async function saveSynthesisReport(
   // Turn inline [anchor] citations into real links, and number the Sources list
   // to match — cited sources first (in citation order), then any uncited ones.
   // Strip a leading H1 first so the doc title isn't doubled by the model's own.
-  const { text: linkedSynthesis, cited } = linkifyReportCitations(stripLeadingTitle(synthesis), sources);
+  const { text: linkedSynthesis, cited } = linkifyReportCitations(stripLeadingTitle(synthesis, topic), sources);
   const unique = dedupeSourceRecords(sources).filter(r => r.url || r.title);
   const citedKeys = new Set(cited.map(r => r.docId || r.url));
   const ordered = [...cited, ...unique.filter(r => !citedKeys.has(r.docId || r.url))];
@@ -1702,7 +1754,22 @@ export async function runDeepResearch(
   onProgress(`[SYNTHESIZING] Drafting final comprehensive report...`);
   await updateJob({ phase: 'synthesizing' }).catch(() => {});
 
-  const sysPrompt = `You are a research analyst. Using ONLY the excerpts below, write a comprehensive, well-structured markdown report on: "${topic}". Group related points under headings. If the excerpts lack detail on some aspect, say so briefly. Never ask for more context — work with what is provided.\n\n${RESEARCH_CITATION_RULES}`;
+  // Quick mode gets the same structural discipline as the deep merge (it used
+  // to be a bare one-liner — reports came out flat and unstructured).
+  const sysPrompt = `You are a research analyst. Using ONLY the excerpts below, write a comprehensive, well-structured markdown report on: "${topic}". Never ask for more context — work with what is provided.
+
+STRUCTURE:
+- Do NOT start with an H1 title (the document already has one). Open with a 1-paragraph executive overview (no "Abstract:" label).
+- 3-6 sections with descriptive, topic-specific headings (never "Introduction" / "Section 1" / "Discussion").
+- Use markdown tables wherever the evidence contains comparable or quantitative data.
+- ${CONTRADICTIONS_SECTION_RULE}
+- Close with a decisive **Verdict** or **Recommendation** paragraph.
+
+LENGTH: target 800-1500 words — hit it by preserving the excerpts' SPECIFIC findings, numbers, and named examples, not by padding.
+
+${PRESCRIPTIVE_GUIDANCE}
+${EPISTEMIC_RULES}
+${RESEARCH_CITATION_RULES}`;
 
   const rawSynthesis = await (synthesisFn ?? llmChatFn)(sysPrompt, `SOURCE EXCERPTS:\n\n${contextText}`);
 
@@ -1797,33 +1864,9 @@ async function followReferences(
  * queries targeting what's still missing. Parsed defensively — an unparseable
  * response ends the iteration early rather than failing the run.
  */
-async function analyzeGaps(
-  topic: string,
-  subQuestions: string[],
-  evidence: string,
-  llmChatFn: (sys: string, user: string) => Promise<string>
-): Promise<{ findings: string; queries: string[] } | null> {
-  const sys = `You are directing an iterative research investigation on: "${topic}".
-Sub-questions under investigation:
-${subQuestions.map(q => `- ${q}`).join('\n')}
-
-Given excerpts of the evidence gathered so far, produce STRICT JSON:
-{"findings": "2-4 sentence summary of what is now established", "gaps": "1-3 sentences on what is still missing", "queries": ["3-5 new web search queries targeting ONLY the gaps"]}
-Return ONLY the JSON object.`;
-  try {
-    const res = await llmChatFn(sys, `EVIDENCE SO FAR:\n\n${evidence.slice(0, 12000)}`);
-    const start = res.indexOf('{');
-    const end = res.lastIndexOf('}');
-    if (start === -1 || end === -1) return null;
-    const json = JSON.parse(res.slice(start, end + 1));
-    const queries = Array.isArray(json.queries) ? json.queries.filter((q: any) => typeof q === 'string' && q.length > 3).slice(0, 5) : [];
-    if (queries.length === 0) return null;
-    const findings = [json.findings, json.gaps ? `Open gaps: ${json.gaps}` : ''].filter(Boolean).join(' ');
-    return { findings, queries };
-  } catch {
-    return null;
-  }
-}
+// (analyzeGaps + buildStageHandoff were consolidated into reflectOnStage —
+// one LLM call per stage now updates the outline, produces the handoff state,
+// and derives the next stage's queries from the outline's thin sections.)
 
 // ── State-of-the-art agentic improvements ────────────────────────────────────
 
@@ -1834,13 +1877,47 @@ Return ONLY the JSON object.`;
  * It is intentionally tuned to find flaws — not to praise.
  * Returns structured feedback appended to the report as a collapsible section.
  */
+export interface EvalDimensions {
+  coverage: number;         // topic fully addressed?
+  evidence: number;         // claims cited, not asserted?
+  depthPerSection: number;  // sections substantive, not enumerations?
+  epistemicHonesty: number; // contradictions surfaced, single-source flagged, no overclaiming?
+  structure: number;        // organization, tables, decisive close?
+}
+
 export interface EvaluationResult {
   verdict: 'PASS' | 'NEEDS_REVISION' | 'FAIL';
   score: number; // 0–10
+  dimensions?: EvalDimensions;
   strengths: string[];
   weaknesses: string[];
   flaggedSections: string[];
   recommendation: string;
+}
+
+// Dimension weights — depth is weighted highest because "too shallow" is the
+// dominant historical failure mode of these reports.
+const EVAL_WEIGHTS: Record<keyof EvalDimensions, number> = {
+  coverage: 0.20, evidence: 0.20, depthPerSection: 0.25, epistemicHonesty: 0.20, structure: 0.15,
+};
+
+/**
+ * Recompute the overall score from the per-dimension scores. A single
+ * model-chosen 0-10 is noisy and drifts optimistic; a weighted sum over
+ * dimensions the model scored SEPARATELY is more stable and makes the rubric
+ * auditable. Returns null when dimensions are missing/invalid (caller keeps
+ * the model's own top-level score — backwards compatible).
+ */
+export function weightedEvalScore(dims: unknown): number | null {
+  if (!dims || typeof dims !== 'object') return null;
+  const d = dims as Record<string, unknown>;
+  let sum = 0;
+  for (const [k, w] of Object.entries(EVAL_WEIGHTS)) {
+    const v = d[k];
+    if (typeof v !== 'number' || !Number.isFinite(v) || v < 0 || v > 10) return null;
+    sum += v * w;
+  }
+  return Math.round(sum);
 }
 
 async function evaluateReport(
@@ -1854,17 +1931,26 @@ Do NOT be polite or skew positive. Be highly skeptical and objective.
 
 Evaluate the research report below on: "${topic}"
 
-Assess:
-1. Claim coverage — does it address the topic fully or leave major angles untouched?
-2. Evidence quality — are claims supported by citations or asserted without basis?
-3. Internal consistency — do sections contradict each other?
-4. Depth — does it go beyond surface-level summaries?
-5. Citation density — are [anchor_id] citations present and evenly distributed?
+Score each dimension 0-10 SEPARATELY (do not average them yourself):
+- coverage: does it address the topic fully, or leave major angles untouched?
+- evidence: are claims supported by citations, or asserted without basis? Are [anchor_id] citations present and evenly distributed?
+- depthPerSection: is EVERY section substantive (mechanisms, numbers, named examples, trade-offs)? Flag any section under ~150 words or that merely enumerates points without analysis.
+- epistemicHonesty: are contradictions between sources surfaced? Are load-bearing single-source claims flagged as such? Is stated uncertainty preserved (no overclaiming)? Is there a Contradictions & Open Questions treatment?
+- structure: clear organization, descriptive headings, tables where data is comparable, a decisive close?
+
+CITATION FORMAT IS OFF-LIMITS: inline [xxxxxxx.sN.pN] anchors are this system's
+INTERNAL citation format — a post-processing step converts every anchor into a
+numbered link and appends a full numbered bibliography before the reader ever
+sees the report. Do NOT flag the anchor style as "opaque", "non-standard", or
+"missing a bibliography", do NOT ask for academic-style references, and do NOT
+factor citation FORMATTING into any dimension or the recommendation. Judge only
+whether citations are PRESENT where claims need support, and evenly distributed.
 
 Return STRICT JSON:
 {
   "verdict": "PASS" | "NEEDS_REVISION" | "FAIL",
-  "score": <0-10 integer>,
+  "score": <0-10 integer, your overall judgment>,
+  "dimensions": { "coverage": <0-10>, "evidence": <0-10>, "depthPerSection": <0-10>, "epistemicHonesty": <0-10>, "structure": <0-10> },
   "strengths": ["<1-sentence strength>", ...],
   "weaknesses": ["<1-sentence weakness>", ...],
   "flaggedSections": ["<section heading or quote that needs revision>", ...],
@@ -1873,14 +1959,19 @@ Return STRICT JSON:
 Return ONLY the JSON. No explanation outside it.`;
 
   try {
-    // Use the first 8000 chars of the report to stay within context
-    const reportSlice = report.slice(0, 8000);
+    // 16k chars: a 3000-word report is ~20k — the old 8k slice judged less
+    // than half of it, so back-half sections were never audited.
+    const reportSlice = report.slice(0, 16_000);
     const res = await llmChatFn(sys, `REPORT TO EVALUATE:\n\n${reportSlice}`);
     const start = res.indexOf('{');
     const end = res.lastIndexOf('}');
     if (start === -1 || end === -1) return null;
     const parsed = JSON.parse(res.slice(start, end + 1));
     if (!parsed.verdict || typeof parsed.score !== 'number') return null;
+    // Deterministic weighted score when the model filled the rubric; its own
+    // top-level number (noisier, drifts optimistic) is the fallback.
+    const weighted = weightedEvalScore(parsed.dimensions);
+    if (weighted !== null) parsed.score = weighted;
     return parsed as EvaluationResult;
   } catch {
     return null;
@@ -2074,45 +2165,67 @@ async function evaluateAndRefine(
 }
 
 /**
- * IMPROVEMENT 2: Context Reset / Structured Stage Handoff
- *
- * Instead of feeding raw evidence chunks into the next stage's gap analysis,
- * compress prior stage findings into a structured handoff state.
- * This prevents coherence drift in long multi-stage runs.
+ * Per-stage REFLECT — the outline–search co-evolution step (WebWeaver-style).
+ * ONE consolidated LLM call replacing the old buildStageHandoff + analyzeGaps
+ * pair (two calls → one): after each stage brief it
+ *   1. updates the living report OUTLINE with the stage's evidence,
+ *   2. produces the structured handoff state for the next stage's brief, and
+ *   3. derives the next stage's queries FROM the outline's thin sections and
+ *      unresolved contradictions — so gathering is steered by what the final
+ *      report still needs, not by generic gap prose.
  */
-async function buildStageHandoff(
+export async function reflectOnStage(
   stage: number,
+  rounds: number,
   topic: string,
   subQuestions: string[],
   stageBrief: string,
+  priorOutline: ResearchOutline | null,
   llmChatFn: (sys: string, user: string) => Promise<string>
-): Promise<string> {
+): Promise<ReflectResult | null> {
+  const isFinal = stage >= rounds;
+  const outlineBlock = priorOutline
+    ? `CURRENT OUTLINE (JSON — update it):\n${JSON.stringify(trimOutline(priorOutline))}`
+    : `CURRENT OUTLINE: none yet — CREATE one with 4-8 sections that would structure the definitive report on this topic.`;
+
   const sys =
-    `You are a research coordinator managing a multi-stage investigation of: "${topic}".
+    `You are the research coordinator of a staged investigation of: "${topic}".
 Sub-questions: ${subQuestions.map((q, i) => `${i + 1}. ${q}`).join(' | ')}
-Stage ${stage} has just completed. Produce a concise HANDOFF STATE for the next stage.
+Stage ${stage} of ${rounds} has just completed. Reflect and produce STRICT JSON.
 
-Format (use these exact headings):
-## Established Facts
-(bullet list — what is now confirmed with citations)
+${outlineBlock}
 
-## Open Gaps
-(bullet list — what was NOT answered; be specific)
+Rules for the outline update:
+- 4-8 sections with descriptive, topic-specific headings (they become the report's section headings).
+- PRESERVE existing section "id"s when updating a section (you may merge/split sections, but carry their evidenceNotes over).
+- APPEND new evidenceNotes from this stage's brief — short bullets that carry the [anchor_id] citations VERBATIM.
+- Set "status" honestly per section: "empty" (no evidence), "thin", "adequate", "rich".
 
-## Contradictions Found
-(bullet list — conflicting claims between sources, or "None")
+Rules for queries:${isFinal ? '\n- This was the FINAL stage: return "queries": [].' : `
+- 3-5 NEW web search queries targeting ONLY: sections with status empty/thin, the openGaps, and unresolved contradictions.
+- Concurrence is not proof — when a key claim rests on one origin, target INDEPENDENT confirmation, not more restatements.`}
 
-## Recommended Focus for Next Stage
-(1-2 sentences — what the next stage should prioritize)
-
-Keep it under 400 words. Preserve [anchor_id] citations for established facts.`;
+Return ONLY this JSON object:
+{
+  "outline": { "sections": [ { "id": "s1", "heading": "...", "goal": "...", "keyTerms": ["..."], "evidenceNotes": ["... [anchor_id]"], "status": "thin" }, ... ] },
+  "handoff": { "establishedFacts": ["... [anchor_id]"], "openGaps": ["..."], "contradictions": ["..."], "focusNext": "1-2 sentences" },
+  "queries": ["...", ...]
+}`;
 
   try {
-    const handoff = await llmChatFn(sys, `STAGE ${stage} BRIEF:\n\n${stageBrief.slice(0, 6000)}`);
-    return handoff;
+    const res = await llmChatFn(sys, `STAGE ${stage} BRIEF:\n\n${stageBrief.slice(0, 8000)}`);
+    const parsed = parseReflect(res);
+    if (!parsed) return null;
+    const merged = trimOutline(mergeOutlines(priorOutline, parsed.outline));
+    merged.version = stage;
+    // Reflect under-delivered on queries → deterministic top-up from thin sections.
+    let queries = parsed.queries;
+    if (!isFinal && queries.length < 3) {
+      queries = [...queries, ...sectionQueriesFallback(topic, merged)].slice(0, 5);
+    }
+    return { outline: merged, handoff: parsed.handoff, queries };
   } catch {
-    // Fallback: use first 1000 chars of brief as handoff
-    return stageBrief.slice(0, 1000);
+    return null;
   }
 }
 
@@ -2356,8 +2469,9 @@ Requirements:
 - Cite EVERY factual claim inline with its anchor id: "...text [anchor_id]."
 - Where multiple sources agree, cite all of them together: [id1][id2].
 - Where sources conflict, state the conflict explicitly and cite both sides.
-- End with a section "## Open Questions from Stage ${stage}" listing 3-5 bullet gaps this stage did NOT answer.
+- End with a section "## Open Questions from Stage ${stage}" listing 3-5 bullet gaps this stage did NOT answer, including any unresolved contradictions between sources.
 
+${EPISTEMIC_RULES}
 ${RESEARCH_CITATION_RULES}`;
 
   const brief = await llmChatFn(sys, `SOURCE EXCERPTS — STAGE ${stage}:\n\n${contextText}`);
@@ -2412,8 +2526,9 @@ SYNTHESIS RULES:
 - Merge duplicate coverage: if two stages report the same finding, state it once and carry the citations from both.
 - Flag genuine conflicts explicitly ("one source reports X [id], another Y [id]").
 - Do not add claims absent from the briefs. Synthesise and structure what's there — don't pad with what's missing.
-
+- ${CONTRADICTIONS_SECTION_RULE}
 ${PRESCRIPTIVE_GUIDANCE}
+${EPISTEMIC_RULES}
 ${RESEARCH_CITATION_RULES}`;
 
   const userMsg = `RESEARCH BRIEFS:\n\n${briefsBlock}`;
@@ -2421,6 +2536,181 @@ ${RESEARCH_CITATION_RULES}`;
   const out = await (synthesisFn ?? llmChatFn)(sys, userMsg);
   crumb('synth', 'final merge done', { words: out.split(/\s+/).length });
   return out;
+}
+
+/**
+ * Normalize one section's output: require substance, guarantee it starts with
+ * its own `## heading`, and strip anything that breaks assembly (a stray H1,
+ * a hand-written bibliography). Pure — unit-tested directly.
+ */
+export function normalizeSection(out: string, heading: string): string | null {
+  let text = (out || '').trim();
+  if (text.length < 150) return null;
+  // Strip a stray leading H1 (the doc has its own title).
+  text = text.replace(/^#\s+[^\n]*\n+/, '').trim();
+  // Guarantee the section heading — models sometimes restate it differently
+  // or omit it; replace any leading H2/H3 with the canonical one.
+  const lead = /^##+\s+([^\n]*)\n+/.exec(text);
+  if (lead) text = text.slice(lead[0].length).trim();
+  text = `## ${heading}\n\n${text}`;
+  return stripModelBibliography(text);
+}
+
+/**
+ * SECTION-SCOPED final synthesis (WebWeaver/STORM writing stage) — the fix for
+ * chronically-short reports. Instead of ONE merge call over twice-compressed
+ * briefs, each outline section gets its own targeted retrieval (fresh chunks
+ * from ALL gathered sources + the brief paragraphs relevant to it) and its own
+ * streamed writing call. A capstone call then adds the executive overview,
+ * the Contradictions & Open Questions section, and the Verdict.
+ *
+ * Returns null whenever it can't do better than the single-merge path — the
+ * caller then falls back to synthesizeFinalPaper (today's exact behavior).
+ */
+async function synthesizeSectionedPaper(
+  projectId: string,
+  topic: string,
+  outline: ResearchOutline,
+  stageBriefs: string[],
+  allDocIds: string[],
+  handoffContext: string,
+  qualityBoost: (docId: string) => number,
+  priorDrafts: Record<string, string>,
+  llmChatFn: LlmChatFn,
+  synthesisFn: SynthesisStreamFn | undefined,
+  onProgress: (s: string) => void,
+  signal?: AbortSignal
+): Promise<string | null> {
+  const sections = outline.sections;
+  if (sections.length < 3 || sections.length > 10 || stageBriefs.length === 0) return null;
+
+  const titles = await docTitleMap(projectId);
+  const sectionDrafts: Record<string, string> = { ...priorDrafts };
+  const written: string[] = [];
+  // Chunks fed to ≥2 sections are dropped from later ones — kills the main
+  // repetition vector without starving sections of genuinely shared evidence.
+  const chunkUse = new Map<string, number>();
+  let retryBudget = 2;
+  let failed = 0;
+
+  for (let i = 0; i < sections.length; i++) {
+    const s = sections[i];
+    if (signal?.aborted) throw new Error('AbortError');
+
+    // Resume: a SW death mid-synthesis left finished sections in the checkpoint.
+    if (sectionDrafts[s.id] && sectionDrafts[s.id].length > 150) {
+      written.push(sectionDrafts[s.id]);
+      continue;
+    }
+
+    onProgress(`[SYNTHESIZING] Section ${i + 1}/${sections.length}: "${s.heading}"…`);
+
+    // Targeted retrieval: this section's material from ALL gathered sources.
+    const query = `${s.heading} ${s.keyTerms.join(' ')}`.trim() || topic;
+    const chunks = (await searchSessionChunks(projectId, query, 12, allDocIds, { qualityBoost }).catch(() => []))
+      .filter(c => (chunkUse.get(c.anchorId) ?? 0) < 2);
+    chunks.forEach(c => chunkUse.set(c.anchorId, (chunkUse.get(c.anchorId) ?? 0) + 1));
+    const evidence = buildAnchoredContext(chunks, titles).trim();
+    const briefExcerpts = selectBriefExcerpts(stageBriefs, s, 6000);
+    if (!evidence && !briefExcerpts) { failed++; continue; } // nothing to write from
+
+    // ✓-marked skeleton (+ each written section's first sentence) prevents the
+    // writer from re-covering ground; the previous tail smooths transitions.
+    const skeleton = sections.map((x, xi) => {
+      const done = written.find(w => w.startsWith(`## ${x.heading}`));
+      const first = done ? ` — opened: "${done.split('\n').filter(l => l && !l.startsWith('#'))[0]?.slice(0, 120) ?? ''}"` : '';
+      return `${xi + 1}. ${x.heading}${done ? ' ✓' : xi === i ? '  ← YOU ARE WRITING THIS' : ''}${first}`;
+    }).join('\n');
+    const prevTail = written.length ? `\nEND OF THE PREVIOUS SECTION (for transition):\n…${written[written.length - 1].slice(-400)}\n` : '';
+
+    const sys =
+      `You are a senior research analyst writing ONE SECTION of the definitive report on: "${topic}".
+
+FULL REPORT PLAN (do not repeat material from ✓-written sections):
+${skeleton}
+
+THIS SECTION:
+- Heading: "${s.heading}"
+- Goal: ${s.goal || 'cover the heading comprehensively'}
+${s.evidenceNotes.length ? `- Key evidence gathered: ${s.evidenceNotes.join(' | ')}` : ''}
+${prevTail}
+Requirements:
+- Output starts with EXACTLY "## ${s.heading}" and contains ONLY this section — no executive summary, no verdict, no conclusions, no other sections.
+- 300–700 words of analytical prose. Use ### sub-headings for long analysis.
+- Present comparable or quantitative evidence as a Markdown table.
+- Carry the SPECIFIC findings, mechanisms, numbers, and named examples from the material — do not compress distinct findings into one line.
+
+${PRESCRIPTIVE_GUIDANCE}
+${EPISTEMIC_RULES}
+${RESEARCH_CITATION_RULES}`;
+
+    const user = `SECTION EVIDENCE (retrieved excerpts):\n\n${evidence || '(none — use the brief excerpts)'}\n\nRELEVANT BRIEF EXCERPTS:\n\n${briefExcerpts || '(none)'}`;
+
+    let text: string | null = null;
+    try {
+      text = normalizeSection(await (synthesisFn ?? llmChatFn)(sys, user), s.heading);
+    } catch { /* fall through to retry */ }
+    if (!text && retryBudget > 0) {
+      retryBudget--;
+      try { text = normalizeSection(await llmChatFn(sys, user), s.heading); } catch { /* skip */ }
+    }
+
+    if (text) {
+      written.push(text);
+      sectionDrafts[s.id] = text;
+      // Checkpoint per section — resume never rewrites finished sections.
+      await updateJob({ sectionDrafts }).catch(() => {});
+    } else {
+      failed++;
+      onProgress(`[SYNTHESIZING] ⚠ Section "${s.heading}" failed — skipping`);
+    }
+  }
+
+  const body = written.join('\n\n');
+  // Degradation gate: worse than the single-merge path → let the caller run it.
+  if (failed > sections.length / 2 || body.length < 800) {
+    crumb('synth', 'sectioned degraded → single merge', { failed, bodyChars: body.length });
+    return null;
+  }
+
+  // ── Capstone: exec overview + contradictions + verdict (one streamed call) ──
+  onProgress(`[SYNTHESIZING] Capstone: executive overview, contradictions & verdict…`);
+  try {
+    const capSys =
+      `You are finishing the definitive report on: "${topic}". The body sections are WRITTEN — do not rewrite them.
+Produce EXACTLY three blocks separated by these delimiter lines:
+(block 1) A 1-2 paragraph executive overview of the whole report — authoritative prose, NO heading, no "Abstract:" label.
+---CONTRADICTIONS---
+(block 2) A "## Contradictions & Open Questions" section: where sources disagree (and which side is stronger), which load-bearing claims rest on a single source, what remains unverified.
+---VERDICT---
+(block 3) A "## Verdict" section: a clear position, the strongest case for it, and the top 2-3 risks or caveats. Do not hedge into a shrug.
+Use ONLY [anchor_id] citations that appear in the provided material — never invent any.
+${EPISTEMIC_RULES}`;
+    const capUser = `REPORT OUTLINE:\n${formatOutlineSkeleton(outline)}\n\nFINAL STAGE HANDOFF (known gaps/contradictions):\n${handoffContext.slice(0, 3000)}\n\nREPORT BODY:\n\n${body.slice(0, 20000)}`;
+    const cap = await (synthesisFn ?? llmChatFn)(capSys, capUser);
+
+    let exec = '', contradictions = '', verdict = '';
+    if (cap.includes('---CONTRADICTIONS---')) {
+      const [a, rest] = cap.split('---CONTRADICTIONS---');
+      const [b, c] = (rest || '').split('---VERDICT---');
+      exec = a.trim(); contradictions = (b || '').trim(); verdict = (c || '').trim();
+    } else {
+      // Tolerate a dropped delimiter: split on the headings themselves.
+      const ci = cap.search(/##\s*Contradictions/i);
+      const vi = cap.search(/##\s*Verdict/i);
+      exec = (ci > 0 ? cap.slice(0, ci) : cap).trim();
+      contradictions = ci >= 0 ? cap.slice(ci, vi > ci ? vi : undefined).trim() : '';
+      verdict = vi >= 0 ? cap.slice(vi).trim() : '';
+    }
+    exec = exec.replace(/^#+\s+[^\n]*\n+/, '').trim(); // no heading on the opener
+    const parts = [exec, body, contradictions, verdict].filter(Boolean);
+    crumb('synth', 'sectioned done', { sections: written.length, failed, words: parts.join(' ').split(/\s+/).length });
+    return parts.join('\n\n');
+  } catch {
+    // Capstone failure never fails the run — the sections stand alone.
+    crumb('synth', 'capstone failed — shipping sections bare', { sections: written.length });
+    return body;
+  }
 }
 
 async function runDeeperResearch(
@@ -2452,8 +2742,10 @@ async function runDeeperResearch(
   // ── Spec-Driven Planning (Improvement 3) ─────────────────────────────────
   // Generate a research specification before any gathering begins.
   // The spec anchors all subsequent stage briefs to the original intent.
-  let researchSpec = '';
-  if (!priorJob?.subQuestions?.length) {
+  // Restored from the checkpoint on resume — it used to be silently LOST
+  // (regenerated only on fresh runs), so every resumed run drifted spec-less.
+  let researchSpec = priorJob?.researchSpec ?? '';
+  if (!researchSpec) {
     onProgress(`[PLANNING] Generating research specification…`);
     researchSpec = await generateResearchSpec(topic, subQuestions, llmChatFn).catch(() => '');
     if (researchSpec) {
@@ -2461,7 +2753,22 @@ async function runDeeperResearch(
     }
   }
 
-  await updateJob({ phase: 'gathering', subQuestions, webQueries }).catch(() => {});
+  // The spec's priorityOrder was generated but never consumed — apply it:
+  // stage briefs address sub-questions in priority order, and the fallback
+  // queries (sub-question slices) hit the critical ones first. ONLY on a
+  // fresh plan: checkpointed subQuestions were already reordered, and
+  // re-applying the permutation on resume would scramble them.
+  if (!priorJob?.subQuestions?.length) {
+    try {
+      const order = JSON.parse(researchSpec || '{}').priorityOrder;
+      if (Array.isArray(order) && order.length === subQuestions.length
+          && [...order].sort((a, b) => a - b).every((v, i) => v === i)) {
+        subQuestions = order.map((i: number) => subQuestions[i]);
+      }
+    } catch { /* malformed spec — keep original order */ }
+  }
+
+  await updateJob({ phase: 'gathering', subQuestions, webQueries, researchSpec }).catch(() => {});
 
   // ── Phase 2: staged gather → brief → checkpoint loop ────────────────────
   const rounds = Math.max(1, activeLimits.rounds);
@@ -2476,7 +2783,7 @@ async function runDeeperResearch(
   // docId → quality boost, so retrieval favors high-tier / well-cited sources
   const qualityByDoc = new Map<string, number>();
   const recordQuality = (o: AgentOutcome) =>
-    o.sources.forEach(s => qualityByDoc.set(s.docId, qualityBoostValue(s.tier, s.citations)));
+    o.sources.forEach(s => qualityByDoc.set(s.docId, qualityBoostValue(s.tier, s.citations, s.url)));
   const qualityBoost = (docId: string) => qualityByDoc.get(docId) ?? 0;
 
   let stageQueries = webQueries.slice(0, activeLimits.webQueries);
@@ -2484,7 +2791,16 @@ async function runDeeperResearch(
   const specPreamble = formatSpecPreamble(researchSpec);
 
   // handoffContext accumulates structured stage summaries (Improvement 2: Context Reset)
-  let handoffContext = '';
+  // Both it and the outline are restored from the checkpoint so a resumed run
+  // keeps its cross-stage state (they're written atomically with each brief).
+  let handoffContext = priorJob?.handoffContext ?? '';
+  // The living report outline — co-evolves with gathering (reflectOnStage),
+  // steers next-stage queries, and drives the section-scoped final synthesis.
+  let outline: ResearchOutline | null = priorJob?.outline ?? null;
+  // All source docIds across stages — the final synthesis retrieval scope.
+  // Checkpointed: on resume `agents` is empty, and without this the synthesis
+  // retrieval filter was empty → it could pull PRIOR runs' reports/briefs in.
+  const gatheredDocIds = new Set<string>(priorJob?.gatheredDocIds ?? []);
 
   for (let stage = 1; stage <= rounds; stage++) {
     if (signal?.aborted) throw new Error('AbortError');
@@ -2562,12 +2878,17 @@ async function runDeeperResearch(
       onProgress(`[STAGE ${stage}/${rounds}] Synthesizing brief from ${uniqueStageDocIds.length} source(s)…`);
       await updateJob({ phase: 'synthesizing' }).catch(() => {});
 
+      // Handoff + outline skeleton travel together: the brief writer sees the
+      // report's living structure so it organizes evidence toward it.
+      const handoffWithOutline = handoffContext + (outline
+        ? `\n\nCURRENT REPORT OUTLINE (organize evidence toward these sections):\n${formatOutlineSkeleton(outline)}`
+        : '');
       const brief = await synthesizeStageBrief(
         stage, rounds, topic, subQuestions,
         uniqueStageDocIds, projectId, labelByDoc, llmChatFn,
-        specPreamble,    // Improvement 3: spec-driven
-        handoffContext,  // Improvement 2: context reset handoff
-        qualityBoost     // favor high-tier / well-cited sources in the brief
+        specPreamble,       // Improvement 3: spec-driven
+        handoffWithOutline, // Improvement 2: context reset handoff (+ outline)
+        qualityBoost        // favor high-tier / well-cited sources in the brief
       ).catch(err => {
         onProgress(`[STAGE ${stage}/${rounds}] Brief synthesis failed: ${err?.message || err}`);
         return '';
@@ -2577,10 +2898,29 @@ async function runDeeperResearch(
         const wordCount = brief.split(/\s+/).filter(Boolean).length;
         onProgress(`[STAGE ${stage}/${rounds}] ✓ Brief: ${wordCount} words from ${uniqueStageDocIds.length} sources`);
 
-        // ── Context Reset (Improvement 2): compress stage findings into handoff ──
-        if (stage < rounds) {
-          onProgress(`[STAGE ${stage}/${rounds}] Building context handoff for next stage…`);
-          handoffContext = await buildStageHandoff(stage, topic, subQuestions, brief, llmChatFn).catch(() => '');
+        // ── Reflect: outline update + handoff + next queries in ONE call ──
+        // (replaces the old separate buildStageHandoff + analyzeGaps calls;
+        // runs on the FINAL stage too — that last outline drives the
+        // section-scoped synthesis.)
+        onProgress(`[STAGE ${stage}/${rounds}] Reflecting: updating outline & planning next queries…`);
+        const r = await reflectOnStage(stage, rounds, topic, subQuestions, brief, outline, llmChatFn).catch(() => null);
+        if (r) {
+          outline = r.outline;
+          handoffContext = formatHandoff(r.handoff);
+          const thin = outline.sections.filter(s => s.status === 'empty' || s.status === 'thin').length;
+          onProgress(`[STAGE ${stage}/${rounds}] ✓ Outline: ${outline.sections.length} sections (${thin} still thin)`);
+          if (stage < rounds) {
+            stageQueries = r.queries.length ? r.queries : subQuestions.slice(0, activeLimits.webQueries);
+            onProgress(`[STAGE ${stage}/${rounds}] Next stage queries: ${stageQueries.join(' | ')}`);
+          }
+        } else {
+          // One unparseable planning call must not collapse the run: same
+          // fallbacks the old two-call pipeline used.
+          handoffContext = brief.slice(0, 1000);
+          if (stage < rounds) {
+            stageQueries = subQuestions.slice(0, activeLimits.webQueries);
+            onProgress(`[STAGE ${stage}/${rounds}] Reflect inconclusive — continuing with sub-questions as queries`);
+          }
         }
 
         // Save the stage brief as a visible project document
@@ -2593,39 +2933,28 @@ async function runDeeperResearch(
         ).catch(() => {}); // non-fatal — brief is still in memory
 
         stageBriefs[stage - 1] = brief;
-        // Checkpoint: survive a worker restart
+        uniqueStageDocIds.forEach(d => gatheredDocIds.add(d));
+        // Checkpoint: survive a worker restart — the outline/handoff/docIds
+        // travel WITH the brief so a resume restores the full cross-stage state.
         await updateJob({
           phase: 'gathering',
           stageBriefs,
-          currentStage: stage
+          currentStage: stage,
+          outline: outline ?? undefined,
+          handoffContext,
+          gatheredDocIds: Array.from(gatheredDocIds),
+          webQueries: stageQueries
         }).catch(() => {});
       } else {
         onProgress(`[STAGE ${stage}/${rounds}] ⚠ No brief generated — moving on`);
+        if (stage < rounds) stageQueries = subQuestions.slice(0, activeLimits.webQueries);
       }
     } else {
       onProgress(`[STAGE ${stage}/${rounds}] No new sources — skipping brief`);
+      if (stage < rounds) stageQueries = subQuestions.slice(0, activeLimits.webQueries);
     }
 
     if (stage === rounds) break;
-
-    // ── Gap analysis: what to search next ────────────────────────────────
-    const docsSoFar = agents.flatMap(a => a.docIds);
-    if (docsSoFar.length > 0) {
-      const evidenceForGap = await searchSessionChunks(projectId, topic, 20, docsSoFar);
-      const evidence = evidenceForGap.map(c => c.text).join('\n\n');
-      const analysis = await analyzeGaps(topic, subQuestions, evidence, llmChatFn).catch(() => null);
-      if (analysis) {
-        stageQueries = analysis.queries;
-        onProgress(`[STAGE ${stage}/${rounds}] Next stage queries: ${analysis.queries.join(' | ')}`);
-      } else {
-        // One unparseable planning call must not collapse a multi-stage run
-        // into stage 1: fall back to the sub-questions as the next stage's
-        // queries — they were the plan the user approved.
-        stageQueries = subQuestions.slice(0, activeLimits.webQueries);
-        onProgress(`[STAGE ${stage}/${rounds}] Gap analysis inconclusive — continuing with sub-questions as queries`);
-      }
-      await updateJob({ webQueries: stageQueries }).catch(() => {});
-    }
 
     // ── Reclaim heavy memory before the next stage ───────────────────────────
     // Everything that carries forward is now safe: the stage brief is indexed and
@@ -2668,9 +2997,30 @@ async function runDeeperResearch(
   // staged path, the packed excerpts on the fallback path.
   let revisionContext = '';
 
-  crumb('research', 'synthesis phase', { briefs: completedBriefs.length, ofStages: rounds, docs: allDocIds.length });
-  if (completedBriefs.length > 0) {
-    // Staged path: merge all stage briefs into one comprehensive paper
+  // Retrieval scope: live agents on a fresh run; the checkpoint on resume
+  // (`agents` is empty then — without this the filter was empty and retrieval
+  // could pull PRIOR runs' reports/briefs into the new report).
+  const allDocIdsForSynthesis = allDocIds.length > 0 ? Array.from(new Set(allDocIds)) : Array.from(gatheredDocIds);
+
+  crumb('research', 'synthesis phase', { briefs: completedBriefs.length, ofStages: rounds, docs: allDocIdsForSynthesis.length, outlineSections: outline?.sections.length ?? 0 });
+  let sectioned: string | null = null;
+  if (completedBriefs.length > 0 && outline) {
+    // SOTA path: write the report SECTION BY SECTION against the outline —
+    // targeted retrieval per section, one streamed call each, capstone last.
+    onProgress(`[SYNTHESIZING] Writing ${outline.sections.length}-section report from the outline…`);
+    sectioned = await synthesizeSectionedPaper(
+      projectId, topic, outline, completedBriefs, allDocIdsForSynthesis,
+      handoffContext, qualityBoost, priorJob?.sectionDrafts ?? {},
+      llmChatFn, synthesisFn, onProgress, signal
+    ).catch(err => {
+      crumb('synth', 'sectioned threw → single merge', { err: String(err?.message || err) });
+      return null;
+    });
+  }
+  if (sectioned) {
+    synthesis = sectioned;
+  } else if (completedBriefs.length > 0) {
+    // Degraded/no-outline path: the original single merge over the briefs.
     onProgress(`[SYNTHESIZING] Merging ${completedBriefs.length} stage brief(s) into final paper…`);
     synthesis = await synthesizeFinalPaper(
       topic, subQuestions, completedBriefs, llmChatFn, synthesisFn
@@ -2679,7 +3029,7 @@ async function runDeeperResearch(
     // Fallback: no briefs produced (all syntheses failed) — do classic single-pass
     onProgress(`[SYNTHESIZING] No stage briefs available — falling back to direct synthesis…`);
     const chunkSet = new Map<string, any>();
-    const uniqueDocIds = Array.from(new Set(allDocIds));
+    const uniqueDocIds = allDocIdsForSynthesis;
     for (const q of [topic, ...subQuestions]) {
       if (signal?.aborted) throw new Error('AbortError');
       const chunks = await searchSessionChunks(projectId, q, activeLimits.chunksPerAngle, uniqueDocIds, { qualityBoost });
@@ -2734,12 +3084,13 @@ async function runDeeperResearch(
   // Prepend source-mix banner
   synthesis = `> **Source mix:** ${mixStr}\n\n${synthesis}`;
 
-  // Evaluator gate: audit, revise once if flagged (stage briefs act as the
-  // source context for the staged path; packed excerpts on the fallback path)
+  // Evaluator gate: audit, revise once if flagged (outline + stage briefs act
+  // as the source context for the staged path; packed excerpts on fallback)
   if (completedBriefs.length > 0) {
-    revisionContext = completedBriefs
-      .map((b, i) => `## Stage ${i + 1} Research Brief\n\n${b}`)
-      .join('\n\n---\n\n');
+    revisionContext = (outline ? `REPORT OUTLINE:\n${formatOutlineSkeleton(outline)}\n\n` : '')
+      + completedBriefs
+        .map((b, i) => `## Stage ${i + 1} Research Brief\n\n${b}`)
+        .join('\n\n---\n\n');
   }
   synthesis = await evaluateAndRefine(
     topic, synthesis, revisionContext, llmChatFn, evaluatorFn ?? llmChatFn, onProgress
