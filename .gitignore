@@ -26,3 +26,6 @@ npm-debug.log*
 coverage/
 playwright-report/
 test-results/
+
+# Live-test API keys — never commit
+*.openrouter-key

@@ -22,8 +22,29 @@ export async function handleUnlinkDocument(request: Record<string, unknown>): Pr
 }
 
 export async function handleListDocuments(request: Record<string, unknown>): Promise<Record<string, unknown>> {
-  const documents = await listDocuments(request.projectId as string);
+  const projectId = request.projectId as string | undefined;
+  const documents = await listDocuments(projectId);
+  // The GLOBAL list (no projectId) is a getAll() over EVERY document the user has
+  // ever captured — unbounded. Shipping each doc's full markdown ratcheted the
+  // sidepanel heap into the GBs on panel open (measured: 328 MB → 2 GB). The panel
+  // only uses the global list to locate a doc by id (then opens it via
+  // GET_DOCUMENT, which returns the full body). So strip content here — but keep
+  // just the frontmatter so contentHasTag()/isResearchSource still classify docs.
+  // The per-PROJECT list stays full: it's bounded and feeds export/download.
+  if (!projectId) {
+    const light = documents.map(d => ({ ...d, content: frontmatterOnly(d.content) }));
+    return { documents: light };
+  }
   return { documents };
+}
+
+/** Keep only the leading YAML frontmatter block (tags live there) — drops the
+ *  potentially-huge markdown body from list payloads. */
+function frontmatterOnly(content: string | undefined): string {
+  const c = content || '';
+  if (!c.startsWith('---')) return '';
+  const end = c.indexOf('\n---', 3);
+  return end === -1 ? c.slice(0, 600) : c.slice(0, end + 4);
 }
 
 export async function handleGetDocument(request: Record<string, unknown>): Promise<Record<string, unknown>> {
