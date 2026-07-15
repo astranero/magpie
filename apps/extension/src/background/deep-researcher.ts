@@ -796,7 +796,7 @@ const yieldToEventLoop = () => new Promise<void>(r => setTimeout(r, 0));
 // can reach ~2 GB. Recreating the offscreen every N sources caps the peak to a
 // few hundred MB. Counter is module-level so it spans the several scrapeUrlList
 // calls (web/academic/news/refs) within a stage.
-const OFFSCREEN_RECLAIM_EVERY = 15;
+const OFFSCREEN_RECLAIM_EVERY = 10;
 let sourcesSinceOffscreenReclaim = 0;
 
 /** Scrape+index a list of URLs under an agent label. */
@@ -807,12 +807,13 @@ async function scrapeUrlList(
   signal: AbortSignal | undefined,
   label: AgentLabel
 ): Promise<AgentOutcome> {
-  // Per-STAGE source cap: 45 (or the depth's total, whichever is smaller — so
-  // standard's 40 is unchanged). Keeps each gather burst bounded enough to reach
-  // the stage checkpoint within one MV3 worker lifetime while still gathering
-  // broadly; breadth also accrues across the run's rounds. Safe at 45 now that
-  // oversize page bodies can't OOM the worker (see fetchTextInner's byte cap).
-  const cap = Math.min(45, activeLimits.totalSourcesCap);
+  // Per-STAGE source cap: 30 (or the depth's total, whichever is smaller). This
+  // is a deliberate balance — ~30×4 stages ≈ 120 sources over a deep run (matches
+  // a Gemini-Deep-Research-scale report) while keeping the offscreen renderer's
+  // per-stage heap growth (~40-50 MB/indexed source) bounded to ~1.3 GB, well
+  // under the ~2.7 GB that hard-crashes the renderer. Breadth also accrues across
+  // rounds; the mid-stage reclaim caps within-stage growth further.
+  const cap = Math.min(30, activeLimits.totalSourcesCap);
   const urlList = [...new Set(urls)].filter(u => !isJunkUrl(u)).slice(0, cap);
   const sources: SourceRecord[] = [];
   const docIds: string[] = [];
