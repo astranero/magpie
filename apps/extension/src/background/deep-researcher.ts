@@ -3,7 +3,7 @@ import { chunkDocument, makeDocShortId } from '../lib/chunker';
 import { buildFrontmatter } from '../lib/frontmatter';
 import { addChunksToVectorStore, searchSessionChunks, resetSessionIndex } from '../lib/vector-store';
 import { getJob, updateJob, getPage, savePage, listPages } from '../lib/research-store';
-import { pdfUrlToBody, recreateOffscreen, recycleOffscreenWorker } from '../lib/pdf-parser';
+import { pdfUrlToBody, recreateOffscreen } from '../lib/pdf-parser';
 import { checkContentQuality, extractDoi } from '../lib/quality-gate';
 import { isAcademicQuery } from '../lib/query-intent';
 import { getResearchLimits, getResearchDepth, getSynthesisCharBudget, getSourceQuality, getAcademicDepth, RESEARCH_LIMITS, ResearchLimits, SourceQuality, AcademicDepth } from '../lib/research-limits';
@@ -791,13 +791,6 @@ interface AgentOutcome {
 /** Let queued extension messages (sidepanel clicks) run between heavy steps. */
 const yieldToEventLoop = () => new Promise<void>(r => setTimeout(r, 0));
 
-// Belt-and-suspenders for the offscreen heap: even within ONE segment it climbs
-// ~40-50 MB per indexed source (parsing + embedding), so a 45-source stage alone
-// can reach ~2 GB. Recreating the offscreen every N sources caps the peak to a
-// few hundred MB. Counter is module-level so it spans the several scrapeUrlList
-// calls (web/academic/news/refs) within a stage.
-const OFFSCREEN_RECLAIM_EVERY = 10;
-let sourcesSinceOffscreenReclaim = 0;
 
 /** Scrape+index a list of URLs under an agent label. */
 async function scrapeUrlList(
@@ -807,13 +800,14 @@ async function scrapeUrlList(
   signal: AbortSignal | undefined,
   label: AgentLabel
 ): Promise<AgentOutcome> {
-  // Per-STAGE source cap: 30 (or the depth's total, whichever is smaller). This
-  // is a deliberate balance — ~30×4 stages ≈ 120 sources over a deep run (matches
-  // a Gemini-Deep-Research-scale report) while keeping the offscreen renderer's
-  // per-stage heap growth (~40-50 MB/indexed source) bounded to ~1.3 GB, well
-  // under the ~2.7 GB that hard-crashes the renderer. Breadth also accrues across
-  // rounds; the mid-stage reclaim caps within-stage growth further.
-  const cap = Math.min(30, activeLimits.totalSourcesCap);
+  // Per-STAGE source cap: 20 (or the depth's total, whichever is smaller). The
+  // offscreen renderer's MAIN-thread heap grows ~65 MB per indexed source from
+  // HTML/PDF parsing and CANNOT be reliably freed mid-run (neither closeDocument
+  // nor a worker recycle drops it — measured), so a segment's peak ≈ sources ×
+  // 65 MB. 20 keeps that ≈1.5 GB, under the ~2.7 GB that hard-crashes the
+  // renderer, while still ~80 sources over a deep run (Gemini-scale). The heap
+  // fully resets only at each run/resume start (offscreen idle → recreate works).
+  const cap = Math.min(20, activeLimits.totalSourcesCap);
   const urlList = [...new Set(urls)].filter(u => !isJunkUrl(u)).slice(0, cap);
   const sources: SourceRecord[] = [];
   const docIds: string[] = [];
@@ -846,15 +840,12 @@ async function scrapeUrlList(
         docIds.push(docId);
         sources.push({ url, title: title || url, label, docId, tier: sourceTier(url) });
         onProgress(`[${label}] ✓ Captured "${title}"`);
-        // Periodically recycle the inference worker so its ONNX/WASM heap (which
-        // only grows, ~100 MB/source, and closeDocument can't free mid-run) can't
-        // OOM the renderer within a long stage. A worker terminate()+respawn frees
-        // it reliably (see OFFSCREEN_RECLAIM_EVERY).
-        if (++sourcesSinceOffscreenReclaim >= OFFSCREEN_RECLAIM_EVERY) {
-          sourcesSinceOffscreenReclaim = 0;
-          crumb('offscreen', 'reclaim (mid-stage)', { after: i });
-          await recycleOffscreenWorker().catch(() => {});
-        }
+        // NB: no mid-stage offscreen/worker reclaim — measured useless. The heap
+        // that climbs is the offscreen MAIN thread (HTML/PDF parsing), not the
+        // worker's WASM (recycling the worker didn't drop heapMB) and not
+        // reachable by closeDocument mid-run (only frees ~300 MB while the doc is
+        // busy). Per-segment growth is bounded instead by the source cap (~65
+        // MB/source) plus the reliable idle reset at each run/resume start.
       } else {
         onProgress(`[${label}] ✗ No readable content: ${url}`);
       }
@@ -1469,7 +1460,6 @@ export async function runDeepResearch(
   // between-stage reclaim only fires when a stage completes cleanly, which a
   // single segment often doesn't reach; recreating here gives each segment a
   // clean heap so the working set stays bounded per segment.
-  sourcesSinceOffscreenReclaim = 0;
   await recreateOffscreen().catch(() => {});
 
   const depth = await getResearchDepth();
@@ -2363,7 +2353,6 @@ async function runDeeperResearch(
     // from OOM-ing the renderer while still feeding synthesized context onward.
     onProgress(`[STAGE ${stage}/${rounds}] Reclaiming memory before next stage…`);
     resetSessionIndex(projectId);
-    sourcesSinceOffscreenReclaim = 0;
     await recreateOffscreen().catch(() => {});
   }
 

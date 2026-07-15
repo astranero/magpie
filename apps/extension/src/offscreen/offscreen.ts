@@ -331,6 +331,12 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
 
       const wordCount = markdown.split(/\s+/).filter(w => w.length > 0).length;
 
+      // Help V8 reclaim the (up to 3 MB) parsed DOM promptly. This offscreen
+      // parses hundreds of pages per run and its main-thread heap climbs toward an
+      // OOM that no mid-run recreate/worker-recycle can free; emptying the parsed
+      // document breaks the largest retained graph so GC can drop it sooner.
+      try { parsed.documentElement.innerHTML = ''; } catch { /* ignore */ }
+
       sendResponse({ ok: true, title, markdown, wordCount });
     } catch (err) {
       sendResponse({ ok: false, error: err instanceof Error ? err.message : String(err) });
