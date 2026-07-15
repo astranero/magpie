@@ -5,7 +5,7 @@ import remarkMath from 'remark-math';
 import rehypeKatex from 'rehype-katex';
 import { LocalDocument, ResolvedCitation } from '../types';
 import { Button } from '@/components/ui/button';
-import { ArrowLeft, ExternalLink } from 'lucide-react';
+import { ArrowLeft, ExternalLink, FileText, Check } from 'lucide-react';
 import { splitFrontmatter, parseFrontmatterFields } from '../../lib/frontmatter';
 
 // Same inline anchor format the chat renderer uses: [d3ab01.s1.p2] / [d3.s0.p1.0].
@@ -448,7 +448,7 @@ export const DocumentView: React.FC<DocumentViewProps> = ({
               setTimeout(() => setCiteCopied(false), 2000);
             }}
           >
-            {citeCopied ? '✓ Copied' : '📄 Cite'}
+            {citeCopied ? <><Check size={13} className="mr-1" aria-hidden="true" /> Copied</> : <><FileText size={13} className="mr-1" aria-hidden="true" /> Cite</>}
           </Button>
         )}
         <div className="flex-1 min-w-0">

@@ -386,7 +386,7 @@ const MessageBody: React.FC<MessageBodyProps> = React.memo(({ text: rawText, com
         {/* aria-live=off: the growing token stream must NOT be announced live. */}
         <div aria-live="off" className={`whitespace-pre-wrap break-words font-sans ${compact ? 'text-xs' : 'text-sm'} text-foreground`}>
           {rawText}
-          <span className="inline-block w-2 h-4 ml-0.5 align-middle bg-primary/60 animate-pulse" aria-hidden="true" />
+          <span className="inline-block w-2 h-4 ml-0.5 align-middle bg-primary/60 animate-pulse motion-reduce:animate-none" aria-hidden="true" />
         </div>
         <span className="sr-only" aria-live="polite">{announce}</span>
       </div>
@@ -811,9 +811,9 @@ export const ChatView: React.FC<ChatViewProps> = ({
           <div className="flex justify-start">
             <div className="max-w-[85%] rounded-lg rounded-bl-sm border bg-card border-border text-card-foreground px-4 py-3 text-sm flex items-center gap-2 shadow-card">
               <div className="flex space-x-1" aria-hidden="true">
-                <div className="w-1.5 h-1.5 rounded-full bg-primary animate-pulse" style={{ animationDelay: '0ms' }} />
-                <div className="w-1.5 h-1.5 rounded-full bg-primary animate-pulse" style={{ animationDelay: '150ms' }} />
-                <div className="w-1.5 h-1.5 rounded-full bg-primary animate-pulse" style={{ animationDelay: '300ms' }} />
+                <div className="w-1.5 h-1.5 rounded-full bg-primary animate-pulse motion-reduce:animate-none" style={{ animationDelay: '0ms' }} />
+                <div className="w-1.5 h-1.5 rounded-full bg-primary animate-pulse motion-reduce:animate-none" style={{ animationDelay: '150ms' }} />
+                <div className="w-1.5 h-1.5 rounded-full bg-primary animate-pulse motion-reduce:animate-none" style={{ animationDelay: '300ms' }} />
               </div>
               <span className="text-xs text-muted-foreground font-medium" aria-live="polite">
                 {thinkingStatus[activeChatId] || 'Thinking…'}

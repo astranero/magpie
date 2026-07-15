@@ -2036,7 +2036,7 @@ export default function App() {
               <Icon size={13} aria-hidden="true" />
               {label}
               {key === 'chat' && researching[activeProjectId] && (
-                <span className="absolute top-1 right-2 w-1.5 h-1.5 rounded-full bg-primary animate-pulse" title="Research running" aria-label="Research running" />
+                <span className="absolute top-1 right-2 w-1.5 h-1.5 rounded-full bg-primary animate-pulse motion-reduce:animate-none" title="Research running" aria-label="Research running" />
               )}
             </button>
           </Fragment>
