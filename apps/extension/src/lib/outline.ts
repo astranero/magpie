@@ -97,7 +97,12 @@ export function parseReflect(raw: string): ReflectResult | null {
     const heading = typeof s.heading === 'string' ? s.heading.trim() : '';
     if (!heading) continue; // a section without a heading is unusable
     sections.push({
-      id: typeof s.id === 'string' && s.id.trim() ? s.id.trim().slice(0, 12) : `s${i + 1}`,
+      // Synthesized fallback ids get a heading-derived suffix so two stages'
+      // id-less outputs can't collide on bare positional ids (mergeOutlines
+      // would then wrongly unify distinct sections).
+      id: typeof s.id === 'string' && s.id.trim()
+        ? s.id.trim().slice(0, 12)
+        : `s${i + 1}-${heading.toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 6)}`,
       heading: heading.slice(0, 160),
       goal: typeof s.goal === 'string' ? s.goal.trim().slice(0, 400) : '',
       keyTerms: asStringArray(s.keyTerms, MAX_KEY_TERMS, 60),

@@ -39,12 +39,13 @@ describe('parseReflect', () => {
     expect(r.queries).toEqual(['some query here']);
   });
 
-  it('coerces bad fields: missing id → positional, bad status → thin, short queries dropped', () => {
+  it('coerces bad fields: missing id → positional+heading-derived, bad status → thin, short queries dropped', () => {
     const r = parseReflect(JSON.stringify({
       sections: [{ heading: 'Only heading', status: 'AMAZING', keyTerms: 'not-an-array' }],
       queries: ['ok query', 'ab', 42],
     }))!;
-    expect(r.outline.sections[0].id).toBe('s1');
+    // Heading-derived suffix keeps two stages' id-less outputs from colliding.
+    expect(r.outline.sections[0].id).toBe('s1-onlyhe');
     expect(r.outline.sections[0].status).toBe('thin');
     expect(r.outline.sections[0].keyTerms).toEqual([]);
     expect(r.queries).toEqual(['ok query']);

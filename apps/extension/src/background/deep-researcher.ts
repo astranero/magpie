@@ -2549,8 +2549,10 @@ export function normalizeSection(out: string, heading: string): string | null {
   // Strip a stray leading H1 (the doc has its own title).
   text = text.replace(/^#\s+[^\n]*\n+/, '').trim();
   // Guarantee the section heading — models sometimes restate it differently
-  // or omit it; replace any leading H2/H3 with the canonical one.
-  const lead = /^##+\s+([^\n]*)\n+/.exec(text);
+  // or omit it; replace a leading H2 with the canonical one. H2 ONLY: a
+  // section legitimately BEGINS with "### Subtopic" (the prompt encourages
+  // ### sub-heads), and eating that line loses real structure.
+  const lead = /^##\s+([^\n]*)\n+/.exec(text);
   if (lead) text = text.slice(lead[0].length).trim();
   text = `## ${heading}\n\n${text}`;
   return stripModelBibliography(text);
