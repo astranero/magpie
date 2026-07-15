@@ -791,6 +791,14 @@ interface AgentOutcome {
 /** Let queued extension messages (sidepanel clicks) run between heavy steps. */
 const yieldToEventLoop = () => new Promise<void>(r => setTimeout(r, 0));
 
+// Belt-and-suspenders for the offscreen heap: even within ONE segment it climbs
+// ~40-50 MB per indexed source (parsing + embedding), so a 45-source stage alone
+// can reach ~2 GB. Recreating the offscreen every N sources caps the peak to a
+// few hundred MB. Counter is module-level so it spans the several scrapeUrlList
+// calls (web/academic/news/refs) within a stage.
+const OFFSCREEN_RECLAIM_EVERY = 15;
+let sourcesSinceOffscreenReclaim = 0;
+
 /** Scrape+index a list of URLs under an agent label. */
 async function scrapeUrlList(
   projectId: string,
@@ -837,6 +845,12 @@ async function scrapeUrlList(
         docIds.push(docId);
         sources.push({ url, title: title || url, label, docId, tier: sourceTier(url) });
         onProgress(`[${label}] ✓ Captured "${title}"`);
+        // Periodically reclaim the offscreen renderer so its heap can't grow
+        // unbounded within a long stage (see OFFSCREEN_RECLAIM_EVERY).
+        if (++sourcesSinceOffscreenReclaim >= OFFSCREEN_RECLAIM_EVERY) {
+          sourcesSinceOffscreenReclaim = 0;
+          await recreateOffscreen().catch(() => {});
+        }
       } else {
         onProgress(`[${label}] ✗ No readable content: ${url}`);
       }
@@ -1442,6 +1456,18 @@ export async function runDeepResearch(
   activeLimits = await getResearchLimits();
   activeQuality = await getSourceQuality();
   activeAcademicDepth = await getAcademicDepth();
+
+  // Reset the offscreen renderer at the START of every run/resume SEGMENT. The
+  // offscreen document SURVIVES a service-worker restart (ensureOffscreen's
+  // hasDocument() stays true), so across the several ~5-10 min SW segments a long
+  // run spans, its heap accumulates unbounded — observed climbing to ~2.9 GB
+  // (heapMB crumb), enough to hard-crash the renderer on lower-RAM machines. The
+  // between-stage reclaim only fires when a stage completes cleanly, which a
+  // single segment often doesn't reach; recreating here gives each segment a
+  // clean heap so the working set stays bounded per segment.
+  sourcesSinceOffscreenReclaim = 0;
+  await recreateOffscreen().catch(() => {});
+
   const depth = await getResearchDepth();
   // /deepresearch must actually go deep. The saved depth setting defaults to
   // 'standard' (6 URLs/query, 5 queries, 2 rounds) — too thin for a deep run —
@@ -2333,6 +2359,7 @@ async function runDeeperResearch(
     // from OOM-ing the renderer while still feeding synthesized context onward.
     onProgress(`[STAGE ${stage}/${rounds}] Reclaiming memory before next stage…`);
     resetSessionIndex(projectId);
+    sourcesSinceOffscreenReclaim = 0;
     await recreateOffscreen().catch(() => {});
   }
 
