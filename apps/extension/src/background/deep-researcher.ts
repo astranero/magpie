@@ -184,10 +184,29 @@ async function fetchText(url: string, timeoutMs: number, signal?: AbortSignal): 
     if (signal.aborted) onAbort();
     else signal.addEventListener('abort', onAbort, { once: true });
   }
+  // HARD DEADLINE via race, independent of the AbortController. Aborting a fetch
+  // signal does NOT reliably interrupt an already-obtained body reader
+  // (res.body.getReader().read()): a stalled upstream (observed: an r.jina.ai read
+  // that dribbled bytes) left the read pending ~15 min past its 20s abort, hanging
+  // the whole run until the watchdog nuked it. The race rejects regardless of
+  // whether the reader honors the abort, so one stuck URL is skipped, not fatal.
+  // controller.abort() still fires to free the socket; we just don't WAIT on it.
+  let hardTimer: ReturnType<typeof setTimeout> | undefined;
+  const hardDeadline = new Promise<never>((_, rej) => {
+    hardTimer = setTimeout(() => {
+      try { controller.abort(new Error('HardTimeout')); } catch { /* ignore */ }
+      crumb('fetch', 'hard timeout', { ms: timeoutMs + 5000, url: url.slice(0, 70) });
+      rej(new Error(`Hard timeout after ${timeoutMs + 5000}ms`));
+    }, timeoutMs + 5000);
+  });
+  const inner = fetchTextInner(url, controller.signal);
+  inner.catch(() => { /* if the hard deadline already won the race, swallow the
+    inner's late rejection so it isn't an unhandled promise rejection */ });
   try {
-    return await fetchTextInner(url, controller.signal);
+    return await Promise.race([inner, hardDeadline]);
   } finally {
     clearTimeout(timer);
+    if (hardTimer) clearTimeout(hardTimer);
     signal?.removeEventListener('abort', onAbort);
   }
 }
