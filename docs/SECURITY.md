@@ -13,7 +13,7 @@ Open decisions (things this doc deliberately does not settle) are marked ⚖.
 | `inject.ts` (YouTube) | Page-world read of the YT player object | Read-only expression, returns transcript metadata |
 | Side panel | Extension pages CSP | Renders LLM output as markdown (see below) |
 
-CSP (`extension_pages`): `script-src 'self' 'wasm-unsafe-eval'` —
+CSP (`extension_pages`): `script-src 'self' 'wasm-unsafe-eval'; object-src 'self'` —
 `wasm-unsafe-eval` exists solely for the ONNX runtime (transformers.js);
 no remote code, no inline script. Web-accessible resources are limited to
 `transformers/*.mjs|wasm` (model runtime assets).
@@ -47,6 +47,10 @@ These endpoints ARE contacted:
 | Google APIs | Only after interactive OAuth | Synced documents (Drive) |
 
 No telemetry, no first-party backend.
+
+Development only (not shipped): the live e2e suite (`apps/extension/e2e/live-*.spec.ts`)
+contacts `openrouter.ai` with a key read from env or the gitignored
+`e2e/.openrouter-key` (`*.openrouter-key` in `.gitignore`); suites skip without a key.
 
 ## Untrusted-input boundaries
 
