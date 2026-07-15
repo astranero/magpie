@@ -11,13 +11,16 @@ npm run test:e2e   # Playwright — loads dist/ into headless Chromium
 
 CI (`.github/workflows/ci.yml`) runs all three on push/PR, workspace-aware.
 
-## Unit tests (~184)
+## Unit tests (~382)
 
 Pure-lib suites only, by policy: chunker, citations, content-cleaner,
 frontmatter (+parse), quality-gate, bibtex, paper-rank, rerank-gate,
 research-store, commands, mcp-client, doc-meta-index, reference-harvest,
 format, semaphore, deep-researcher pure helpers, scrape-fallback. No
 chrome-API mocking framework — worker/UI logic is covered by E2E instead.
+Newer guard suites: outline (reflect parse/merge/trim), document-list
+payload (frontmatter-only strip), research-concurrency (FIFO drain),
+research-limits budget, weighted evaluator scoring.
 
 **The suite was audited, not just kept green** (`docs/TEST-AUDIT.md`):
 contract review per suite plus an 8-target mutation kill-matrix. Lessons
@@ -55,5 +58,15 @@ see by construction.
   a deliberate mutation of the behavior fails it.
 - New UI/worker flow → extend an E2E spec; prefer message-API seeding over
   UI setup for fixtures.
-- Not covered yet (known): research pipeline E2E (needs mock fetchers),
-  PDF/image import, page-context, MCP against a live server.
+- Live-provider E2E (`e2e/live-*.spec.ts`): real OpenRouter runs — chat
+  streaming + process indication, /deepresearch plan card, vision import,
+  bad-key negative; full research run behind `RUN_LIVE_RESEARCH=1`. Skips
+  without a key (env `OPENROUTER_API_KEY` or gitignored
+  `e2e/.openrouter-key`). Fresh browser context per test — a shared
+  profile shares the persisted active chat and a leftover stream makes the
+  next send silently queue.
+- Memory-budget E2E (`e2e/memory-budget.spec.ts`): seeds a heavy corpus
+  into the real IndexedDB and asserts the global LIST_DOCUMENTS payload
+  ships frontmatter-only (the sidepanel-OOM regression guard).
+- Not covered yet (known): PDF/image import via UI, page-context, MCP
+  against a live server.

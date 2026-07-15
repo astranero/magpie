@@ -14,8 +14,9 @@ returns the revised topic + questions); typing "start"/"go"/"confirm" or
 the card's button launches the run. Draft cards live in UI state only and
 survive chat switches; history keeps the command + the final report.
 
-One research run at a time (the crash-resume checkpoint is a singleton —
-the worker rejects a second start). Chat is NOT blocked during a run:
+One research run at a time (the crash-resume checkpoint is a singleton);
+a second start is **queued**, not rejected — a persisted FIFO
+(`lib/research-queue.ts`) drains one run at a time as each finishes. Chat is NOT blocked during a run:
 streaming chat and research share the worker via separate abort
 controllers (chatId vs projectId), and progress renders as a live card
 with its own Stop.
@@ -42,15 +43,23 @@ with its own Stop.
    velocity, influential citations, recency, full-text availability, with
    ~30% of slots reserved for newest papers — `lib/paper-rank.ts`) + NEWS
    (Google News RSS) + optional MCP tools, in parallel.
-3. **Between stages**: LLM gap analysis over evidence-so-far → findings +
-   new queries targeting only the gaps; plus **reference harvesting**
+3. **Between stages — reflect** (`reflectOnStage`, one LLM call): updates
+   the **living report outline** (sections with evidence notes + fill
+   status), emits the structured handoff for the next stage's brief, and
+   derives next queries from the outline's thin sections and unresolved
+   contradictions (outline–search co-evolution); plus **reference harvesting**
    (`lib/reference-harvest.ts`): arXiv/DOI citations found in source text
    are always followed (through the academic path: full text + BibTeX),
    web links only if their anchor text survives the reranker — capped at
    ⅓ of the stage budget.
-4. **Synthesis**: evidence balanced across source types (round-robin by
-   agent label), origin tags in headings, confidence markers, analyst notes
-   from stages as non-citable context. Streamed live to the panel
+4. **Synthesis — section-scoped**: the report is written SECTION BY
+   SECTION against the outline (per-section targeted retrieval over all
+   gathered sources + the relevant brief excerpts, one streamed call each),
+   then a capstone adds the executive overview, a mandatory
+   "Contradictions & Open Questions" section, and the Verdict. Degrades to
+   the single merge over stage briefs when the outline/sections fail.
+   Evidence within each call is balanced across source types (round-robin
+   by agent label) with origin tags in headings. Streamed live to the panel
    (`DEEP_RESEARCH_DELTA`); the persisted chat message is the source of
    truth. The report, every scraped source, and the consolidated Research
    Sources list are all saved as project documents; only the in-memory
@@ -79,11 +88,20 @@ score" — each layer has its own job:
    is detected (`isGarbledPdf`) and LLM-cleaned.
 3. **Selection ranking**: academic papers are ranked algorithmically
    (`lib/paper-rank.ts` — citations, velocity, influential citations,
-   recency, full-text, 30% frontier slots); harvested web references must
-   survive the offscreen reranker.
+   recency, full-text, landmark-venue prestige, 30% frontier slots); web
+   sources get a tiered domain-authority boost (`webDomainAuthority`:
+   standards bodies/primary research > canonical docs/empirical UX research
+   > gov/edu/quality press) through the retrieval qualityBoost; harvested
+   web references must survive the offscreen reranker.
 4. **Synthesis packing**: retrieval is BM25+vector hybrid; evidence is
    packed round-robin across agent labels within the context budget, and a
    context-minimum guard aborts rather than synthesizing from nothing.
+5. **Post-synthesis verification**: a reranker-based faithfulness pass drops
+   citations whose chunk doesn't support the claim (with a >25%
+   miscalibration gate that keeps all rather than over-drop), then an
+   LLM-judge audit scores five weighted dimensions (depth heaviest; score
+   recomputed deterministically from the rubric) and triggers up to two
+   revision passes; the audit is appended to the report.
 
 Every source that survives the gate becomes a `SourceRecord` with a quality
 **tier**: `high` (authority domain, arXiv/DOI, or ≥10 citations) or
@@ -96,8 +114,10 @@ always resolve to the captured primary documents, not to this list.
 
 ## Crash safety
 
-Job checkpoint in `chrome.storage.local` (plan, phase, logs, evolved stage
-queries), scraped pages in `ResearchJobCacheDB`. A 20 s heartbeat keeps the
+Job checkpoint in `chrome.storage.local` (plan, spec, phase, logs, evolved
+stage queries, stage briefs, the living outline + handoff, gathered doc ids,
+and per-section synthesis drafts — a worker death mid-final-synthesis resumes
+without rewriting finished sections), scraped pages in `ResearchJobCacheDB`. A 20 s heartbeat keeps the
 worker alive through long LLM calls **and** timestamps liveness. On worker
 start, auto-resume runs only if: job `active`, heartbeat stale (fresh =
 clearJob lost a race — skip), age < 12 h, and < 3 prior resume attempts

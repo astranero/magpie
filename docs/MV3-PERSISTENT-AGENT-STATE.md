@@ -24,7 +24,7 @@ MV3 extensions can create an "offscreen document" — an invisible, persistent w
 
 ### 2. Durable Checkpointing, Split by Payload Size
 
-Small, hot job state (plan, phase, logs, flags) lives in `chrome.storage.local` — synchronous-ish, survives worker death, cheap to update every step. Bulk payloads (scraped pages) go to a dedicated IndexedDB (`ResearchJobCacheDB`) keyed by URL, so a resumed run replays pages from disk instead of the network.
+Small, hot job state (plan, spec, phase, logs, flags, stage briefs, the report outline, and per-section synthesis drafts) lives in `chrome.storage.local` — synchronous-ish, survives worker death, cheap to update every step. Bulk payloads (scraped pages) go to a dedicated IndexedDB (`ResearchJobCacheDB`) keyed by URL, so a resumed run replays pages from disk instead of the network.
 
 ### 3. Heartbeats as Liveness Signals
 
