@@ -5,8 +5,6 @@
 // then delegates Readability + Turndown parsing to this invisible
 // offscreen document. No browser tabs are ever opened.
 
-import { Readability } from '@mozilla/readability';
-import TurndownService from 'turndown';
 import * as pdfjsLib from 'pdfjs-dist';
 // Vite resolves this to a bundled worker file URL.
 import pdfWorkerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
@@ -145,25 +143,26 @@ function prestripHtml(rawHtml: string): string {
 }
 
 /**
- * MAIN-THREAD fallback extractor — identical logic to parse.worker.ts, used ONLY
- * when the parse worker errors/times out so a hiccup never drops a source. This is
- * the heap-heavy path we moved off-thread, so it runs rarely, for one page.
+ * DOM-free HTML→text fallback — used ONLY when the parse worker fails. We
+ * DELIBERATELY do NOT re-parse a full DOM (DOMParser + Readability) on this main
+ * thread here: that is the exact ~500-850 MB/page heap spike the worker exists to
+ * avoid, and with the between-stage recreate unable to free it (Chrome pools the
+ * renderer) it ratchets to an OOM. Crude string extraction instead — strip
+ * non-content elements + tags, decode common entities, collapse whitespace. Lower
+ * quality (no article detection), but it's string-only: zero DOM, zero heap spike.
+ * These are the minority of pages the jina reader couldn't turn into markdown.
  */
-function parseHtmlInline(html: string, url: string): { title: string; markdown: string; wordCount: number } {
-  const parsed = new DOMParser().parseFromString(html, 'text/html');
-  parsed.querySelectorAll('script, noscript, style, link, iframe, object, embed')
-    .forEach(el => el.parentNode?.removeChild(el));
-  const base = parsed.createElement('base');
-  base.href = url;
-  parsed.head?.prepend(base);
-  const article = new Readability(parsed, { keepClasses: true }).parse();
-  const htmlContent: string = article?.content || parsed.body?.innerHTML || '';
-  const title: string = article?.title || parsed.title || 'Untitled';
-  const turndown = new TurndownService({ headingStyle: 'atx', codeBlockStyle: 'fenced' });
-  let markdown = turndown.turndown(htmlContent).replace(/\n{4,}/g, '\n\n\n').trim();
-  const wordCount = markdown.split(/\s+/).filter(w => w.length > 0).length;
-  try { parsed.documentElement.innerHTML = ''; } catch { /* ignore */ }
-  return { title, markdown, wordCount };
+function cheapHtmlToText(html: string, url: string): { title: string; markdown: string; wordCount: number } {
+  const title = (html.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1] || url).replace(/\s+/g, ' ').trim();
+  const markdown = html
+    .replace(/<(script|style|nav|footer|header|aside|svg|head|noscript|template)\b[\s\S]*?<\/\1>/gi, ' ')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&nbsp;/gi, ' ').replace(/&amp;/gi, '&').replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>').replace(/&#39;|&apos;/gi, "'").replace(/&quot;/gi, '"')
+    .replace(/&[a-z]+;/gi, ' ')
+    .replace(/[ \t]+/g, ' ').replace(/\n\s*\n\s*\n+/g, '\n\n').trim()
+    .slice(0, 30000); // cap — low-value pages, don't feed the index a huge blob
+  return { title, markdown, wordCount: markdown.split(/\s+/).filter(Boolean).length };
 }
 
 // IMPORTANT: an offscreen document exposes ONLY chrome.runtime — chrome.storage
@@ -436,13 +435,14 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
     const html = prestripHtml(rawHtml);
     callParseWorker<{ title: string; markdown: string; wordCount: number }>(html, url)
       .then(res => { maybeRecycleParseWorker(); sendResponse({ ok: true, ...res }); })
-      .catch(() => {
-        try {
-          crumb('offscreen', 'parse worker fallback → inline', { url: url.slice(0, 70) });
-          sendResponse({ ok: true, ...parseHtmlInline(html, url) });
-        } catch (err) {
-          sendResponse({ ok: false, error: err instanceof Error ? err.message : String(err) });
-        }
+      .catch((err) => {
+        // Capture WHY the worker failed — linkedom-in-worker is env-specific and
+        // works in Node, so the real error is the only way to fix it properly.
+        crumb('offscreen', 'parse worker failed → cheap extract', {
+          url: url.slice(0, 70),
+          err: String(err?.message || err).slice(0, 140),
+        });
+        sendResponse({ ok: true, ...cheapHtmlToText(html, url) });
       });
     return true;
   }
