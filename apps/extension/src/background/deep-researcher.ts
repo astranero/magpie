@@ -78,6 +78,19 @@ const RESEARCH_CITATION_RULES =
   `8. Ignore sources that are topically unrelated to the research question (a keyword match is not relevance) — do not force them into the narrative.\n` +
   `9. Do NOT write a Bibliography, References, or Sources section of your own — a source list is appended automatically. Citations appear ONLY as inline [anchor_id] brackets.\n`;
 
+// When the question is a HOW-TO / best-practices / workflow / strategy ask, the
+// report must PRESCRIBE, not just survey problems — this is the #1 thing the
+// quality evaluator flags ("reads as a literature review of challenges rather
+// than a prescriptive guide"). A limitation in a source implies a best practice;
+// synthesise the workflow FROM the pieces the sources give, don't conclude "the
+// literature provides no unified workflow".
+const PRESCRIPTIVE_GUIDANCE =
+  `PRESCRIPTIVE MODE — if the question asks HOW TO do something (contains "best practices", "workflow", "how to", "integrate", "build", "strategy", "guide", "approach", "professional"), the report MUST be actionable, not a catalogue of problems:\n` +
+  `- Give a concrete, recommended step-by-step workflow / architecture the reader can follow, with the tools, patterns, and techniques the sources name.\n` +
+  `- Give explicit do / don't recommendations. Where a source reports a FAILURE or limitation, state the practice that avoids it — a limitation implies a best practice.\n` +
+  `- Cover the FULL scope the question names (every sub-topic / taxonomy it lists), not only the parts with the most sources.\n` +
+  `- Synthesise the guidance FROM the evidence; never end with "the sources do not provide a unified workflow". Note a genuine gap in at most one short clause.\n`;
+
 /**
  * Models sometimes append a hand-written "Bibliography"/"References" section
  * of bare doc-ids despite rule 9 — those aren't anchors, render as dead
@@ -1739,13 +1752,14 @@ Auditor's findings:
 ${evaluation.weaknesses.map(w => `- ${w}`).join('\n')}
 ${evaluation.flaggedSections.length ? `Flagged sections: ${evaluation.flaggedSections.join('; ')}` : ''}
 
-Rewrite the report to address these findings using ONLY the source excerpts provided.
-- If the sources genuinely cannot answer the topic, say so prominently in the first paragraph and keep the report short — do NOT pad with tangentially related material.
+Rewrite the report to FULLY address these findings using the source excerpts provided — expand and restructure, don't just tweak. Directly fix each weakness the auditor named (add the missing prescriptive workflow, broaden the scope, add technical depth), pulling the specifics from the excerpts.
 - Preserve correct [anchor_id] citations; never fabricate anchors.
 - Cut content the auditor called irrelevant rather than defending it.
+- Only if the sources genuinely cannot answer the topic: say so in the first paragraph and keep it short — but first make a real attempt to synthesise guidance from what IS there.
 
+${PRESCRIPTIVE_GUIDANCE}
 ${RESEARCH_CITATION_RULES}`;
-  const user = `ORIGINAL REPORT:\n\n${synthesis.slice(0, 12_000)}\n\nSOURCE EXCERPTS:\n\n${sourceContext.slice(0, 30_000)}`;
+  const user = `ORIGINAL REPORT:\n\n${synthesis.slice(0, 24_000)}\n\nSOURCE EXCERPTS:\n\n${sourceContext.slice(0, 60_000)}`;
   const revised = await llmChatFn(sys, user);
   return revised.trim().length > 200 ? revised : synthesis;
 }
@@ -2111,6 +2125,7 @@ SYNTHESIS RULES:
 - Flag genuine conflicts explicitly ("one source reports X [id], another Y [id]").
 - Do not add claims absent from the briefs. Synthesise and structure what's there — don't pad with what's missing.
 
+${PRESCRIPTIVE_GUIDANCE}
 ${RESEARCH_CITATION_RULES}`;
 
   const userMsg = `RESEARCH BRIEFS:\n\n${briefsBlock}`;
@@ -2400,6 +2415,7 @@ async function runDeeperResearch(
       `- Whenever the excerpts have comparable or quantitative data (pricing, competitors, features, funding, metrics, options with trade-offs), present it as a Markdown table; use a ranked table/numbered hierarchy when findings have a natural priority.\n` +
       `- Match register to the subject (analyst report for market/product questions with pricing + competitor tables and a recommendation; technical review for scientific ones).\n` +
       `- End with a decisive **Verdict** (or **Recommendation**): a clear position, the strongest case, and the top 2–3 risks. Do not hedge.\n\n` +
+      `${PRESCRIPTIVE_GUIDANCE}\n` +
       `${RESEARCH_CITATION_RULES}`;
     synthesis = await (synthesisFn ?? llmChatFn)(fallbackSys, `SOURCE EXCERPTS:\n\n${contextText}`);
     revisionContext = contextText;
