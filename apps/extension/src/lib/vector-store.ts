@@ -165,7 +165,13 @@ export async function searchSessionChunks(
   query: string,
   limit: number = 20,
   filterDocIds?: string[],
-  opts?: { priority?: boolean; qualityBoost?: (docId: string) => number; priorityDocIds?: string[] }
+  opts?: {
+    priority?: boolean;
+    qualityBoost?: (docId: string) => number;
+    priorityDocIds?: string[];
+    hyde?: boolean;
+    llmChatFn?: (sys: string, user: string) => Promise<string>;
+  }
 ): Promise<Chunk[]> {
   // Rehydrate persisted chunks lost to a service worker restart. Pass the caller's
   // priority docs (e.g. the current research stage's fresh docs) so they're indexed
@@ -173,13 +179,27 @@ export async function searchSessionChunks(
   await ensureProjectIndexed(sessionId, MAX_SESSION_CHUNKS, opts?.priorityDocIds);
   const db = await getSessionDB(sessionId);
 
+  let searchTerms = query;
+  if (opts?.hyde && opts?.llmChatFn) {
+    try {
+      const sys = "You are a research assistant. Write a brief, factual, hypothetical paragraph answering the query. Do not add disclaimers or preamble.";
+      const hypotheticalDoc = await opts.llmChatFn(sys, `Query: ${query}`).catch(() => null);
+      if (hypotheticalDoc && hypotheticalDoc.trim().length > 10) {
+        searchTerms = hypotheticalDoc.trim();
+        console.log(`[HyDE] Generated hypothetical document for "${query.slice(0, 40)}...": ${searchTerms.slice(0, 80)}...`);
+      }
+    } catch (e) {
+      console.warn('[HyDE] Generation failed, falling back to original query', e);
+    }
+  }
+
   let queryVector: number[] | null = null;
   try {
     // Through the offscreen mutex (NOT raw sendMessage): a bare embed here runs
     // concurrently with a research run's ONNX batch → WASM OOM → renderer crash.
     // `priority` lets an interactive chat query jump ahead of the run's queue so
     // the panel answers in seconds instead of freezing until the run finishes.
-    const res: any = await sendToOffscreen({ action: 'OFFSCREEN_GET_EMBEDDINGS', texts: [query] }, undefined, { priority: !!opts?.priority });
+    const res: any = await sendToOffscreen({ action: 'OFFSCREEN_GET_EMBEDDINGS', texts: [searchTerms] }, undefined, { priority: !!opts?.priority });
     if (res?.ok && res.embeddings && res.embeddings[0]) {
       queryVector = res.embeddings[0];
     }

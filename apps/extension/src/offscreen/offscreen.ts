@@ -208,6 +208,17 @@ const rerank = (query: string, passages: string[]): Promise<number[]> => {
   return callWorker<{ scores: number[] }>({ type: 'rerank', query, passages }).then(r => r.scores);
 };
 
+interface NliResult {
+  entailment: number;
+  neutral: number;
+  contradiction: number;
+}
+
+const classifyNli = (pairs: { premise: string; claim: string }[]): Promise<NliResult[]> => {
+  crumb('offscreen', 'nli start', { n: pairs.length });
+  return callWorker<{ results: NliResult[] }>({ type: 'nli', pairs }).then(r => r.results);
+};
+
 function base64ToUint8Array(b64: string): Uint8Array {
   const binary = atob(b64);
   const bytes = new Uint8Array(binary.length);
@@ -457,6 +468,13 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
   if (request?.action === 'OFFSCREEN_RERANK') {
     rerank(request.query as string, request.passages as string[])
       .then(scores => sendResponse({ ok: true, scores }))
+      .catch(err => sendResponse({ ok: false, error: err instanceof Error ? err.message : String(err) }));
+    return true;
+  }
+
+  if (request?.action === 'OFFSCREEN_NLI') {
+    classifyNli(request.pairs as { premise: string; claim: string }[])
+      .then(results => sendResponse({ ok: true, results }))
       .catch(err => sendResponse({ ok: false, error: err instanceof Error ? err.message : String(err) }));
     return true;
   }

@@ -105,3 +105,41 @@ export async function getAcademicDepth(): Promise<AcademicDepth> {
     return 'full';
   }
 }
+
+// ── Report length preference ─────────────────────────────────────────────────
+// Founder dogfooding wanted 1800-3000-word reports; other users may want the
+// opposite. A dial beats an assumption (research-synthesis finding). Each spec
+// feeds the synthesis prompts' word targets — depth scaling stays in
+// RESEARCH_LIMITS; this only shapes the WRITTEN output.
+export type ReportLength = 'concise' | 'standard' | 'comprehensive';
+
+export interface ReportLengthSpec {
+  /** Final report target, prose ("1800–3000"). */
+  total: string;
+  /** Per-section target for sectioned synthesis. */
+  sectionWords: string;
+  /** Quick-mode (/research) report target. */
+  quick: string;
+  /** Outline section-count guidance. */
+  sections: string;
+}
+
+export const REPORT_LENGTH_SPECS: Record<ReportLength, ReportLengthSpec> = {
+  concise:       { total: '900–1500',  sectionWords: '150–350', quick: '500–900',   sections: '3-5'  },
+  standard:      { total: '1800–3000', sectionWords: '300–700', quick: '800–1500',  sections: '4-8'  },
+  comprehensive: { total: '2800–4500', sectionWords: '500–900', quick: '1200–2000', sections: '5-10' },
+};
+
+export async function getReportLength(): Promise<ReportLength> {
+  try {
+    const s = await chrome.storage.local.get(['reportLength']);
+    const v = s.reportLength as ReportLength;
+    return v === 'concise' || v === 'comprehensive' ? v : 'standard';
+  } catch {
+    return 'standard';
+  }
+}
+
+export async function getReportLengthSpec(): Promise<ReportLengthSpec> {
+  return REPORT_LENGTH_SPECS[await getReportLength()];
+}

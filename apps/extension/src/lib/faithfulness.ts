@@ -24,6 +24,8 @@ const anchorRe = () => new RegExp(ANCHOR_SRC, 'gi');
 export interface FaithfulnessDeps {
   /** Reranker: score how well each evidence supports the claim (0..1, sigmoid). */
   rerank: (claim: string, evidences: string[]) => Promise<number[]>;
+  /** NLI classifier (optional). */
+  classifyNli?: (pairs: { premise: string; claim: string }[]) => Promise<{ entailment: number, neutral: number, contradiction: number }[]>;
   /** Resolve an anchorId to its source chunk text (null if unknown). */
   getChunkText: (anchorId: string) => Promise<string | null>;
 }
@@ -81,6 +83,8 @@ export async function verifyFaithfulness(
 
   const drop = new Set<number>();
   let total = 0;
+  const nliPairs: { i: number; premise: string; claim: string }[] = [];
+
   for (const [claim, idxs] of byClaim) {
     const resolved: { i: number; chunk: string }[] = [];
     for (const i of idxs) {
@@ -92,7 +96,33 @@ export async function verifyFaithfulness(
     let scores: number[];
     try { scores = await deps.rerank(claim, resolved.map(r => r.chunk)); }
     catch { continue; } // reranker hiccup — don't drop on a failed check
-    resolved.forEach((r, k) => { if ((scores[k] ?? 1) < threshold) drop.add(r.i); });
+
+    resolved.forEach((r, k) => {
+      const rel = scores[k] ?? 1.0;
+      if (rel < threshold) {
+        drop.add(r.i);
+      } else if (deps.classifyNli) {
+        nliPairs.push({ i: r.i, premise: r.chunk, claim });
+      }
+    });
+  }
+
+  if (deps.classifyNli && nliPairs.length > 0) {
+    try {
+      const nliResults = await deps.classifyNli(nliPairs.map(p => ({ premise: p.premise, claim: p.claim })));
+      nliPairs.forEach((p, k) => {
+        const res = nliResults[k];
+        if (res) {
+          const entail = res.entailment ?? 0;
+          const contradict = res.contradiction ?? 0;
+          if (entail < 0.25 || contradict > 0.40) {
+            drop.add(p.i);
+          }
+        }
+      });
+    } catch (e) {
+      console.warn('[Faithfulness] NLI verification failed:', e);
+    }
   }
 
   if (drop.size === 0) return { text: synthesis, total, verified: total, dropped: 0 };

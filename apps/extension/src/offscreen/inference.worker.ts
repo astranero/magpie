@@ -13,11 +13,21 @@
 import { env, pipeline, AutoTokenizer, AutoModelForSequenceClassification } from '@huggingface/transformers';
 
 type Device = 'wasm' | 'webgpu';
+interface NliPair {
+  premise: string;
+  claim: string;
+}
+interface NliResult {
+  entailment: number;
+  neutral: number;
+  contradiction: number;
+}
 type Req =
   | { type: 'init'; wasmPaths: string; device?: Device }
   | { type: 'set_device'; device: Device }
   | { id: number; type: 'embed'; texts: string[] }
-  | { id: number; type: 'rerank'; query: string; passages: string[] };
+  | { id: number; type: 'rerank'; query: string; passages: string[] }
+  | { id: number; type: 'nli'; pairs: NliPair[] };
 
 // ── Embeddings ──
 
@@ -200,24 +210,109 @@ async function rerank(query: string, passages: string[]): Promise<number[]> {
   }
   return scores;
 }
-
+ 
+// ── Natural Language Inference (NLI) ──
+ 
+let nliTokenizer: any = null;
+let nliModel: any = null;
+async function getNliModel() {
+  if (!nliTokenizer || !nliModel) {
+    const model_id = 'Xenova/all-MiniLM-L6-v2-nli';
+    nliTokenizer = await AutoTokenizer.from_pretrained(model_id);
+    nliModel = await AutoModelForSequenceClassification.from_pretrained(model_id);
+  }
+  return { tokenizer: nliTokenizer, model: nliModel };
+}
+ 
+async function resetNliModel(): Promise<void> {
+  try { await nliModel?.dispose?.(); } catch { /* best-effort */ }
+  nliTokenizer = null;
+  nliModel = null;
+}
+ 
+const softmax = (logits: number[]) => {
+  const max = Math.max(...logits);
+  const exps = logits.map(x => Math.exp(x - max));
+  const sum = exps.reduce((a, b) => a + b, 0);
+  return exps.map(x => x / sum);
+};
+ 
+async function classifyNli(pairs: NliPair[]): Promise<NliResult[]> {
+  const results: NliResult[] = [];
+  const { tokenizer, model } = await getNliModel();
+ 
+  // Resolve the label mapping from model config
+  const id2label = model.config?.id2label || {};
+  let entailmentIdx = 0;
+  let neutralIdx = 1;
+  let contradictionIdx = 2;
+ 
+  for (const [id, label] of Object.entries(id2label)) {
+    const l = String(label).toLowerCase();
+    const idx = parseInt(id, 10);
+    if (l.startsWith('entail') || l === 'entailment') entailmentIdx = idx;
+    else if (l.startsWith('contradict') || l === 'contradiction') contradictionIdx = idx;
+    else if (l.startsWith('neutral') || l === 'neutral') neutralIdx = idx;
+  }
+ 
+  const NLI_BATCH = 8;
+  for (let i = 0; i < pairs.length; i += NLI_BATCH) {
+    const batch = pairs.slice(i, i + NLI_BATCH);
+    try {
+      const premises = batch.map(b => b.premise);
+      const claims = batch.map(b => b.claim);
+ 
+      const inputs = await tokenizer(premises, {
+        text_pair: claims,
+        padding: true,
+        truncation: true,
+        max_length: 512,
+      });
+ 
+      const { logits } = await model(inputs);
+      const data = logits.data as Float32Array;
+      const numLabels = logits.dims[1]; // typically 3
+ 
+      for (let j = 0; j < batch.length; j++) {
+        const start = j * numLabels;
+        const slice = Array.from(data.slice(start, start + numLabels));
+        const probs = softmax(slice);
+ 
+        results.push({
+          entailment: probs[entailmentIdx] ?? 0,
+          neutral: probs[neutralIdx] ?? 0,
+          contradiction: probs[contradictionIdx] ?? 0,
+        });
+      }
+    } catch (err) {
+      console.warn('NLI batch failed, resetting NLI model:', err);
+      await resetNliModel();
+      for (let j = 0; j < batch.length; j++) {
+        results.push({ entailment: 0.33, neutral: 0.34, contradiction: 0.33 });
+      }
+    }
+  }
+  return results;
+}
+ 
 // ── Message pump ──
-
+ 
 self.onmessage = async (e: MessageEvent<Req>) => {
   const req = e.data;
-
+ 
   if (req.type === 'init') {
     if (env.backends?.onnx?.wasm) env.backends.onnx.wasm.wasmPaths = req.wasmPaths;
     env.allowLocalModels = false;
     if (req.device === 'wasm' || req.device === 'webgpu') embedDevice = req.device;
-    // Warm both models so the first real request doesn't pay init latency.
+    // Warm all models so the first real request doesn't pay init latency.
     Promise.all([
       getEmbedder().catch(err => console.warn('[worker preload] embedder failed:', err)),
       getReranker().catch(err => console.warn('[worker preload] reranker failed:', err)),
+      getNliModel().catch(err => console.warn('[worker preload] NLI model failed:', err)),
     ]).then(() => console.log(`[worker preload] models ready (embed device: ${embedDevice})`));
     return;
   }
-
+ 
   if (req.type === 'set_device') {
     if ((req.device === 'wasm' || req.device === 'webgpu') && req.device !== embedDevice) {
       embedDevice = req.device;
@@ -226,7 +321,7 @@ self.onmessage = async (e: MessageEvent<Req>) => {
     }
     return;
   }
-
+ 
   try {
     if (req.type === 'embed') {
       const embeddings = await generateEmbeddings(req.texts);
@@ -234,6 +329,9 @@ self.onmessage = async (e: MessageEvent<Req>) => {
     } else if (req.type === 'rerank') {
       const scores = await rerank(req.query, req.passages);
       (self as any).postMessage({ id: req.id, ok: true, scores });
+    } else if (req.type === 'nli') {
+      const results = await classifyNli(req.pairs);
+      (self as any).postMessage({ id: req.id, ok: true, results });
     }
   } catch (err) {
     (self as any).postMessage({ id: (req as any).id, ok: false, error: err instanceof Error ? err.message : String(err) });

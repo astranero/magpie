@@ -52,6 +52,13 @@ E2E exists specifically for the **coordinate-space / wiring class of bug**
 (e.g. highlight offsets vs frontmatter stripping) that unit tests cannot
 see by construction.
 
+## Review rules (from dogfooding synthesis, 2026-07)
+
+- **No silent awaits**: any user-triggered path that can take >1s (embedding
+  cold-start, network, LLM call) must show visible progress — a pending row,
+  status line, or spinner — and replace it in place with the result. A silent
+  await reads as a dead feature (/recall was the live example).
+
 ## Adding tests
 
 - New pure logic → put it in `lib/`, add a `__tests__` suite, and make sure

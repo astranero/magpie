@@ -50,6 +50,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
 
   // Research settings are self-contained: read/write chrome.storage directly.
   const [researchDepth, setResearchDepth] = useState<'standard' | 'deep' | 'exhaustive'>('standard');
+  const [reportLength, setReportLength] = useState<'concise' | 'standard' | 'comprehensive'>('standard');
   const [sourceQuality, setSourceQuality] = useState<'all' | 'high'>('all');
   const [academicDepth, setAcademicDepth] = useState<'abstract' | 'full'>('full');
   const [contextTokens, setContextTokens] = useState('32768');
@@ -67,9 +68,10 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   const tzGuess = (() => { try { return (Intl.DateTimeFormat().resolvedOptions().timeZone || '').split('/').pop()?.replace(/_/g, ' ') || ''; } catch { return ''; } })();
   useEffect(() => {
     if (typeof chrome === 'undefined' || !chrome.storage) return;
-    chrome.storage.local.get(['researchDepth', 'contextTokens', 's2ApiKey', 'sourceQuality', 'academicDepth', 'chatWebFallback', 'jinaReaderEnabled', 'pageContextStrategy', 'userLocation', 'inferenceDevice']).then(r => {
+    chrome.storage.local.get(['researchDepth', 'reportLength', 'contextTokens', 's2ApiKey', 'sourceQuality', 'academicDepth', 'chatWebFallback', 'jinaReaderEnabled', 'pageContextStrategy', 'userLocation', 'inferenceDevice']).then(r => {
       if (r.inferenceDevice === 'webgpu') setInferenceDevice('webgpu');
       if (r.researchDepth === 'deep' || r.researchDepth === 'exhaustive') setResearchDepth(r.researchDepth);
+      if (r.reportLength === 'concise' || r.reportLength === 'comprehensive') setReportLength(r.reportLength);
       if (r.sourceQuality === 'high') setSourceQuality('high');
       if (r.academicDepth === 'abstract') setAcademicDepth('abstract');
       if (r.contextTokens) setContextTokens(String(r.contextTokens));
@@ -545,6 +547,22 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           </Select>
           <p className="text-[10px] text-muted-foreground font-mono leading-normal">
             Scales web, academic (Semantic Scholar, HuggingFace, CrossRef) and news pipelines for /research and /deepresearch.
+          </p>
+        </div>
+        <div className="space-y-1.5">
+          <label className="text-xs font-medium">Report length</label>
+          <Select value={reportLength} onValueChange={(v) => { setReportLength(v as any); saveResearchSetting({ reportLength: v }); }}>
+            <SelectTrigger className="w-full rounded-lg">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent className="border border-border rounded-lg shadow-card">
+              <SelectItem value="concise" className="font-mono text-xs">Concise — ~900-1500 words, key findings only</SelectItem>
+              <SelectItem value="standard" className="font-mono text-xs">Standard — ~1800-3000 words, full analysis</SelectItem>
+              <SelectItem value="comprehensive" className="font-mono text-xs">Comprehensive — ~2800-4500 words, maximum depth</SelectItem>
+            </SelectContent>
+          </Select>
+          <p className="text-[10px] text-muted-foreground font-mono leading-normal">
+            Shapes how much the final report preserves vs compresses. Gathering scale comes from Research depth above.
           </p>
         </div>
         <div className="space-y-1.5">

@@ -9,6 +9,7 @@ import { pdfUrlToBody, recreateOffscreen } from '../lib/pdf-parser';
 import { checkContentQuality, extractDoi } from '../lib/quality-gate';
 import { isAcademicQuery } from '../lib/query-intent';
 import { getResearchLimits, getResearchDepth, getSynthesisCharBudget, getSourceQuality, getAcademicDepth, RESEARCH_LIMITS, ResearchLimits, SourceQuality, AcademicDepth } from '../lib/research-limits';
+import { getReportLengthSpec } from '../lib/research-limits';
 import { generateBibtex } from '../lib/bibtex';
 import { harvestReferences, partitionRefs, HarvestedRef } from '../lib/reference-harvest';
 import { getMcpServers, McpConnection, isSearchLikeTool, argsForQuery } from '../lib/mcp-client';
@@ -1780,7 +1781,7 @@ export async function runDeepResearch(
 
   onProgress(`[SYNTHESIZING] Scanning ${agent.docIds.length} captured documents for relevant findings...`);
 
-  const relevantChunks = await searchSessionChunks(projectId, topic, activeLimits.quickChunks, agent.docIds);
+  const relevantChunks = await searchSessionChunks(projectId, topic, activeLimits.quickChunks, agent.docIds, { hyde: true, llmChatFn });
 
   const contextText = buildAnchoredContext(relevantChunks, await docTitleMap(projectId)).trim();
 
@@ -1799,6 +1800,7 @@ export async function runDeepResearch(
 
   // Quick mode gets the same structural discipline as the deep merge (it used
   // to be a bare one-liner — reports came out flat and unstructured).
+  const lengthSpec = await getReportLengthSpec();
   const sysPrompt = `You are a research analyst. Using ONLY the excerpts below, write a comprehensive, well-structured markdown report on: "${topic}". Never ask for more context — work with what is provided.
 
 STRUCTURE:
@@ -1808,7 +1810,7 @@ STRUCTURE:
 - ${CONTRADICTIONS_SECTION_RULE}
 - Close with a decisive **Verdict** or **Recommendation** paragraph.
 
-LENGTH: target 800-1500 words — hit it by preserving the excerpts' SPECIFIC findings, numbers, and named examples, not by padding.
+LENGTH: target ${lengthSpec.quick} words — hit it by preserving the excerpts' SPECIFIC findings, numbers, and named examples, not by padding.
 
 ${PRESCRIPTIVE_GUIDANCE}
 ${REPORT_VOICE}
@@ -2173,6 +2175,12 @@ async function faithfulnessPass(synthesis: string, onProgress: (s: string) => vo
           { action: 'OFFSCREEN_RERANK', query: claim, passages: evidences }
         ).catch(() => null);
         return res?.scores ?? evidences.map(() => 1); // no scorer → treat as supported
+      },
+      classifyNli: async (pairs) => {
+        const res = await sendToOffscreen<{ ok: boolean; results?: any[] }>(
+          { action: 'OFFSCREEN_NLI', pairs }
+        ).catch(() => null);
+        return res?.results ?? pairs.map(() => ({ entailment: 1, neutral: 0, contradiction: 0 }));
       },
       getChunkText: async (a) => (await getChunkByAnchor(a).catch(() => null))?.text ?? null,
     });
@@ -2577,18 +2585,19 @@ async function synthesizeFinalPaper(
     .map((b, i) => `## Stage ${i + 1} Research Brief\n\n${b}`)
     .join('\n\n---\n\n');
 
+  const lengthSpec = await getReportLengthSpec();
   const sys =
     `You are a senior research analyst writing the definitive report on: "${topic}".
 You have ${stageBriefs.length} research briefs from a staged investigation, each with inline [anchor_id] citations you MUST preserve exactly.
 
 Write ONE long, comprehensive, decision-useful report — the kind a reader pays for because it saves them weeks. Depth and structure matter as much as accuracy.
 
-LENGTH & DEPTH — the #1 failure of these reports is being too SHORT. Target 1800–3000 words. Hit it by PRESERVING detail, not padding:
+LENGTH & DEPTH — the #1 failure of these reports is being too SHORT. Target ${lengthSpec.total} words. Hit it by PRESERVING detail, not padding:
 - Do NOT summarise the briefs into a short digest. The briefs are your raw material — carry their SPECIFIC findings, mechanisms, numbers, named examples, and trade-offs into the report in full.
 - Every distinct point from the briefs earns its own sentence with its citation — do NOT collapse several distinct findings into one line.
 - Every sub-question gets its OWN multi-paragraph section (3–6 paragraphs), not a sentence or two.
 - For each recommendation or trade-off, give the mechanism AND the downside/cost, not just the headline.
-- If your draft is under ~1800 words, you have compressed too much — go back and restore the detail the briefs contain.
+- If your draft is under the target range, you have compressed too much — go back and restore the detail the briefs contain.
 
 STRUCTURE — adapt it to the subject; do NOT use a rigid template:
 - Do NOT write a top-level title / H1 (no "# Professional Report: …", no "Report on …") — the document already has a title, and a second one renders as an ugly double header. Start directly with the body.
@@ -2670,6 +2679,7 @@ async function synthesizeSectionedPaper(
   if (sections.length < 3 || sections.length > 10 || stageBriefs.length === 0) return null;
 
   const titles = await docTitleMap(projectId);
+  const lengthSpec = await getReportLengthSpec();
   const sectionDrafts: Record<string, string> = { ...priorDrafts };
   const written: string[] = [];
   // Chunks fed to ≥2 sections are dropped from later ones — kills the main
@@ -2692,7 +2702,7 @@ async function synthesizeSectionedPaper(
 
     // Targeted retrieval: this section's material from ALL gathered sources.
     const query = `${s.heading} ${s.keyTerms.join(' ')}`.trim() || topic;
-    const chunks = (await searchSessionChunks(projectId, query, 12, allDocIds, { qualityBoost }).catch(() => []))
+    const chunks = (await searchSessionChunks(projectId, query, 12, allDocIds, { qualityBoost, hyde: true, llmChatFn }).catch(() => []))
       .filter(c => (chunkUse.get(c.anchorId) ?? 0) < 2);
     chunks.forEach(c => chunkUse.set(c.anchorId, (chunkUse.get(c.anchorId) ?? 0) + 1));
     const evidence = buildAnchoredContext(chunks, titles).trim();
@@ -2721,7 +2731,7 @@ ${s.evidenceNotes.length ? `- Key evidence gathered: ${s.evidenceNotes.join(' | 
 ${prevTail}
 Requirements:
 - Output starts with EXACTLY "## ${s.heading}" and contains ONLY this section — no executive summary, no verdict, no conclusions, no other sections.
-- 300–700 words of analytical prose. Use ### sub-headings for long analysis.
+- ${lengthSpec.sectionWords} words of analytical prose. Use ### sub-headings for long analysis.
 - Present comparable or quantitative evidence as a Markdown table.
 - Carry the SPECIFIC findings, mechanisms, numbers, and named examples from the material — do not compress distinct findings into one line.
 
@@ -2996,8 +3006,31 @@ async function runDeeperResearch(
           handoffContext = formatHandoff(r.handoff);
           const thin = outline.sections.filter(s => s.status === 'empty' || s.status === 'thin').length;
           onProgress(`[STAGE ${stage}/${rounds}] ✓ Outline: ${outline.sections.length} sections (${thin} still thin)`);
+          
+          if (thin === 0) {
+            onProgress(`[STAGE ${stage}/${rounds}] [DYNAMIC STOP] All outline sections are adequate or rich. Stopping gather loop early.`);
+            stageBriefs[stage - 1] = brief;
+            uniqueStageDocIds.forEach(d => gatheredDocIds.add(d));
+            await updateJob({
+              phase: 'gathering',
+              stageBriefs,
+              currentStage: stage,
+              outline: outline ?? undefined,
+              handoffContext,
+              gatheredDocIds: Array.from(gatheredDocIds),
+              webQueries: []
+            }).catch(() => {});
+            break;
+          }
+
           if (stage < rounds) {
-            stageQueries = r.queries.length ? r.queries : subQuestions.slice(0, activeLimits.webQueries);
+            let queriesToRun = r.queries;
+            if (r.handoff.contradictions && r.handoff.contradictions.length > 0) {
+              onProgress(`[STAGE ${stage}/${rounds}] [DYNAMIC PIVOT] Surfaced ${r.handoff.contradictions.length} contradiction(s) in source evidence. Pivoting search queries to resolve them.`);
+              const contradictionQueries = r.handoff.contradictions.slice(0, 2).map(c => `resolve contradiction: ${c.length > 80 ? c.slice(0, 77) + '...' : c}`);
+              queriesToRun = [...contradictionQueries, ...queriesToRun].slice(0, activeLimits.webQueries);
+            }
+            stageQueries = queriesToRun.length ? queriesToRun : subQuestions.slice(0, activeLimits.webQueries);
             onProgress(`[STAGE ${stage}/${rounds}] Next stage queries: ${stageQueries.join(' | ')}`);
           }
         } else {
@@ -3119,7 +3152,7 @@ async function runDeeperResearch(
     const uniqueDocIds = allDocIdsForSynthesis;
     for (const q of [topic, ...subQuestions]) {
       if (signal?.aborted) throw new Error('AbortError');
-      const chunks = await searchSessionChunks(projectId, q, activeLimits.chunksPerAngle, uniqueDocIds, { qualityBoost });
+      const chunks = await searchSessionChunks(projectId, q, activeLimits.chunksPerAngle, uniqueDocIds, { qualityBoost, hyde: true, llmChatFn });
       chunks.forEach(c => chunkSet.set(c.id, c));
     }
     const charBudget = await getSynthesisCharBudget();
@@ -3154,8 +3187,10 @@ async function runDeeperResearch(
     if (contextText.length < 100) {
       throw new Error(`Agents found ${allSources.length} source(s) but could not extract readable text.`);
     }
+    const lengthSpec = await getReportLengthSpec();
     const fallbackSys =
       `You are a senior research analyst writing the definitive report on: "${topic}", using ONLY the excerpts below.\n\n` +
+      `LENGTH: target ${lengthSpec.total} words — preserve specifics, don't pad.\n` +
       `Write ONE long, comprehensive, decision-useful report:\n` +
       `- Do NOT write a top-level title / H1 (the document already has one — a second renders as a double header). Start directly with a strong 1–2 paragraph executive overview (authoritative prose, no "Abstract:" label).\n` +
       `- Organise into 4–8 sections with DESCRIPTIVE, topic-specific headings that name the actual finding — not generic "Introduction / Discussion". Cover every sub-question:\n${subQuestions.map(q => `   - ${q}`).join('\n')}\n` +

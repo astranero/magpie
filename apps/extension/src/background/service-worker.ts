@@ -338,7 +338,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     chrome.storage.local.get(['sidePanelOpen'], (res) => {
       const isOpen = !!res.sidePanelOpen;
       if (isOpen) {
-        chrome.runtime.sendMessage({ action: 'close_sidepanel' });
+        chrome.runtime.sendMessage({ action: 'close_sidepanel' }).catch(() => {});
       } else {
         if (sender.tab && sender.tab.id) {
           chrome.sidePanel.open({ tabId: sender.tab.id })
