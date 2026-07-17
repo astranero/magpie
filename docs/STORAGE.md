@@ -48,8 +48,9 @@ after Re-index.
 Config + small state: provider settings (`customUrl/customKey/customModel/
 visionModel`), `researchDepth`, `sourceQuality`, `academicDepth`,
 `contextTokens`, `s2ApiKey`, `searchApiKeys` (Tavily/Brave/Serper),
-`mcpServers`, `customSkills`, `autoLinkCaptures`, `includePageContext`, and
-the crash-safe **research job checkpoint** (`ara-research-job`: plan, phase,
+`mcpServers`, `customSkills`, `autoLinkCaptures`, `includePageContext`,
+`driveFolderName`, `syncResearchSources`, and the crash-safe
+**research job checkpoint** (`ara-research-job`: plan, phase,
 logs, `active`, `lastHeartbeatAt`, `resumeAttempts`).
 
 ## Auxiliary IndexedDB
@@ -58,8 +59,22 @@ logs, `active`, `lastHeartbeatAt`, `resumeAttempts`).
 current research run keyed by URL — resume serves already-fetched pages from
 here instead of the network. Cleared when a job starts/finishes.
 
-## Durability
+## Workspace Sync (Obsidian & Google Drive)
 
-`unlimitedStorage` permission exempts extension IndexedDB from quota
-eviction. Local-folder two-way sync (File System Access API, 5-min alarm)
-mirrors documents as `.md` files with YAML frontmatter for Obsidian.
+Magpie provides two main synchronization mechanisms for matching your local research library with external tools like Obsidian:
+
+### 1. Google Drive Sync (Remote)
+* **Auth & Scopes:** Uses Google OAuth2 (interactive sign-in) with the narrow `drive.file` scope. Magpie can only view and edit files/folders that it created itself.
+* **Obsidian Formatting:** Syncs research documents as `.md` files with Obsidian-compatible YAML frontmatter to a configured sync folder (`driveFolderName`, default: `Magpie`).
+* **Automatic Background Sync:** Runs silently in the background:
+  * When capturing a web page (`captureTab`).
+  * When importing local files (Markdown, PDF, Images).
+  * When a `/deepresearch` or `/academic` loop finishes.
+  * Periodically every 5 minutes via the `sync-workspace` alarm.
+* **Sync Filtering:** By default, raw crawled research sources (which clutter Obsidian vaults) are excluded from sync. Turning on **"Sync raw research sources"** (`syncResearchSources`) in the Config tab forces all crawled pages to sync.
+* **Force Resync:** Clears the `syncedToDrive` flag and `driveFileId` on all documents, enabling a complete re-upload of your library to Google Drive (e.g. if the folder name is changed).
+
+### 2. Local Folder Sync (Desktop)
+* Uses the browser File System Access API (requiring a user gesture to grant permission).
+* Mirrors documents as `.md` files to a selected local directory.
+* Periodic two-way sync checks run every 5 minutes, coordinated via BroadcastChannel.

@@ -34,6 +34,15 @@ interface SettingsViewProps {
   autoLinkCaptures: boolean;
   setAutoLinkCaptures: (val: boolean) => void;
   saveSettings: () => void;
+  syncResearchSources: boolean;
+  setSyncResearchSources: (val: boolean) => void;
+  forceResync: () => void;
+  routeChatThroughCli: string;
+  setRouteChatThroughCli: (val: string) => void;
+  cliCommandTemplate: string;
+  setCliCommandTemplate: (val: string) => void;
+  localMcpCompanionUrl: string;
+  setLocalMcpCompanionUrl: (val: string) => void;
   workspaceName: string;
   workspaceRules: string;
   saveWorkspaceRules: (rules: string) => void | Promise<void>;
@@ -42,11 +51,50 @@ interface SettingsViewProps {
 export const SettingsView: React.FC<SettingsViewProps> = ({
   customUrl, setCustomUrl, customKey, setCustomKey, customModel, setCustomModel, visionModel, setVisionModel, customModels, fetchCustomModels,
   docCount, globalDocCount, onCleanupOrphans, authed, profile, login, logout, folderName, setFolderName, exportWorkspace,
-  autoLinkCaptures, setAutoLinkCaptures, saveSettings, workspaceName, workspaceRules, saveWorkspaceRules
+  autoLinkCaptures, setAutoLinkCaptures, saveSettings, syncResearchSources, setSyncResearchSources, forceResync,
+  routeChatThroughCli, setRouteChatThroughCli, cliCommandTemplate, setCliCommandTemplate,
+  localMcpCompanionUrl, setLocalMcpCompanionUrl,
+  workspaceName, workspaceRules, saveWorkspaceRules
 }) => {
   // Local draft of the workspace instructions; persisted on blur.
   const [rulesDraft, setRulesDraft] = useState(workspaceRules);
   useEffect(() => { setRulesDraft(workspaceRules); }, [workspaceRules]);
+
+  const [availableClis, setAvailableClis] = useState<string[]>([]);
+  useEffect(() => {
+    const checkClis = async () => {
+      try {
+        const res = await fetch(localMcpCompanionUrl || 'http://localhost:3920/mcp', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            jsonrpc: '2.0',
+            id: Date.now(),
+            method: 'tools/call',
+            params: {
+              name: 'execute_command',
+              arguments: { command: 'which claude; echo "---"; which agy; echo "---"; which copilot; echo "---"; which gh' }
+            }
+          })
+        });
+        if (res.ok) {
+          const data = await res.json();
+          const text = data.result?.content?.[0]?.text || '';
+          const parts = text.split('---');
+          const found: string[] = [];
+          if (parts[0] && !parts[0].includes('not found') && parts[0].trim()) found.push('claude');
+          if (parts[1] && !parts[1].includes('not found') && parts[1].trim()) found.push('agy');
+          if ((parts[2] && !parts[2].includes('not found') && parts[2].trim()) || (parts[3] && !parts[3].includes('not found') && parts[3].trim())) found.push('copilot');
+          setAvailableClis(found);
+        } else {
+          setAvailableClis([]);
+        }
+      } catch {
+        setAvailableClis([]);
+      }
+    };
+    checkClis();
+  }, [localMcpCompanionUrl]);
 
   // Research settings are self-contained: read/write chrome.storage directly.
   const [researchDepth, setResearchDepth] = useState<'standard' | 'deep' | 'exhaustive'>('standard');
@@ -146,7 +194,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   useEffect(() => {
     const probe = () => {
       for (const srv of mcpServers) {
-        if (!srv.healthUrl) continue;
+        if (!srv.healthUrl || !srv.enabled) continue;
         fetch(srv.healthUrl, { method: 'GET', signal: AbortSignal.timeout(3000) })
           .then(r => setMcpHealth(prev => ({ ...prev, [srv.id]: r.ok })))
           .catch(() => setMcpHealth(prev => ({ ...prev, [srv.id]: false })));
@@ -223,16 +271,17 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
 
       {/* ── Custom Provider ── */}
       <Section id="provider" title="AI Provider Configuration" subtitle="Configure your AI backend.">
-          {detected && (detected.ollama.available || detected.builtinGemini.available) && (
+          {(((detected && (detected.ollama.available || detected.builtinGemini.available)) || availableClis.length > 0)) && (
             <div className="rounded-lg border border-primary/20 bg-primary/5 px-3 py-2.5 space-y-2">
               <div className="text-[10px] font-semibold text-primary uppercase tracking-wider">Detected Local Options</div>
-              {detected.ollama.available && (
+              {detected && detected.ollama.available && (
                 <button
                   type="button"
                   className="w-full text-left rounded-md border border-border bg-card px-2.5 py-1.5 text-xs hover:border-primary transition-colors flex flex-col"
                   onClick={() => {
                     const model = pickOllamaModel(detected.ollama.models);
                     setCustomUrl(OLLAMA_OPENAI_URL); setCustomModel(model); setCustomKey('');
+                    setRouteChatThroughCli('disabled');
                     setTimeout(saveSettings, 0);
                   }}
                 >
@@ -240,17 +289,58 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                   <span className="text-[10px] text-muted-foreground">Local model {detected.ollama.models.length ? `(${pickOllamaModel(detected.ollama.models)})` : ''} — fully offline.</span>
                 </button>
               )}
-              {detected.builtinGemini.available && (
+              {detected && detected.builtinGemini.available && (
                 <button
                   type="button"
                   className="w-full text-left rounded-md border border-border bg-card px-2.5 py-1.5 text-xs hover:border-primary transition-colors flex flex-col"
                   onClick={() => {
                     setCustomUrl(BUILTIN_GEMINI_SENTINEL); setCustomModel('gemini-nano'); setCustomKey('');
+                    setRouteChatThroughCli('disabled');
                     setTimeout(saveSettings, 0);
                   }}
                 >
                   <span className="font-semibold">Use Built-in Gemini</span>
                   <span className="text-[10px] text-muted-foreground">On-device nano model — zero key setup.</span>
+                </button>
+              )}
+              {availableClis.map(cli => {
+                const label = cli === 'claude' ? 'Claude' : cli === 'agy' ? 'Antigravity' : 'GitHub Copilot';
+                const template = cli === 'claude' ? 'claude "{prompt}"' : cli === 'agy' ? 'agy chat "{prompt}"' : 'copilot explain "{prompt}"';
+                const isCurrent = routeChatThroughCli !== 'disabled' && cliCommandTemplate === template;
+                return (
+                  <button
+                    type="button"
+                    key={cli}
+                    className={`w-full text-left rounded-md border px-2.5 py-1.5 text-xs transition-colors flex flex-col ${isCurrent ? 'border-primary bg-primary/10' : 'border-border bg-card hover:border-primary'}`}
+                    onClick={() => {
+                      setRouteChatThroughCli('enabled');
+                      setCliCommandTemplate(template);
+                      setTimeout(saveSettings, 0);
+                    }}
+                  >
+                    <span className="font-semibold flex items-center gap-1.5">
+                      Use Local CLI ({label})
+                      {isCurrent && <span className="text-[10px] text-primary">● Active</span>}
+                    </span>
+                    <span className="text-[10px] text-muted-foreground">Routes chat directly to your local `{cli}` command.</span>
+                  </button>
+                );
+              })}
+              {availableClis.length > 0 && (
+                <button
+                  type="button"
+                  className={`w-full text-left rounded-md border px-2.5 py-1.5 text-xs transition-colors flex flex-col ${routeChatThroughCli !== 'disabled' && cliCommandTemplate === 'auto' ? 'border-primary bg-primary/10' : 'border-border bg-card hover:border-primary'}`}
+                  onClick={() => {
+                    setRouteChatThroughCli('enabled');
+                    setCliCommandTemplate('auto');
+                    setTimeout(saveSettings, 0);
+                  }}
+                >
+                  <span className="font-semibold flex items-center gap-1.5">
+                    Use Smart CLI Auto-Select
+                    {routeChatThroughCli !== 'disabled' && cliCommandTemplate === 'auto' && <span className="text-[10px] text-primary">● Active</span>}
+                  </span>
+                  <span className="text-[10px] text-muted-foreground">Automatically routes to the best available local CLI (Claude, AGY, or Copilot).</span>
                 </button>
               )}
             </div>
@@ -282,14 +372,44 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           <div className="space-y-1.5">
             <label className="text-xs font-medium">Model</label>
             <div className="flex gap-2">
-              {customModels.length > 0 ? (
-                <Select value={customModel} onValueChange={v => { setCustomModel(v as string); setTimeout(saveSettings, 0); }}>
+              {(customModels.length > 0 || availableClis.length > 0) ? (
+                <Select
+                  value={
+                    routeChatThroughCli !== 'disabled'
+                      ? (cliCommandTemplate === 'auto' ? 'cli-auto' : cliCommandTemplate.startsWith('claude') ? 'cli-claude' : cliCommandTemplate.startsWith('agy') ? 'cli-agy' : 'cli-copilot')
+                      : customModel
+                  }
+                  onValueChange={v => {
+                    const val = v || '';
+                    if (val.startsWith('cli-')) {
+                      setRouteChatThroughCli('enabled');
+                      if (val === 'cli-auto') setCliCommandTemplate('auto');
+                      else if (val === 'cli-claude') setCliCommandTemplate('claude "{prompt}"');
+                      else if (val === 'cli-agy') setCliCommandTemplate('agy chat "{prompt}"');
+                      else if (val === 'cli-copilot') setCliCommandTemplate('copilot explain "{prompt}"');
+                    } else {
+                      setRouteChatThroughCli('disabled');
+                      setCustomModel(val);
+                    }
+                    setTimeout(saveSettings, 0);
+                  }}
+                >
                   <SelectTrigger className="flex-1 w-full rounded-lg text-xs">
                     <SelectValue placeholder="Select a model..." />
                   </SelectTrigger>
                   <SelectContent className="rounded-lg">
-                    {customModels.map(m => <SelectItem key={m} value={m}>{m}</SelectItem>)}
-                    {!customModels.includes(customModel) && customModel && <SelectItem value={customModel}>{customModel}</SelectItem>}
+                    {customModels.length > 0 && customModels.map(m => <SelectItem key={m} value={m}>{m}</SelectItem>)}
+                    {!customModels.includes(customModel) && customModel && routeChatThroughCli === 'disabled' && <SelectItem value={customModel}>{customModel}</SelectItem>}
+                    
+                    {availableClis.length > 0 && (
+                      <>
+                        <div className="h-px bg-border my-1" />
+                        <SelectItem value="cli-auto">⚡ Local CLI (Smart Auto-Select)</SelectItem>
+                        {availableClis.includes('claude') && <SelectItem value="cli-claude">⚡ Local CLI (Claude)</SelectItem>}
+                        {availableClis.includes('agy') && <SelectItem value="cli-agy">⚡ Local CLI (Antigravity)</SelectItem>}
+                        {availableClis.includes('copilot') && <SelectItem value="cli-copilot">⚡ Local CLI (GitHub Copilot)</SelectItem>}
+                      </>
+                    )}
                   </SelectContent>
                 </Select>
               ) : (
@@ -727,7 +847,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
             </div>
 
             {/* Health status for servers with a health endpoint */}
-            {server.healthUrl && (
+            {server.healthUrl && server.enabled && (
               <div className="text-[10px] font-mono flex items-center gap-1.5 mt-1.5 mb-1">
                 {mcpHealth[server.id] === undefined ? (
                   <>
@@ -912,17 +1032,104 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           )}
 
           {authed && (
-            <div className="space-y-1.5 pt-2">
-              <label className="text-xs font-medium">Sync Folder Name</label>
-              <Input
-                type="text"
-                value={folderName}
-                onChange={e => setFolderName(e.target.value)}
-                onBlur={saveSettings}
-                className="rounded-lg text-xs"
-              />
+            <div className="space-y-3 pt-2">
+              <div className="space-y-1.5">
+                <label className="text-xs font-medium">Sync Folder Name</label>
+                <Input
+                  type="text"
+                  value={folderName}
+                  onChange={e => setFolderName(e.target.value)}
+                  onBlur={saveSettings}
+                  className="rounded-lg text-xs"
+                />
+              </div>
+
+              <div className="flex items-center justify-between pt-1">
+                <span className="text-xs text-muted-foreground">Sync raw research sources</span>
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={syncResearchSources}
+                  onClick={() => {
+                    setSyncResearchSources(!syncResearchSources);
+                    setTimeout(saveSettings, 50);
+                  }}
+                  className={`shrink-0 w-10 h-5 border rounded-full transition-colors relative ${syncResearchSources ? 'bg-primary border-primary' : 'bg-muted border-border'}`}
+                >
+                  <span className={`absolute top-0.5 w-3 h-3 rounded-full bg-background transition-all ${syncResearchSources ? 'right-0.5' : 'left-0.5'}`} />
+                </button>
+              </div>
+
+              <Button
+                variant="outline"
+                size="sm"
+                className="w-full rounded-lg font-medium text-xs mt-1"
+                onClick={forceResync}
+              >
+                Force Resync All
+              </Button>
             </div>
           )}
+      </Section>
+
+      {/* ── Terminal CLI Chat Gateway ── */}
+      <Section id="cli-chat-gateway" title="Terminal CLI Chat Gateway" subtitle="Route chat queries directly through a local terminal CLI (e.g. claude, agy, or copilot).">
+        <div className="space-y-1.5">
+          <label className="text-xs font-medium">CLI Chat Routing Mode</label>
+          <Select
+            value={routeChatThroughCli}
+            onValueChange={v => {
+              if (v) setRouteChatThroughCli(v);
+              setTimeout(saveSettings, 50);
+            }}
+          >
+            <SelectTrigger className="rounded-lg text-xs">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="disabled">Disabled (Use Custom Model)</SelectItem>
+              <SelectItem value="enabled">Always Route to Local CLI</SelectItem>
+              <SelectItem value="auto">Auto (CLI if reachable, else Fallback)</SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
+
+        {routeChatThroughCli !== 'disabled' && (
+          <div className="space-y-3 pt-1.5">
+            <div className="space-y-1.5">
+              <label className="text-xs font-medium">Local MCP Companion URL</label>
+              <Input
+                type="text"
+                value={localMcpCompanionUrl}
+                onChange={e => setLocalMcpCompanionUrl(e.target.value)}
+                onBlur={saveSettings}
+                placeholder="http://localhost:3920/mcp"
+                className="rounded-lg text-xs"
+              />
+              <p className="text-[10px] text-muted-foreground leading-normal font-sans">
+                Connection URL to your running companion server (e.g. click <button type="button" className="font-mono text-primary hover:underline cursor-pointer bg-transparent border-0 p-0" onClick={() => { setLocalMcpCompanionUrl('http://localhost:3920/mcp'); setTimeout(saveSettings, 50); }}>http://localhost:3920/mcp</button> to apply, or enter your Traefik gateway).
+              </p>
+            </div>
+
+            <div className="space-y-1.5">
+              <label className="text-xs font-medium">CLI Command Template</label>
+              <Input
+                type="text"
+                value={cliCommandTemplate}
+                onChange={e => setCliCommandTemplate(e.target.value)}
+                onBlur={saveSettings}
+                placeholder='claude "{prompt}"'
+                className="rounded-lg text-xs select-all"
+              />
+              <p className="text-[10px] text-muted-foreground leading-normal font-sans">
+                Use <code className="font-mono select-all bg-muted/60 px-1 rounded">{`{prompt}`}</code> as placeholder. Click an example to apply it:<br />
+                • <button type="button" className="font-mono select-all hover:underline hover:text-foreground cursor-pointer bg-muted/60 px-1 rounded text-left border-0 p-0 m-0" onClick={() => { setCliCommandTemplate('claude "{prompt}"'); setTimeout(saveSettings, 50); }}>claude "{`{prompt}`}"</button><br />
+                • <button type="button" className="font-mono select-all hover:underline hover:text-foreground cursor-pointer bg-muted/60 px-1 rounded text-left border-0 p-0 m-0" onClick={() => { setCliCommandTemplate('agy chat "{prompt}"'); setTimeout(saveSettings, 50); }}>agy chat "{`{prompt}`}"</button><br />
+                • <button type="button" className="font-mono select-all hover:underline hover:text-foreground cursor-pointer bg-muted/60 px-1 rounded text-left border-0 p-0 m-0" onClick={() => { setCliCommandTemplate('copilot explain "{prompt}"'); setTimeout(saveSettings, 50); }}>copilot explain "{`{prompt}`}"</button>
+              </p>
+            </div>
+          </div>
+        )}
       </Section>
 
     </div>

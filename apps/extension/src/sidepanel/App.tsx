@@ -143,6 +143,10 @@ export default function App() {
   const [visionModel, setVisionModel] = useState('');
   const [customModels, setCustomModels] = useState<string[]>([]);
   const [folderName, setFolderName] = useState('Magpie');
+  const [syncResearchSources, setSyncResearchSources] = useState(false);
+  const [routeChatThroughCli, setRouteChatThroughCli] = useState<string>('disabled');
+  const [cliCommandTemplate, setCliCommandTemplate] = useState('auto');
+  const [localMcpCompanionUrl, setLocalMcpCompanionUrl] = useState('http://localhost:3920/mcp');
 
 // Brand import moved to top level removed here due to top-level import restriction
   const [autoLinkCaptures, setAutoLinkCaptures] = useState(true);
@@ -1017,7 +1021,7 @@ export default function App() {
   const loadSettings = () => {
     if (typeof chrome !== 'undefined' && chrome.storage) {
       chrome.storage.local.get(
-        ['driveFolderName', 'customUrl', 'customKey', 'customModel', 'visionModel', 'autoLinkCaptures', 'includePageContext'],
+        ['driveFolderName', 'customUrl', 'customKey', 'customModel', 'visionModel', 'autoLinkCaptures', 'includePageContext', 'syncResearchSources', 'routeChatThroughCli', 'cliCommandTemplate', 'localMcpCompanionUrl'],
         (r) => {
           if (r.driveFolderName) setFolderName(r.driveFolderName);
           if (r.customUrl) setCustomUrl(r.customUrl);
@@ -1026,6 +1030,14 @@ export default function App() {
           if (r.visionModel) setVisionModel(r.visionModel);
           setAutoLinkCaptures(r.autoLinkCaptures !== false); // default ON
           setIncludePageContext(r.includePageContext === true); // default OFF
+          setSyncResearchSources(r.syncResearchSources === true); // default OFF
+          if (typeof r.routeChatThroughCli === 'boolean') {
+            setRouteChatThroughCli(r.routeChatThroughCli ? 'enabled' : 'disabled');
+          } else if (r.routeChatThroughCli) {
+            setRouteChatThroughCli(r.routeChatThroughCli);
+          }
+          if (r.cliCommandTemplate) setCliCommandTemplate(r.cliCommandTemplate);
+          if (r.localMcpCompanionUrl) setLocalMcpCompanionUrl(r.localMcpCompanionUrl);
         }
       );
     }
@@ -1296,6 +1308,24 @@ export default function App() {
     }
   };
 
+  const forceResync = async () => {
+    setSyncing(true);
+    const resetRes = await msg('RESET_SYNC_STATUS');
+    if (!resetRes.success) {
+      setSyncing(false);
+      showToast('error', (resetRes.error as string) || 'Reset failed');
+      return;
+    }
+    const res = await msg('SYNC_TO_DRIVE');
+    setSyncing(false);
+    if (res.success) {
+      showToast('success', `✓ Resynced ${res.synced}/${res.total} documents to Drive`);
+      loadDocuments(activeProjectId);
+    } else {
+      showToast('error', (res.error as string) || 'Sync failed');
+    }
+  };
+
   const importFromDrive = async () => {
     setSyncing(true);
     const res = await msg('IMPORT_FROM_DRIVE');
@@ -1317,7 +1347,11 @@ export default function App() {
         customModel,
         visionModel,
         autoLinkCaptures,
-        includePageContext   // was missing — ensure full state is persisted
+        includePageContext,   // was missing — ensure full state is persisted
+        syncResearchSources,
+        routeChatThroughCli,
+        cliCommandTemplate,
+        localMcpCompanionUrl
       }, () => {
         // Silently save settings without toast
       });
@@ -2063,6 +2097,35 @@ export default function App() {
                 }
               }}
               saveSettings={saveSettings}
+              syncResearchSources={syncResearchSources}
+              setSyncResearchSources={(v) => {
+                setSyncResearchSources(v);
+                if (typeof chrome !== 'undefined' && chrome.storage) {
+                  chrome.storage.local.set({ syncResearchSources: v });
+                }
+              }}
+              forceResync={forceResync}
+              routeChatThroughCli={routeChatThroughCli}
+              setRouteChatThroughCli={(v) => {
+                setRouteChatThroughCli(v);
+                if (typeof chrome !== 'undefined' && chrome.storage) {
+                  chrome.storage.local.set({ routeChatThroughCli: v });
+                }
+              }}
+              cliCommandTemplate={cliCommandTemplate}
+              setCliCommandTemplate={(v) => {
+                setCliCommandTemplate(v);
+                if (typeof chrome !== 'undefined' && chrome.storage) {
+                  chrome.storage.local.set({ cliCommandTemplate: v });
+                }
+              }}
+              localMcpCompanionUrl={localMcpCompanionUrl}
+              setLocalMcpCompanionUrl={(v) => {
+                setLocalMcpCompanionUrl(v);
+                if (typeof chrome !== 'undefined' && chrome.storage) {
+                  chrome.storage.local.set({ localMcpCompanionUrl: v });
+                }
+              }}
               workspaceName={projects.find(p => p.id === activeProjectId)?.title || 'this workspace'}
               workspaceRules={projects.find(p => p.id === activeProjectId)?.rules || ''}
               saveWorkspaceRules={async (rules: string) => {

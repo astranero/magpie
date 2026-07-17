@@ -1227,7 +1227,7 @@ async function recoverViaDoi(doi: string, url: string, signal?: AbortSignal): Pr
       const arxivId = extractArxivId(oa.pdfUrl);
       const body = arxivId
         ? await fetchArxivFullText(arxivId, signal)
-        : await pdfUrlToBody(oa.pdfUrl);
+        : await pdfUrlToBody(oa.pdfUrl, undefined, true);
       if (body && body.trim().length > 400) {
         crumb('scrape', 'oa recovered', { doi, host: oa.pdfUrl.slice(0, 60) });
         const title = oa.title || body.match(/^#\s*(.+)$/m)?.[1]?.trim() || url;
@@ -1324,7 +1324,7 @@ async function fetchArxivFullText(
   const pdfUrl = `https://arxiv.org/pdf/${arxivId}`;
   try {
     if (signal?.aborted) throw new Error('AbortError');
-    const body = await pdfUrlToBody(pdfUrl);
+    const body = await pdfUrlToBody(pdfUrl, undefined, true);
     const textOnly = body.replace(/## Page \d+\n\n\*\(no extractable text\)\*/g, '').trim();
     if (textOnly.length < 100) return null;
 

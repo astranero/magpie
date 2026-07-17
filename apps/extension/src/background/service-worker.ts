@@ -8,7 +8,7 @@ import {
   saveDocument, listDocuments, updateDocumentSync,
   getUnsyncedDocuments, getChatHistory, clearChatHistory, saveChatMessage,
   linkDocumentToProject, getProject,
-  getChunkByAnchor, deleteOrphanDocuments
+  getChunkByAnchor, deleteOrphanDocuments, resetSyncStatus
 } from '../lib/db';
 import { chunkDocument, makeDocShortId } from '../lib/chunker';
 import { buildCitationContext, CITATION_SYSTEM_PROMPT, parseResponseCitations } from '../lib/citations';
@@ -233,6 +233,12 @@ chrome.runtime.onInstalled.addListener(async () => {
 
   // Create workspace two-way sync alarm (every 5 minutes)
   chrome.alarms.create('sync-workspace', { periodInMinutes: 5 });
+
+  // Migrate old brand folder name to Magpie
+  const storage = await chrome.storage.local.get(['driveFolderName']);
+  if (storage.driveFolderName === 'AI Research Assistant') {
+    await chrome.storage.local.set({ driveFolderName: 'Magpie' });
+  }
 });
 
 // Setup alarm checks on startup to be safe
@@ -248,6 +254,13 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
     // The service worker can never hold 'granted' file permissions — tell the
     // sidepanel to do the write instead via BroadcastChannel.
     notifySidepanelSync();
+
+    // Auto sync to Drive in the background (silent and robust)
+    try {
+      await handleSyncToDrive();
+    } catch {
+      // Not authenticated or offline
+    }
   }
 });
 
@@ -511,6 +524,10 @@ const messageHandlers: Record<string, MessageHandler> = {
   GET_OAUTH_TOKEN_SILENT: (_r) => getToken(false).then(token => ({ token })),
   CLEAR_OAUTH_TOKEN: () => clearToken().then(() => ({})),
   SYNC_TO_DRIVE: handleSyncToDrive,
+  RESET_SYNC_STATUS: async () => {
+    const resetCount = await resetSyncStatus();
+    return { resetCount };
+  },
   IMPORT_FROM_DRIVE: handleImportFromDrive,
   LIST_DRIVE_FILES: handleListDriveFiles,
 
@@ -876,6 +893,9 @@ async function captureTab(tab: chrome.tabs.Tab, explicitProjectId: string | null
     await addChunksToVectorStore(linkTarget, savedChunks);
   }
 
+  // Auto sync to Drive in the background
+  handleSyncToDrive().catch(() => {});
+
   return { docId, title: scraped.title, chunkCount: chunks.length, linkedTo: linkTarget };
 }
 
@@ -925,6 +945,9 @@ async function handleImportLocalMd(request: Record<string, unknown>): Promise<Re
       errors.push(`${file.name}: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
+
+  // Auto sync to Drive in the background
+  handleSyncToDrive().catch(() => {});
 
   return { imported, total: files.length, errors };
 }
@@ -1085,6 +1108,7 @@ async function handleImportLocalPdf(request: Record<string, unknown>): Promise<R
     // Final notification
     notifyImportProgress({ type: 'pdf-complete', imported, total: files.length, errors });
     notifySidepanelSync();
+    handleSyncToDrive().catch(() => {});
   };
 
   // Fire and forget — don't await
@@ -1154,6 +1178,7 @@ async function handleImportLocalImages(request: Record<string, unknown>): Promis
     }
     notifyImportProgress({ type: 'image-complete', imported, total: files.length, errors });
     notifySidepanelSync();
+    handleSyncToDrive().catch(() => {});
   };
 
   processAsync().catch(err => console.error('Async image import failed:', err));
@@ -2135,6 +2160,46 @@ Rules:
     .filter((line: string) => line.length > 3 && line.length < 100)
     .slice(0, 3);
 }
+async function resolveCliCommand(cmdTemplate: string, companionUrl: string, prompt: string): Promise<string> {
+  let template = cmdTemplate;
+  if (cmdTemplate === 'auto') {
+    try {
+      const res = await fetch(companionUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          jsonrpc: '2.0',
+          id: Date.now(),
+          method: 'tools/call',
+          params: {
+            name: 'execute_command',
+            arguments: { command: 'which claude || which agy || which copilot || which gh' }
+          }
+        })
+      });
+      if (res.ok) {
+        const data = await res.json();
+        const path = data.result?.content?.[0]?.text || '';
+        if (path.includes('claude')) {
+          template = 'claude "{prompt}"';
+        } else if (path.includes('agy')) {
+          template = 'agy chat "{prompt}"';
+        } else if (path.includes('copilot') || path.includes('gh')) {
+          template = 'copilot explain "{prompt}"';
+        } else {
+          throw new Error('No supported CLI found on PATH (claude, agy, copilot).');
+        }
+      } else {
+        throw new Error('Local companion probe failed.');
+      }
+    } catch (e: any) {
+      throw new Error(`Auto CLI detection failed: ${e.message || String(e)}`);
+    }
+  }
+  const escapedPrompt = prompt.replace(/"/g, '\\"').replace(/\n/g, ' ');
+  return template.replace('{prompt}', escapedPrompt);
+}
+
 
 async function handleChat(request: Record<string, unknown>): Promise<Record<string, unknown>> {
   const prompt = request.prompt as string;
@@ -2162,8 +2227,59 @@ async function handleChat(request: Record<string, unknown>): Promise<Record<stri
       provider: 'custom'
     });
 
-    const reply = await chatWithCustom(systemPrompt, formattedHistory, prompt, signal)
-      + linkedPagesFooter(linkedPages);
+    const storage = await chrome.storage.local.get(['routeChatThroughCli', 'cliCommandTemplate', 'localMcpCompanionUrl']);
+    const routeChat = storage.routeChatThroughCli;
+    const cmdTemplate = storage.cliCommandTemplate || 'claude "{prompt}"';
+    const companionUrl = storage.localMcpCompanionUrl || 'http://localhost:3920/mcp';
+
+    let useCli = false;
+    if (routeChat === 'enabled' || routeChat === true) {
+      useCli = true;
+    } else if (routeChat === 'auto') {
+      try {
+        const healthUrl = companionUrl.replace(/\/mcp\/?$/, '/health');
+        const probe = await fetch(healthUrl, { method: 'GET', signal: AbortSignal.timeout(1000) });
+        if (probe.ok) {
+          useCli = true;
+        }
+      } catch {
+        useCli = false;
+      }
+    }
+
+    let reply = '';
+    let cliSuccess = false;
+
+    if (useCli) {
+      try {
+        const command = await resolveCliCommand(cmdTemplate, companionUrl, prompt);
+        const res = await fetch(companionUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            jsonrpc: '2.0',
+            id: Date.now(),
+            method: 'tools/call',
+            params: {
+              name: 'execute_command',
+              arguments: { command }
+            }
+          })
+        });
+        if (!res.ok) throw new Error(`HTTP error ${res.status}`);
+        const data = await res.json();
+        if (data.error) throw new Error(data.error.message || 'JSON-RPC error');
+        reply = data.result?.content?.[0]?.text || '';
+        cliSuccess = true;
+      } catch {
+        // fallback
+      }
+    }
+
+    if (!cliSuccess) {
+      reply = await chatWithCustom(systemPrompt, formattedHistory, prompt, signal)
+        + linkedPagesFooter(linkedPages);
+    }
 
     await saveChatMessage({
       chatId,
@@ -2261,7 +2377,68 @@ chrome.runtime.onConnect.addListener((port) => {
       // then CHAT_DELTA broadcasts stream the answer, CHAT_STATE:false ends it.
       chrome.runtime.sendMessage({ action: 'CHAT_STATE', chatId, projectId, generating: true, prompt }).catch(() => {});
 
-      await chatWithCustomStream(systemPrompt, formattedHistory, prompt, localController.signal, emitDelta);
+      // Check if routing chat through CLI is enabled
+      const storage = await chrome.storage.local.get(['routeChatThroughCli', 'cliCommandTemplate', 'localMcpCompanionUrl']);
+      const routeChat = storage.routeChatThroughCli;
+      const cmdTemplate = storage.cliCommandTemplate || 'claude "{prompt}"';
+      const companionUrl = storage.localMcpCompanionUrl || 'http://localhost:3920/mcp';
+
+      let useCli = false;
+      if (routeChat === 'enabled' || routeChat === true) {
+        useCli = true;
+      } else if (routeChat === 'auto') {
+        try {
+          const healthUrl = companionUrl.replace(/\/mcp\/?$/, '/health');
+          const probe = await fetch(healthUrl, { method: 'GET', signal: AbortSignal.timeout(1000) });
+          if (probe.ok) {
+            useCli = true;
+          }
+        } catch {
+          useCli = false;
+        }
+      }
+
+      let cliSuccess = false;
+      if (useCli) {
+        safePost({ type: 'STATUS', text: 'Executing local CLI command…' });
+        try {
+          const command = await resolveCliCommand(cmdTemplate, companionUrl, prompt);
+          const res = await fetch(companionUrl, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              jsonrpc: '2.0',
+              id: Date.now(),
+              method: 'tools/call',
+              params: {
+                name: 'execute_command',
+                arguments: { command }
+              }
+            })
+          });
+          if (!res.ok) throw new Error(`HTTP error ${res.status}`);
+          const data = await res.json();
+          if (data.error) throw new Error(data.error.message || 'JSON-RPC error');
+          const outputText = data.result?.content?.[0]?.text;
+          if (outputText === undefined) throw new Error('No output from CLI');
+
+          // Simulate streaming back word by word
+          const words = outputText.split(/(\s+)/);
+          for (const word of words) {
+            if (localController.signal.aborted) break;
+            emitDelta(word);
+            await new Promise(r => setTimeout(r, 6));
+          }
+          cliSuccess = true;
+        } catch (e: any) {
+          safePost({ type: 'STATUS', text: `CLI failed: ${e.message || String(e)}. Falling back to standard LLM…` });
+          await new Promise(r => setTimeout(r, 1200));
+        }
+      }
+
+      if (!cliSuccess) {
+        await chatWithCustomStream(systemPrompt, formattedHistory, prompt, localController.signal, emitDelta);
+      }
 
       // RELIABLE NET: the score gate can still let a workspace-grounded turn
       // reach a refusal (reranker unavailable, or a keyword chunk that squeaks
@@ -2404,19 +2581,25 @@ async function handlePreviewDeepResearch(request: Record<string, unknown>): Prom
   const { projectId, topic, chatId } = request;
   if (!projectId || !topic) throw new Error('projectId and topic are required');
 
-  const previewSignal = AbortSignal.timeout(5000);
-  const chatFn = (s: string, u: string) => chatWithCustom(s, [], u, previewSignal);
-
   // Resolve conversational references into a standalone topic
   let effectiveTopic = topic as string;
   try {
+    const topicSignal = AbortSignal.timeout(15000);
+    const chatFn = (s: string, u: string) => chatWithCustom(s, [], u, topicSignal);
     effectiveTopic = await resolveResearchTopic(topic as string, chatId as string | undefined, projectId as string, chatFn);
   } catch {
     // fallback to raw topic
   }
 
   // Generate research directives for user review
-  const subQuestions = await generateSubQuestions(effectiveTopic, chatFn).catch(() => [] as string[]);
+  let subQuestions: string[] = [];
+  try {
+    const planSignal = AbortSignal.timeout(15000);
+    const chatFn = (s: string, u: string) => chatWithCustom(s, [], u, planSignal);
+    subQuestions = await generateSubQuestions(effectiveTopic, chatFn);
+  } catch {
+    // fallback
+  }
 
   // Shape of the run, so the plan card can show the pipeline + a time
   // expectation: quick = one gather pass; deep = N staged rounds by depth.
@@ -2857,6 +3040,8 @@ async function executeResearch({ projectId, chatId, topic, effectiveTopic, mode,
     notifySidepanelSync();
     // This run is done + the job cleared — start the next queued research, if any.
     scheduleQueueDrain();
+    // Auto sync to Drive in the background
+    handleSyncToDrive().catch(() => {});
   }
 }
 

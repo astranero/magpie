@@ -231,8 +231,8 @@ function base64ToUint8Array(b64: string): Uint8Array {
  * no text (scanned pages), render the page to a PNG data URL so the caller can
  * OCR it with a vision model — vision is only a fallback.
  */
-async function parsePdf(base64: string): Promise<{ pages: string[]; imagePages: { index: number; dataUrl: string }[] }> {
-  return parsePdfData(base64ToUint8Array(base64));
+async function parsePdf(base64: string, silent?: boolean): Promise<{ pages: string[]; imagePages: { index: number; dataUrl: string }[] }> {
+  return parsePdfData(base64ToUint8Array(base64), silent);
 }
 
 /**
@@ -241,13 +241,13 @@ async function parsePdf(base64: string): Promise<{ pages: string[]; imagePages: 
  * boundary, which is what let large books crash the renderer. Deletes the
  * OPFS temp file when done (success or failure).
  */
-async function parsePdfOpfs(opfsName: string): Promise<{ pages: string[]; imagePages: { index: number; dataUrl: string }[] }> {
+async function parsePdfOpfs(opfsName: string, silent?: boolean): Promise<{ pages: string[]; imagePages: { index: number; dataUrl: string }[] }> {
   const root = await navigator.storage.getDirectory();
   try {
     const fh = await root.getFileHandle(opfsName);
     const file = await fh.getFile();
     const buf = await file.arrayBuffer();
-    return await parsePdfData(new Uint8Array(buf));
+    return await parsePdfData(new Uint8Array(buf), silent);
   } finally {
     await root.removeEntry(opfsName).catch(() => {});
   }
@@ -265,7 +265,7 @@ async function parsePdfOpfs(opfsName: string): Promise<{ pages: string[]; imageP
 // (the run continues with its other sources) rather than risk the whole process.
 const MAX_PDF_URL_MB = 50;
 
-async function parsePdfUrl(url: string): Promise<{ pages: string[]; imagePages: { index: number; dataUrl: string }[]; bytes: number }> {
+async function parsePdfUrl(url: string, silent?: boolean): Promise<{ pages: string[]; imagePages: { index: number; dataUrl: string }[]; bytes: number }> {
   let sizeMb = 0;
   try {
     const head = await fetch(url, { method: 'HEAD', redirect: 'follow' });
@@ -283,16 +283,17 @@ async function parsePdfUrl(url: string): Promise<{ pages: string[]; imagePages: 
   if (buf.byteLength > MAX_PDF_URL_MB * 1024 * 1024) {
     throw new Error(`PDF too large to parse safely (${Math.round(buf.byteLength / 1024 / 1024)} MB)`);
   }
-  const parsed = await parsePdfData(new Uint8Array(buf));
+  const parsed = await parsePdfData(new Uint8Array(buf), silent);
   return { ...parsed, bytes: buf.byteLength };
 }
 
 const MAX_PDF_PAGES = 800;
 
-async function parsePdfData(data: Uint8Array): Promise<{ pages: string[]; imagePages: { index: number; dataUrl: string }[] }> {
+async function parsePdfData(data: Uint8Array, silent?: boolean): Promise<{ pages: string[]; imagePages: { index: number; dataUrl: string }[] }> {
   // Per-page progress so a long parse is observably alive (not a dead
   // "parsing…"), and so a stall pinpoints where it hangs.
   const postProgress = (pg: number, totalPages: number) => {
+    if (silent) return;
     try {
       const ch = new BroadcastChannel('ai_research_assistant_import');
       ch.postMessage({ type: 'pdf-page', page: pg, totalPages });
@@ -412,21 +413,21 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
   lastActivity = Date.now();
   if (request?.action === 'OFFSCREEN_PARSE_PDF') {
     crumb('offscreen', 'pdf parse (base64) start', { base64Mb: Math.round((request.base64 as string || '').length / 1.33 / 1024 / 1024) });
-    parsePdf(request.base64 as string)
+    parsePdf(request.base64 as string, !!request.silent)
       .then(result => sendResponse({ ok: true, ...result }))
       .catch(err => sendResponse({ ok: false, error: err instanceof Error ? err.message : String(err) }));
     return true;
   }
 
   if (request?.action === 'OFFSCREEN_PARSE_PDF_URL') {
-    parsePdfUrl(request.url as string)
+    parsePdfUrl(request.url as string, !!request.silent)
       .then(result => sendResponse({ ok: true, ...result }))
       .catch(err => sendResponse({ ok: false, error: err instanceof Error ? err.message : String(err) }));
     return true;
   }
 
   if (request?.action === 'OFFSCREEN_PARSE_PDF_OPFS') {
-    parsePdfOpfs(request.opfsName as string)
+    parsePdfOpfs(request.opfsName as string, !!request.silent)
       .then(result => sendResponse({ ok: true, ...result }))
       .catch(err => sendResponse({ ok: false, error: err instanceof Error ? err.message : String(err) }));
     return true;

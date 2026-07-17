@@ -111,7 +111,8 @@ export async function ensureOffscreen(): Promise<void> {
  */
 export async function pdfBase64ToBody(
   base64: string,
-  ocrFn?: (dataUrl: string, instruction: string) => Promise<string>
+  ocrFn?: (dataUrl: string, instruction: string) => Promise<string>,
+  silent = false
 ): Promise<string> {
   // Guard against the sendMessage payload cap (~64 MB). base64 is ~1.33× the
   // byte size; anything near the cap must go through the URL path instead.
@@ -127,7 +128,7 @@ export async function pdfBase64ToBody(
     // doc must not hang the import forever.
     const approxMb = base64.length / 1.33 / 1024 / 1024;
     const timeoutMs = Math.min(25 * 60 * 1000, Math.max(8 * 60 * 1000, Math.round(approxMb) * 60 * 1000));
-    res = await sendToOffscreen({ action: 'OFFSCREEN_PARSE_PDF', base64 }, timeoutMs);
+    res = await sendToOffscreen({ action: 'OFFSCREEN_PARSE_PDF', base64, silent }, timeoutMs);
   } catch (e: any) {
     throw new Error(`PDF transfer failed (likely too large, ~${Math.round(base64.length / 1.33 / 1024 / 1024)} MB): ${e.message}`);
   }
@@ -144,11 +145,12 @@ export async function pdfBase64ToBody(
 export async function pdfOpfsToBody(
   opfsName: string,
   sizeBytes: number,
-  ocrFn?: (dataUrl: string, instruction: string) => Promise<string>
+  ocrFn?: (dataUrl: string, instruction: string) => Promise<string>,
+  silent = false
 ): Promise<string> {
   const approxMb = sizeBytes / 1024 / 1024;
   const timeoutMs = Math.min(25 * 60 * 1000, Math.max(8 * 60 * 1000, Math.round(approxMb) * 60 * 1000));
-  const res: any = await sendToOffscreen({ action: 'OFFSCREEN_PARSE_PDF_OPFS', opfsName }, timeoutMs);
+  const res: any = await sendToOffscreen({ action: 'OFFSCREEN_PARSE_PDF_OPFS', opfsName, silent }, timeoutMs);
   if (!res?.ok) throw new Error(res?.error || 'PDF parse failed');
   return assemblePdfBody(res, ocrFn);
 }
@@ -160,11 +162,12 @@ export async function pdfOpfsToBody(
  */
 export async function pdfUrlToBody(
   url: string,
-  ocrFn?: (dataUrl: string, instruction: string) => Promise<string>
+  ocrFn?: (dataUrl: string, instruction: string) => Promise<string>,
+  silent = false
 ): Promise<string> {
   // Offscreen fetch is itself capped at 5 min (size-scaled) + parse time —
   // give the round-trip 8 min before declaring the offscreen doc wedged.
-  const res: any = await sendToOffscreen({ action: 'OFFSCREEN_PARSE_PDF_URL', url }, 8 * 60 * 1000);
+  const res: any = await sendToOffscreen({ action: 'OFFSCREEN_PARSE_PDF_URL', url, silent }, 8 * 60 * 1000);
   if (!res?.ok) throw new Error(res?.error || 'PDF parse failed');
   return assemblePdfBody(res, ocrFn);
 }

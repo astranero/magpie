@@ -898,10 +898,9 @@ export async function clearChatHistory(chatId: string): Promise<void> {
 
 export async function getUnsyncedDocuments(): Promise<StoredDocument[]> {
   const docs = await listDocuments();
-  // Machine-gathered research sources (30-150 per deep run) stay in the local
-  // library where citations resolve against them; they'd only clutter Drive.
-  // The report + consolidated sources list still sync.
-  return docs.filter(d => !d.syncedToDrive && !contentHasTag(d.content || '', 'research-source'));
+  const s = await chrome.storage.local.get(['syncResearchSources']);
+  const syncAll = !!s.syncResearchSources;
+  return docs.filter(d => !d.syncedToDrive && (syncAll || !contentHasTag(d.content || '', 'research-source')));
 }
 
 export async function getDocumentWithChunks(docId: string): Promise<{
@@ -912,4 +911,35 @@ export async function getDocumentWithChunks(docId: string): Promise<{
   if (!doc) return undefined;
   const chunks = await getChunksForDoc(docId);
   return { doc, chunks };
+}
+
+export async function resetSyncStatus(): Promise<number> {
+  const db = await openDB();
+  const transaction = tx(db, 'documents', 'readwrite');
+  const store = transaction.objectStore('documents');
+  let resetCount = 0;
+
+  await new Promise<void>((resolve, reject) => {
+    const req = store.openCursor();
+    req.onsuccess = (ev) => {
+      const cursor = (ev.target as any).result;
+      if (cursor) {
+        const doc = cursor.value;
+        if (doc.syncedToDrive || doc.driveFileId) {
+          doc.syncedToDrive = false;
+          doc.driveFileId = undefined;
+          cursor.update(doc);
+          resetCount++;
+        }
+        cursor.continue();
+      } else {
+        resolve();
+      }
+    };
+    req.onerror = () => reject(req.error);
+  });
+
+  await txComplete(transaction);
+  notifySync();
+  return resetCount;
 }
