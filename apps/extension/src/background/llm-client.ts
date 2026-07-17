@@ -29,7 +29,10 @@ export async function getProviderSettings(): Promise<Record<string, string>> {
 async function builtinGeminiSession(systemPrompt: string): Promise<any> {
   const LM: any = (globalThis as any).LanguageModel;
   if (!LM?.create) throw new Error('Built-in Gemini is not available in this Chrome. Set an API endpoint in Settings.');
-  return LM.create({ initialPrompts: [{ role: 'system', content: systemPrompt }] });
+  return LM.create({
+    expectedOutputs: [{ type: 'text', languages: ['en'] }],
+    initialPrompts: [{ role: 'system', content: systemPrompt }]
+  });
 }
 
 function builtinPrompt(history: any[], userPrompt: string): string {

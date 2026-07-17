@@ -49,7 +49,7 @@ export async function detectBuiltinGemini(): Promise<{ available: boolean; statu
   try {
     const LM: any = (globalThis as any).LanguageModel;
     if (!LM?.availability) return { available: false, status: 'unsupported' };
-    const status = String(await LM.availability());
+    const status = String(await LM.availability({ expectedOutputs: [{ type: 'text', languages: ['en'] }] }));
     return { available: status === 'available' || status === 'downloadable' || status === 'downloading', status };
   } catch {
     return { available: false, status: 'error' };

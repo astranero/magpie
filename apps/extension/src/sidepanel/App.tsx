@@ -1983,9 +1983,19 @@ export default function App() {
               fetchCustomModels={async () => {
                 const res = await msg('FETCH_CUSTOM_MODELS', { url: customUrl, apiKey: customKey });
                 if (res.success) {
-                  setCustomModels(res.models as string[]);
-                  if ((res.models as string[]).length > 0 && !customModel) {
-                    setCustomModel((res.models as string[])[0]);
+                  const models = res.models as string[];
+                  setCustomModels(models);
+                  if (typeof chrome !== 'undefined' && chrome.storage) {
+                    chrome.storage.local.get(['customModel'], (r) => {
+                      const saved = r.customModel || customModel;
+                      if (saved) {
+                        setCustomModel(saved);
+                      } else if (models.length > 0) {
+                        setCustomModel(models[0]);
+                      }
+                    });
+                  } else if (models.length > 0 && !customModel) {
+                    setCustomModel(models[0]);
                   }
                 } else {
                   showToast('error', (res.error as string) || 'Failed to fetch custom models');
@@ -2012,8 +2022,20 @@ export default function App() {
               fetchCustomModels={async () => {
                 const res = await msg('FETCH_CUSTOM_MODELS', { url: customUrl, apiKey: customKey });
                 if (res.success) {
-                  setCustomModels(res.models as string[]);
-                  if ((res.models as string[]).length > 0 && !customModel) setCustomModel((res.models as string[])[0]);
+                  const models = res.models as string[];
+                  setCustomModels(models);
+                  if (typeof chrome !== 'undefined' && chrome.storage) {
+                    chrome.storage.local.get(['customModel'], (r) => {
+                      const saved = r.customModel || customModel;
+                      if (saved) {
+                        setCustomModel(saved);
+                      } else if (models.length > 0) {
+                        setCustomModel(models[0]);
+                      }
+                    });
+                  } else if (models.length > 0 && !customModel) {
+                    setCustomModel(models[0]);
+                  }
                 } else showToast('error', (res.error as string) || 'Failed to fetch custom models');
               }}
               docCount={docCount}

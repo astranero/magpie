@@ -2404,7 +2404,8 @@ async function handlePreviewDeepResearch(request: Record<string, unknown>): Prom
   const { projectId, topic, chatId } = request;
   if (!projectId || !topic) throw new Error('projectId and topic are required');
 
-  const chatFn = (s: string, u: string) => chatWithCustom(s, [], u);
+  const previewSignal = AbortSignal.timeout(5000);
+  const chatFn = (s: string, u: string) => chatWithCustom(s, [], u, previewSignal);
 
   // Resolve conversational references into a standalone topic
   let effectiveTopic = topic as string;

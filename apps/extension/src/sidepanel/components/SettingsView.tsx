@@ -207,29 +207,29 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   return (
     <div className="flex-1 overflow-y-auto no-scrollbar p-4 space-y-6">
       {/* ── Workspace instructions ── */}
-      <Section id="workspace-rules" title="Workspace Instructions" subtitle={`Persistent context for "${workspaceName}" — added to every conversation & research prompt.`}>
+      <Section id="workspace-rules" title="Workspace Instructions" subtitle={`Persistent context for "${workspaceName}" — added to every prompt.`}>
           <textarea
             value={rulesDraft}
             onChange={e => setRulesDraft(e.target.value)}
             onBlur={() => { if (rulesDraft !== workspaceRules) saveWorkspaceRules(rulesDraft); }}
-            placeholder={"Tell Magpie your baseline so you never repeat it, e.g.:\n• Stack: Next.js 14, TypeScript strict, Tailwind\n• Answer terse, code-first, no preamble\n• Prefer pnpm; deploy on Vercel"}
-            rows={5}
+            placeholder={"Tell Magpie your baseline rules (e.g. stack, formatting preferences, coding rules)."}
+            rows={4}
             className="w-full rounded-lg border border-border bg-background px-3 py-2 text-xs leading-relaxed resize-y focus:outline-none focus:ring-2 focus:ring-ring"
           />
           <p className="text-[10px] text-muted-foreground leading-normal">
-            Applies only to this workspace — kept separate from your other workspaces. Saved when you click away.
+            Applies only to this workspace. Saved automatically.
           </p>
       </Section>
 
       {/* ── Custom Provider ── */}
-      <Section id="provider" title="AI Provider Configuration" subtitle="Connect to any OpenAI-compatible API.">
+      <Section id="provider" title="AI Provider Configuration" subtitle="Configure your AI backend.">
           {detected && (detected.ollama.available || detected.builtinGemini.available) && (
-            <div className="rounded-lg border border-primary/30 bg-primary/5 px-3 py-2.5 space-y-2">
-              <div className="text-[11px] font-semibold text-primary">Detected on this machine</div>
+            <div className="rounded-lg border border-primary/20 bg-primary/5 px-3 py-2.5 space-y-2">
+              <div className="text-[10px] font-semibold text-primary uppercase tracking-wider">Detected Local Options</div>
               {detected.ollama.available && (
                 <button
                   type="button"
-                  className="w-full text-left rounded-md border border-border bg-card px-2.5 py-2 text-xs hover:border-primary transition-colors"
+                  className="w-full text-left rounded-md border border-border bg-card px-2.5 py-1.5 text-xs hover:border-primary transition-colors flex flex-col"
                   onClick={() => {
                     const model = pickOllamaModel(detected.ollama.models);
                     setCustomUrl(OLLAMA_OPENAI_URL); setCustomModel(model); setCustomKey('');
@@ -237,25 +237,22 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                   }}
                 >
                   <span className="font-semibold">Use Ollama</span>
-                  <span className="text-muted-foreground"> — fully local{detected.ollama.models.length ? `, ${pickOllamaModel(detected.ollama.models)}` : ''}. No key, nothing leaves this machine.</span>
+                  <span className="text-[10px] text-muted-foreground">Local model {detected.ollama.models.length ? `(${pickOllamaModel(detected.ollama.models)})` : ''} — fully offline.</span>
                 </button>
               )}
               {detected.builtinGemini.available && (
                 <button
                   type="button"
-                  className="w-full text-left rounded-md border border-border bg-card px-2.5 py-2 text-xs hover:border-primary transition-colors"
+                  className="w-full text-left rounded-md border border-border bg-card px-2.5 py-1.5 text-xs hover:border-primary transition-colors flex flex-col"
                   onClick={() => {
                     setCustomUrl(BUILTIN_GEMINI_SENTINEL); setCustomModel('gemini-nano'); setCustomKey('');
                     setTimeout(saveSettings, 0);
                   }}
                 >
-                  <span className="font-semibold">Use Chrome's built-in Gemini</span>
-                  <span className="text-muted-foreground"> — on-device, zero setup. Good for chat; small context (research works better with a key).</span>
+                  <span className="font-semibold">Use Built-in Gemini</span>
+                  <span className="text-[10px] text-muted-foreground">On-device nano model — zero key setup.</span>
                 </button>
               )}
-              <p className="text-[10px] text-muted-foreground font-mono leading-normal">
-                Your own OpenAI-compatible endpoint below is always preferred when set — these are zero-setup local options.
-              </p>
             </div>
           )}
           <div className="space-y-1.5">
@@ -266,7 +263,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
               value={customUrl} 
               onChange={e => setCustomUrl(e.target.value)} 
               onBlur={saveSettings}
-              className="rounded-lg"
+              className="rounded-lg text-xs"
             />
           </div>
           
@@ -278,7 +275,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
               value={customKey} 
               onChange={e => setCustomKey(e.target.value)} 
               onBlur={saveSettings}
-              className="rounded-lg"
+              className="rounded-lg text-xs"
             />
           </div>
 
@@ -287,7 +284,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
             <div className="flex gap-2">
               {customModels.length > 0 ? (
                 <Select value={customModel} onValueChange={v => { setCustomModel(v as string); setTimeout(saveSettings, 0); }}>
-                  <SelectTrigger className="flex-1 w-full rounded-lg">
+                  <SelectTrigger className="flex-1 w-full rounded-lg text-xs">
                     <SelectValue placeholder="Select a model..." />
                   </SelectTrigger>
                   <SelectContent className="rounded-lg">
@@ -302,20 +299,19 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                   value={customModel} 
                   onChange={e => setCustomModel(e.target.value)} 
                   onBlur={saveSettings}
-                  className="rounded-lg"
+                  className="rounded-lg text-xs"
                 />
               )}
-              <Button variant="secondary" onClick={fetchCustomModels} className="rounded-lg font-medium">Fetch</Button>
+              <Button variant="secondary" size="sm" onClick={fetchCustomModels} className="rounded-lg font-medium text-xs">Fetch</Button>
             </div>
           </div>
 
           <div className="space-y-1.5">
             <label className="text-xs font-medium">Vision Model</label>
-            <p className="text-[10px] text-muted-foreground font-mono">Used to read images & scanned PDFs. Leave blank to reuse the text model.</p>
             <div className="flex gap-2">
               {customModels.length > 0 ? (
                 <Select value={visionModel} onValueChange={v => { setVisionModel(v as string); setTimeout(saveSettings, 0); }}>
-                  <SelectTrigger className="flex-1 w-full rounded-lg">
+                  <SelectTrigger className="flex-1 w-full rounded-lg text-xs">
                     <SelectValue placeholder="Select a vision model..." />
                   </SelectTrigger>
                   <SelectContent className="rounded-lg">
@@ -331,21 +327,22 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                   value={visionModel}
                   onChange={e => setVisionModel(e.target.value)}
                   onBlur={saveSettings}
-                  className="rounded-lg"
+                  className="rounded-lg text-xs"
                 />
               )}
-              <Button variant="secondary" onClick={fetchCustomModels} className="rounded-lg font-medium">Fetch</Button>
+              <Button variant="secondary" size="sm" onClick={fetchCustomModels} className="rounded-lg font-medium text-xs">Fetch</Button>
             </div>
+            <p className="text-[10px] text-muted-foreground font-mono">Used for reading images & scanned PDFs (uses text model if blank).</p>
           </div>
       </Section>
 
       {/* ── Capture Behavior ── */}
-      <Section id="capture" title="Capture" subtitle="Where new captures land.">
+      <Section id="capture" title="Capture" subtitle="Configure page clipping settings.">
         <div className="flex items-center justify-between gap-3">
           <div className="min-w-0">
             <span className="text-xs font-medium">Auto-add to active workspace</span>
-            <p className="text-[10px] text-muted-foreground font-mono mt-1 leading-normal">
-              ON: captures are linked to the current workspace. OFF: captures only go to the Global Library — add them to a workspace manually.
+            <p className="text-[10px] text-muted-foreground font-mono mt-0.5 leading-normal">
+              Link new captures to the active workspace automatically.
             </p>
           </div>
           <button
@@ -368,13 +365,13 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
       </Section>
 
       {/* ── Keyboard Shortcuts ── */}
-      <Section id="shortcuts" title="Keyboard Shortcuts" subtitle="Configure keys to trigger assistant features instantly.">
+      <Section id="shortcuts" title="Keyboard Shortcuts" subtitle="Quick access keyboard triggers.">
         <div className="space-y-4">
           <div className="flex items-center justify-between gap-3">
             <div className="min-w-0 flex-1">
               <span className="text-xs font-semibold text-foreground">Toggle Side Panel</span>
-              <p className="text-[10px] text-muted-foreground font-mono mt-1 leading-normal">
-                Default: <kbd className="px-1.5 py-0.5 rounded bg-muted border border-border text-[9px] font-sans font-bold shadow-sm">Alt + M</kbd> (Mac: <kbd className="px-1.5 py-0.5 rounded bg-muted border border-border text-[9px] font-sans font-bold shadow-sm">Option + M</kbd>).
+              <p className="text-[10px] text-muted-foreground font-mono mt-0.5 leading-normal">
+                Press <kbd className="px-1.5 py-0.5 rounded bg-muted border border-border text-[9px] font-sans font-bold shadow-sm">Alt + M</kbd> (Mac: <kbd className="px-1.5 py-0.5 rounded bg-muted border border-border text-[9px] font-sans font-bold shadow-sm">Option + M</kbd>).
               </p>
             </div>
             <Button
@@ -394,8 +391,8 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           <div className="flex items-center justify-between gap-3 pt-3 border-t border-border/40">
             <div className="min-w-0 flex-1">
               <span className="text-xs font-semibold text-foreground">Capture Page Instantly</span>
-              <p className="text-[10px] text-muted-foreground font-mono mt-1 leading-normal">
-                Press <kbd className="px-1.5 py-0.5 rounded bg-muted border border-border text-[9px] font-sans font-bold shadow-sm">Alt + C</kbd> (Mac: <kbd className="px-1.5 py-0.5 rounded bg-muted border border-border text-[9px] font-sans font-bold shadow-sm">Option + C</kbd>) on any page to clip it to your active workspace with an on-page notification.
+              <p className="text-[10px] text-muted-foreground font-mono mt-0.5 leading-normal">
+                Press <kbd className="px-1.5 py-0.5 rounded bg-muted border border-border text-[9px] font-sans font-bold shadow-sm">Alt + C</kbd> (Mac: <kbd className="px-1.5 py-0.5 rounded bg-muted border border-border text-[9px] font-sans font-bold shadow-sm">Option + C</kbd>) on any page to clip it to your workspace with a toast notification.
               </p>
             </div>
           </div>
@@ -403,12 +400,12 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
       </Section>
 
       {/* ── Answering behavior ── */}
-      <Section id="answering" title="Answering" subtitle="When your library has no match.">
+      <Section id="answering" title="Answering" subtitle="Configure response generation sources.">
         <div className="flex items-center justify-between gap-3">
           <div className="min-w-0">
             <span className="text-xs font-medium">Search the web when nothing matches</span>
-            <p className="text-[10px] text-muted-foreground font-mono mt-1 leading-normal">
-              ON: if your workspace and the open page can't answer, chat runs a quick web search (and any enabled search MCPs) and cites what it finds. OFF: it answers from the model's general knowledge instead. Sends the question to a search provider only when it fires.
+            <p className="text-[10px] text-muted-foreground font-mono mt-0.5 leading-normal">
+              Query search engines if your workspace and open page can't answer.
             </p>
           </div>
           <button
@@ -432,8 +429,8 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
         <div className="flex items-start justify-between gap-3">
           <div className="min-w-0">
             <span className="text-xs font-medium">Jina Reader proxy for research scraping</span>
-            <p className="text-[10px] text-muted-foreground font-mono mt-1 leading-normal">
-              ON: research scrapes pages through r.jina.ai (best keyless extraction for JS-heavy pages and PDFs) — that third party sees the URLs you research. OFF: direct fetch + local parsing only; some pages will extract worse or not at all.
+            <p className="text-[10px] text-muted-foreground font-mono mt-0.5 leading-normal">
+              Scrape web content through r.jina.ai for high-quality parser extraction.
             </p>
           </div>
           <button
@@ -457,7 +454,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
         <div className="space-y-1.5">
           <label className="text-xs font-medium">Page context — gathering extra detail</label>
           <Select value={pageCtxStrategy} onValueChange={(v) => { setPageCtxStrategy(v as any); saveResearchSetting({ pageContextStrategy: v }); }}>
-            <SelectTrigger className="w-full rounded-lg">
+            <SelectTrigger className="w-full rounded-lg text-xs">
               <SelectValue />
             </SelectTrigger>
             <SelectContent className="border border-border rounded-lg shadow-card">
@@ -467,7 +464,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
             </SelectContent>
           </Select>
           <p className="text-[10px] text-muted-foreground font-mono leading-normal">
-            When you chat about an open page (a repo, a product site), how the assistant decides which files or sub-pages to open. Semantic is fast and reliable; Router and Agentic reason more but add model calls. Falls back to Semantic if a smarter mode fails.
+            Selection strategy for scanning open page links (semantic is fast; router/agentic analyze more).
           </p>
         </div>
 
@@ -482,14 +479,14 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
             className="w-full rounded-lg border border-border bg-background px-3 py-2 text-xs font-mono"
           />
           <p className="text-[10px] text-muted-foreground font-mono leading-normal">
-            Used for location- or time-dependent questions (weather, “near me”, local info). Leave blank to infer an approximate region from your system timezone{tzGuess ? ` (${tzGuess})` : ''}. Kept on-device; only added to a web query when the question is location-dependent.
+            Used for location-dependent context (weather, time, "near me"). Kept on-device.
           </p>
         </div>
 
         <div className="space-y-1.5">
           <label className="text-xs font-medium">Inference acceleration</label>
           <Select value={inferenceDevice} onValueChange={(v) => { setInferenceDevice(v as any); saveResearchSetting({ inferenceDevice: v }); }}>
-            <SelectTrigger className="w-full rounded-lg">
+            <SelectTrigger className="w-full rounded-lg text-xs">
               <SelectValue />
             </SelectTrigger>
             <SelectContent className="border border-border rounded-lg shadow-card">
@@ -498,7 +495,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
             </SelectContent>
           </Select>
           <p className="text-[10px] text-muted-foreground font-mono leading-normal">
-            How on-device embeddings/re-ranking run. WASM is CPU-bound but memory-stable. WebGPU is faster but its GPU memory can accumulate on a heavy deep-research run and silently crash the extension — pick it only if your runs are small. Applies immediately.
+            ONNX execution device (WebGPU is faster; WASM is memory-stable).
           </p>
         </div>
 
@@ -526,73 +523,73 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           </div>
           {diagStatus && <p className="text-[10px] text-primary font-mono">{diagStatus}</p>}
           <p className="text-[10px] text-muted-foreground font-mono leading-normal">
-            Breadcrumbs of what the extension was doing, persisted so they survive a crash. After a crash, click Copy and share it to pin down the cause. (Also printed to the service-worker console on startup.)
+            Breadcrumbs survive worker restarts. Share after crashes to diagnose.
           </p>
         </div>
       </Section>
 
       {/* ── Research ── */}
-      <Section id="research" title="Research" subtitle="Deep research scale and academic sources.">
+      <Section id="research" title="Research" subtitle="Configure deep research parameters.">
         <div className="space-y-1.5">
           <label className="text-xs font-medium">Research depth</label>
           <Select value={researchDepth} onValueChange={(v) => { setResearchDepth(v as any); saveResearchSetting({ researchDepth: v }); }}>
-            <SelectTrigger className="w-full rounded-lg">
+            <SelectTrigger className="w-full rounded-lg text-xs">
               <SelectValue />
             </SelectTrigger>
             <SelectContent className="border border-border rounded-lg shadow-card">
-              <SelectItem value="standard" className="font-mono text-xs">Standard — ~30 sources, fastest</SelectItem>
-              <SelectItem value="deep" className="font-mono text-xs">Deep — ~80 sources, 2-3× slower</SelectItem>
-              <SelectItem value="exhaustive" className="font-mono text-xs">Exhaustive — ~150 sources, 10+ min</SelectItem>
+              <SelectItem value="standard" className="font-mono text-xs">Standard — ~30 sources</SelectItem>
+              <SelectItem value="deep" className="font-mono text-xs">Deep — ~80 sources</SelectItem>
+              <SelectItem value="exhaustive" className="font-mono text-xs">Exhaustive — ~150 sources</SelectItem>
             </SelectContent>
           </Select>
           <p className="text-[10px] text-muted-foreground font-mono leading-normal">
-            Scales web, academic (Semantic Scholar, HuggingFace, CrossRef) and news pipelines for /research and /deepresearch.
+            Scales query stages for /research and /deepresearch.
           </p>
         </div>
         <div className="space-y-1.5">
           <label className="text-xs font-medium">Report length</label>
           <Select value={reportLength} onValueChange={(v) => { setReportLength(v as any); saveResearchSetting({ reportLength: v }); }}>
-            <SelectTrigger className="w-full rounded-lg">
+            <SelectTrigger className="w-full rounded-lg text-xs">
               <SelectValue />
             </SelectTrigger>
             <SelectContent className="border border-border rounded-lg shadow-card">
-              <SelectItem value="concise" className="font-mono text-xs">Concise — ~900-1500 words, key findings only</SelectItem>
-              <SelectItem value="standard" className="font-mono text-xs">Standard — ~1800-3000 words, full analysis</SelectItem>
-              <SelectItem value="comprehensive" className="font-mono text-xs">Comprehensive — ~2800-4500 words, maximum depth</SelectItem>
+              <SelectItem value="concise" className="font-mono text-xs">Concise — ~900-1500 words</SelectItem>
+              <SelectItem value="standard" className="font-mono text-xs">Standard — ~1800-3000 words</SelectItem>
+              <SelectItem value="comprehensive" className="font-mono text-xs">Comprehensive — ~2800-4500 words</SelectItem>
             </SelectContent>
           </Select>
           <p className="text-[10px] text-muted-foreground font-mono leading-normal">
-            Shapes how much the final report preserves vs compresses. Gathering scale comes from Research depth above.
+            Shapes report synthesis compression.
           </p>
         </div>
         <div className="space-y-1.5">
           <label className="text-xs font-medium">Source quality</label>
           <Select value={sourceQuality} onValueChange={(v) => { setSourceQuality(v as any); saveResearchSetting({ sourceQuality: v }); }}>
-            <SelectTrigger className="w-full rounded-lg">
+            <SelectTrigger className="w-full rounded-lg text-xs">
               <SelectValue />
             </SelectTrigger>
             <SelectContent className="border border-border rounded-lg shadow-card">
-              <SelectItem value="all" className="font-mono text-xs">All sources — broad coverage, includes blogs/forums</SelectItem>
-              <SelectItem value="high" className="font-mono text-xs">High-authority only — journals, standards bodies, cited papers</SelectItem>
+              <SelectItem value="all" className="font-mono text-xs">All sources — includes blogs/forums</SelectItem>
+              <SelectItem value="high" className="font-mono text-xs">High-authority only — journals, cited papers</SelectItem>
             </SelectContent>
           </Select>
           <p className="text-[10px] text-muted-foreground font-mono leading-normal">
-            High-authority keeps only reputable domains, DOI/arXiv links, and papers with ≥10 citations (or from the last year). "All" casts wider — useful for niche topics thin on formal literature.
+            High-quality filters keep reputable domains and highly cited papers only.
           </p>
         </div>
         <div className="space-y-1.5">
           <label className="text-xs font-medium">Academic paper depth</label>
           <Select value={academicDepth} onValueChange={(v) => { setAcademicDepth(v as any); saveResearchSetting({ academicDepth: v }); }}>
-            <SelectTrigger className="w-full rounded-lg">
+            <SelectTrigger className="w-full rounded-lg text-xs">
               <SelectValue />
             </SelectTrigger>
             <SelectContent className="border border-border rounded-lg shadow-card">
-              <SelectItem value="abstract" className="font-mono text-xs">Abstracts only — fast, stable, ~2 chunks per paper</SelectItem>
-              <SelectItem value="full" className="font-mono text-xs">Full text — richer but slower, may crash on very long PDFs</SelectItem>
+              <SelectItem value="abstract" className="font-mono text-xs">Abstracts only — fast and stable</SelectItem>
+              <SelectItem value="full" className="font-mono text-xs">Full text — rich synthesis (long PDFs)</SelectItem>
             </SelectContent>
           </Select>
           <p className="text-[10px] text-muted-foreground font-mono leading-normal">
-            Full text adds experimental detail, related work, and exact results — highest quality synthesis. Abstracts are a fallback if your machine crashes on long PDFs (each full paper = 15–30 chunks).
+            Abstracts are fallback if local PDF processing exceeds memory limits.
           </p>
         </div>
         <div className="space-y-1.5">
@@ -604,27 +601,27 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
             value={contextTokens}
             onChange={e => setContextTokens(e.target.value)}
             onBlur={() => saveResearchSetting({ contextTokens: Math.max(2048, Number(contextTokens) || 32768) })}
-            className="rounded-lg"
+            className="rounded-lg text-xs"
           />
           <p className="text-[10px] text-muted-foreground font-mono leading-normal">
-            Report synthesis packs as much evidence as fits this window. Set to your model's real context size (Ollama default is often 8192).
+            Synthesis tokens budget. Match model's true window.
           </p>
         </div>
         <div className="space-y-1.5">
           <label className="text-xs font-medium">Semantic Scholar API key (optional)</label>
           <Input
             type="password"
-            placeholder="Higher rate limits for the academic agent"
+            placeholder="Key for higher academic rate limits"
             value={s2ApiKey}
             onChange={e => setS2ApiKey(e.target.value)}
             onBlur={() => saveResearchSetting({ s2ApiKey: s2ApiKey.trim() })}
-            className="rounded-lg"
+            className="rounded-lg text-xs"
           />
         </div>
       </Section>
 
       {/* ── Custom Commands ── */}
-      <Section id="skills" title="Custom Commands" subtitle="Your own slash commands with custom prompts." defaultOpen={false}>
+      <Section id="skills" title="Custom Commands" subtitle="Register custom slash prompts." defaultOpen={false}>
         {customSkills.length > 0 && (
           <div className="space-y-2">
             {customSkills.map(sk => (
@@ -646,36 +643,36 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
         )}
         <div className="space-y-1.5">
           <label className="text-xs font-medium">Trigger</label>
-          <Input value={newCmd} onChange={e => setNewCmd(e.target.value)} placeholder="/competitors" className="rounded-lg" />
+          <Input value={newCmd} onChange={e => setNewCmd(e.target.value)} placeholder="/competitors" className="rounded-lg text-xs" />
         </div>
         <div className="space-y-1.5">
           <label className="text-xs font-medium">Description</label>
-          <Input value={newDesc} onChange={e => setNewDesc(e.target.value)} placeholder="Research the competitive landscape" className="rounded-lg" />
+          <Input value={newDesc} onChange={e => setNewDesc(e.target.value)} placeholder="Research the competitive landscape" className="rounded-lg text-xs" />
         </div>
         <div className="space-y-1.5">
           <label className="text-xs font-medium">Prompt</label>
           <textarea
             value={newPrompt}
             onChange={e => setNewPrompt(e.target.value)}
-            placeholder="You are a competitive analyst. For the user's topic, identify direct competitors, positioning, strengths and weaknesses…"
-            rows={4}
-            className="w-full rounded-lg border-input bg-background px-3 py-2 text-sm font-mono placeholder:text-muted-foreground focus:outline-none focus:border-primary"
+            placeholder="You are a competitive analyst. For the topic, identify competitors..."
+            rows={3}
+            className="w-full rounded-lg border-input bg-background px-3 py-2 text-xs font-mono placeholder:text-muted-foreground focus:outline-none focus:border-primary"
           />
         </div>
         {skillError && <p className="text-[10px] text-destructive font-mono">{skillError}</p>}
-        <Button variant="secondary" onClick={addSkill} className="rounded-lg font-medium">Add command</Button>
+        <Button variant="secondary" size="sm" onClick={addSkill} className="rounded-lg font-medium text-xs">Add command</Button>
         <p className="text-[10px] text-muted-foreground font-mono leading-normal">
-          Custom commands run over your workspace lore with citations, exactly like /brief or /challenge.
+          Commands execute prompt directives over workspace library context.
         </p>
       </Section>
 
       {/* ── Research APIs ── */}
-      <Section id="research-apis" title="Research APIs" subtitle="Link your own search APIs — agents use them first." defaultOpen={false}>
+      <Section id="research-apis" title="Research APIs" subtitle="API search keys for agent retrieval." defaultOpen={false}>
         {([
           ['tavily', 'Tavily', 'tvly-…'],
           ['brave', 'Brave Search', 'BSA…'],
           ['serper', 'Serper (Google)', '40-char key'],
-          ['jina', 'Jina (needs a key — s.jina.ai)', 'jina_…']
+          ['jina', 'Jina (s.jina.ai)', 'jina_…']
         ] as const).map(([id, label, ph]) => (
           <div key={id} className="space-y-1.5">
             <label className="text-xs font-medium">{label}</label>
@@ -685,17 +682,17 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
               onChange={e => setSearchKey(id, e.target.value)}
               onBlur={persistSearchKeys}
               placeholder={ph}
-              className="rounded-lg"
+              className="rounded-lg text-xs"
             />
           </div>
         ))}
         <p className="text-[10px] text-muted-foreground font-mono leading-normal">
-          For the best results, link a search key: /research and /deepresearch then query that provider instead of scraping DuckDuckGo — cleaner, more relevant results, no anti-bot failures. Tavily and Brave have free tiers. Without any key, research falls back to keyless Jina search (rate-limited) then DuckDuckGo. Tried in the order listed; first configured provider wins. Keys stay in local extension storage and are only sent to the provider itself.
+          Preferred over keyless DuckDuckGo scraping. Keys stay local.
         </p>
       </Section>
 
       {/* ── MCP Servers ── */}
-      <Section id="mcp" title="MCP Servers" subtitle="External tools over Streamable HTTP — used by deep research." defaultOpen={false}>
+      <Section id="mcp" title="MCP Servers" subtitle="Model Context Protocol HTTP servers." defaultOpen={false}>
         {mcpServers.map(server => (
           <div key={server.id} className="rounded-md border border-border bg-background p-2 space-y-1.5">
             <div className="flex items-center gap-2">
@@ -707,7 +704,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                 type="button"
                 role="switch"
                 aria-checked={server.enabled}
-                title={server.enabled ? 'Enabled — research may call this server' : 'Disabled'}
+                title={server.enabled ? 'Enabled' : 'Disabled'}
                 onClick={() => persistMcp(mcpServers.map(x => x.id === server.id ? { ...x, enabled: !x.enabled } : x))}
                 className={`shrink-0 w-10 h-5 border rounded-full transition-colors relative ${server.enabled ? 'bg-primary border-primary' : 'bg-muted border-border'}`}
               >
@@ -748,7 +745,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                 ) : (
                   <>
                     <span className="w-1.5 h-1.5 rounded-full bg-amber-500 animate-pulse" />
-                    <span className="text-amber-500 font-semibold">Not detected — setup required:</span>
+                    <span className="text-amber-500 font-semibold">Not detected:</span>
                   </>
                 )}
               </div>
@@ -768,12 +765,12 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                         navigator.clipboard.writeText(line)
                           .then(() => {
                             setCopiedCommand(line);
-                            setTimeout(() => setCopiedCommand(null), 1500);
+                            setTimeout(() => setCopiedCommand(null), 2000);
                           })
                           .catch(() => {});
                       }}
                     >
-                      {copiedCommand === line ? '✅' : '📋'}
+                      {copiedCommand === line ? '✓' : '📋'}
                     </button>
                   </div>
                 ))}
@@ -781,18 +778,19 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
             )}
 
             {/* Editable auth token */}
-            <div className="flex items-center gap-1.5">
+            <div className="space-y-1 pt-1.5">
               <input
                 type="password"
-                placeholder="API key / token (optional)"
-                value={mcpTokenEdits[server.id] ?? server.authToken ?? ''}
+                placeholder="Bearer token (optional)"
+                value={mcpTokenEdits[server.id] !== undefined ? mcpTokenEdits[server.id] : (server.authToken || '')}
                 onChange={e => setMcpTokenEdits(prev => ({ ...prev, [server.id]: e.target.value }))}
                 onBlur={() => {
-                  const val = (mcpTokenEdits[server.id] ?? '').trim() || undefined;
-                  persistMcp(mcpServers.map(x => x.id === server.id ? { ...x, authToken: val } : x));
+                  const val = mcpTokenEdits[server.id];
+                  if (val === undefined) return;
+                  persistMcp(mcpServers.map(x => x.id === server.id ? { ...x, authToken: val.trim() || undefined } : x));
                   setMcpTokenEdits(prev => { const n = { ...prev }; delete n[server.id]; return n; });
                 }}
-                className="flex-1 rounded border border-border bg-background px-2 py-1 text-[10px] font-mono placeholder:text-muted-foreground focus:outline-none focus:border-primary"
+                className="w-full rounded border border-border bg-background px-2 py-1 text-[10px] font-mono placeholder:text-muted-foreground focus:outline-none focus:border-primary"
               />
             </div>
 
@@ -800,31 +798,30 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           </div>
         ))}
         <div className="flex gap-2">
-          <Input value={mcpName} onChange={e => setMcpName(e.target.value)} placeholder="Name" className="rounded-lg w-1/3" />
-          <Input value={mcpUrl} onChange={e => setMcpUrl(e.target.value)} placeholder="http://localhost:3920/mcp" className="rounded-lg flex-1" />
+          <Input value={mcpName} onChange={e => setMcpName(e.target.value)} placeholder="Name" className="rounded-lg w-1/3 text-xs" />
+          <Input value={mcpUrl} onChange={e => setMcpUrl(e.target.value)} placeholder="http://localhost:3920/mcp" className="rounded-lg flex-1 text-xs" />
         </div>
         <Input
           type="password"
           value={mcpToken}
           onChange={e => setMcpToken(e.target.value)}
           placeholder="API key / bearer token (optional)"
-          className="rounded-lg"
+          className="rounded-lg text-xs"
         />
         {mcpStatus._new && <p className="text-[10px] text-destructive font-mono">{mcpStatus._new}</p>}
-        <Button variant="secondary" onClick={addMcpServer} className="rounded-lg font-medium">Add server</Button>
+        <Button variant="secondary" size="sm" onClick={addMcpServer} className="rounded-lg font-medium text-xs">Add server</Button>
         <p className="text-[10px] text-muted-foreground font-mono leading-normal">
-          Extensions can't launch stdio MCP servers — run the server yourself and register its HTTP endpoint here.
-          Enabling a server permits deep research to call its search-like tools with your topic. API keys stay in local storage and are only sent to the server itself.
+          Supports HTTP endpoints only. Keys stay local.
         </p>
       </Section>
 
       {/* ── Storage ── */}
-      <Section id="storage" title="Storage" subtitle="Manage local documents and sync.">
+      <Section id="storage" title="Storage" subtitle="Local library & cross-device sync.">
           <div className="flex items-center justify-between gap-3">
             <div className="min-w-0">
               <span className="text-xs font-medium">Re-index library</span>
-              <p className="text-[10px] text-muted-foreground font-mono mt-1 leading-normal">
-                Re-chunks every document with the current pipeline (noise/table filters) and generates missing embeddings. Old chat citations into re-chunked docs will show as "position not found".
+              <p className="text-[10px] text-muted-foreground font-mono mt-0.5 leading-normal">
+                Re-chunks and re-embeds all local documents.
               </p>
             </div>
             <Button
@@ -843,22 +840,17 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           <div>
             <span className="text-xs font-medium">Stored in your browser</span>
             <p className="text-[10px] text-muted-foreground mt-0.5 leading-normal">
-              Every workspace, chat, and document lives in local browser storage — nothing to set
-              up, nothing to grant, and it survives restarts. No files are downloaded.
+              All workspaces and files reside locally in browser IndexedDB.
             </p>
           </div>
           <Button variant="outline" size="sm" className="w-full mt-1 rounded-lg font-medium text-xs" onClick={exportWorkspace}>
-            Export this workspace to a folder…
+            Export active workspace to a folder…
           </Button>
-          <p className="text-[10px] text-muted-foreground mt-1 leading-normal">
-            Optional. Writes the active workspace's docs as <span className="font-mono">.md</span> files to a
-            folder you pick — one-time, no download, no recurring permission.
-          </p>
 
           <div className="flex items-center justify-between mt-4">
             <div>
               <span className="text-xs font-medium">Workspace Docs</span>
-              <p className="text-[10px] text-muted-foreground font-mono mt-0.5">Documents linked to the active workspace</p>
+              <p className="text-[10px] text-muted-foreground font-mono mt-0.5">Linked to the active workspace</p>
             </div>
             <span className="text-sm font-bold font-mono">{docCount}</span>
           </div>
@@ -866,7 +858,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           <div className="flex items-center justify-between mt-2">
             <div>
               <span className="text-xs font-medium">Global Library</span>
-              <p className="text-[10px] text-muted-foreground font-mono mt-0.5">All docs across all workspaces</p>
+              <p className="text-[10px] text-muted-foreground font-mono mt-0.5">All docs across workspaces</p>
             </div>
             <span className="text-sm font-bold font-mono">{globalDocCount}</span>
           </div>
@@ -874,7 +866,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           <div className="flex items-center justify-between mt-2 gap-3">
             <div className="min-w-0">
               <span className="text-xs font-medium">Clean up global library</span>
-              <p className="text-[10px] text-muted-foreground font-mono mt-0.5 leading-normal">Remove documents not linked to any workspace. Use when switching topics or after deleting a workspace.</p>
+              <p className="text-[10px] text-muted-foreground font-mono mt-0.5 leading-normal">Remove unlinked documents.</p>
             </div>
             <Button
               variant="outline"
@@ -914,9 +906,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                 Sign in with Google
               </Button>
               <p className="text-[10px] text-muted-foreground mt-1 leading-normal">
-                One click, then work across devices — no keys to enter. On sign-in, Magpie syncs to a
-                <span className="font-mono"> Magpie</span> folder in your Drive. (First-time publisher setup:
-                <span className="font-mono"> docs/DRIVE-SETUP.md</span>.)
+                Cross-device Google Drive workspace synchronization.
               </p>
             </>
           )}
@@ -929,7 +919,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                 value={folderName}
                 onChange={e => setFolderName(e.target.value)}
                 onBlur={saveSettings}
-                className="rounded-lg"
+                className="rounded-lg text-xs"
               />
             </div>
           )}

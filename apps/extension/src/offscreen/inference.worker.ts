@@ -217,7 +217,7 @@ let nliTokenizer: any = null;
 let nliModel: any = null;
 async function getNliModel() {
   if (!nliTokenizer || !nliModel) {
-    const model_id = 'Xenova/all-MiniLM-L6-v2-nli';
+    const model_id = 'Xenova/nli-deberta-v3-small';
     nliTokenizer = await AutoTokenizer.from_pretrained(model_id);
     nliModel = await AutoModelForSequenceClassification.from_pretrained(model_id);
   }
