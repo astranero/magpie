@@ -30,3 +30,13 @@ export function resolveRelativePath(baseDir: string, rel: string): string {
   }
   return decodeURIComponent(resolved.join('/'));
 }
+
+/**
+ * Remove the deterministic "*Sources:*" footer that the chat stream appends to
+ * saved assistant messages. Applied when history is fed BACK to the model —
+ * left in, the model imitates the footer and the reply ends with two identical
+ * "Sources:" lines (its copy + the real one).
+ */
+export function stripSourcesFooter(text: string): string {
+  return (text || '').replace(/\n+---\n\*Sources:\*[^\n]*\s*$/, '');
+}

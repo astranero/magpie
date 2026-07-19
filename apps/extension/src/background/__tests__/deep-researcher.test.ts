@@ -36,6 +36,7 @@ import {
   weightedEvalScore,
   normalizeSection,
   stripLeadingTitle,
+  stripStageBriefPseudoCitations,
   reflectOnStage,
   planStageAgents,
   SourceRecord,
@@ -571,5 +572,17 @@ describe('planStageAgents (source-mode agent routing)', () => {
     for (const stage of [1, 2, 5, 8]) {
       expect(planStageAgents(stage, 'academic', false)).toEqual({ web: false, academic: true, news: false, mcp: false });
     }
+  });
+});
+
+describe('stripStageBriefPseudoCitations', () => {
+  it('removes invented [STAGE N BRIEF] markers, any casing, singular/plural', () => {
+    const text = 'Smaller models have constrained capabilities [STAGE 4 BRIEF]. More susceptible [Stage 3 Brief][STAGE 5 BRIEF].';
+    expect(stripStageBriefPseudoCitations(text))
+      .toBe('Smaller models have constrained capabilities. More susceptible.');
+  });
+  it('leaves real anchors and ordinary brackets alone', () => {
+    const text = 'Training cost $42 [d3ab01.s0.p1]. See [24] and the stage plan.';
+    expect(stripStageBriefPseudoCitations(text)).toBe(text);
   });
 });

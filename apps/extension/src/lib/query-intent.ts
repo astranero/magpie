@@ -84,9 +84,12 @@ const LINK_STOPWORDS = new Set([
   'work', 'works', 'like', 'want', 'need', 'find', 'look', 'inside', 'within',
 ]);
 
-/** Content words from a question, for lexically matching link/file labels. */
+/** Content words from a question, for lexically matching link/file labels.
+ *  Unicode-aware: a question in Kurdish/Arabic/Finnish/… must still produce
+ *  keywords — with the old ASCII-only `[a-z]` class, non-Latin questions
+ *  yielded ZERO keywords, so page-overlap and link matching silently broke. */
 export function questionKeywords(q: string): string[] {
-  return [...new Set((q || '').toLowerCase().match(/[a-z][a-z-]{2,}/g) || [])].filter(w => !LINK_STOPWORDS.has(w));
+  return [...new Set((q || '').toLowerCase().match(/[\p{L}][\p{L}\p{N}-]{2,}/gu) || [])].filter(w => !LINK_STOPWORDS.has(w));
 }
 
 /** True when a question keyword lands on a link's anchor text or its URL —
@@ -147,6 +150,45 @@ export function timezoneToPlace(tz: string): string {
   const city = tz.split('/').pop() || '';
   if (/^(UTC|GMT|Etc|Unknown)$/i.test(city)) return '';
   return city.replace(/_/g, ' ').trim();
+}
+
+// Questions about the ASSISTANT ITSELF ("do you support kurdish?", "who are
+// you?"). These must never be answered from the open page — a travel page
+// about the Kurdish region hijacked "do you support kurdish?" via keyword
+// overlap — and running retrieval/web search on them is noise.
+//
+// PRECISION MATTERS MORE THAN RECALL here: a missed meta question just takes
+// the normal route (and the language rule still answers it fine), but a false
+// positive hijacks a REAL question into a canned capabilities blurb. So the
+// capability verbs only count when their object is a natural LANGUAGE — plain
+// "do you support webhooks?" / "can you respond in JSON?" must stay on the
+// page/workspace route. Identity asks are anchored to the whole prompt.
+const LANG_NAMES =
+  '(?:languages?|kurdish|sorani|kurmanji|arabic|farsi|persian|turkish|finnish|swedish|norwegian|danish|icelandic|german|french|spanish|italian|portuguese|dutch|russian|ukrainian|polish|czech|slovak|greek|hebrew|hindi|urdu|bengali|tamil|telugu|punjabi|chinese|mandarin|cantonese|japanese|korean|vietnamese|thai|indonesian|malay|swahili|amharic|somali|english|estonian|latvian|lithuanian|hungarian|romanian|bulgarian|serbian|croatian|bosnian|albanian|azerbaijani|armenian|georgian|kazakh|uzbek|pashto|dari|tagalog|filipino|catalan|basque|galician|welsh|irish|gaelic)';
+const ASSISTANT_META_RE = new RegExp(
+  [
+    // "do you support kurdish?", "can you understand/translate/speak <language>?"
+    `\\b(?:do|can|could|will|would|are)\\s+you\\b[^.?!]{0,40}\\b(?:speak|understand|translate|support|know|chat|talk|write|answer|reply|respond)\\b[^.?!]{0,30}\\b${LANG_NAMES}\\b`,
+    // "can you answer/reply/chat in kurdish", "answer me in kurdish"
+    `\\b(?:answer|reply|respond|write|chat|talk|speak|converse|communicate)\\b[^.?!]{0,20}\\bin\\s+${LANG_NAMES}\\b`,
+    // "so you do not have capability of chtting in kurdish?" — capability talk
+    // only counts alongside a language/chat object, not bare ("what are your
+    // capabilities for exporting?" is a product question).
+    `\\byour?\\b[^.?!]{0,60}\\b(?:capab(?:le|ilit(?:y|ies))|abilit(?:y|ies)|limitations?)\\b[^.?!]{0,50}\\b(?:${LANG_NAMES}|chat?ting|speaking|talking|writing|answering)`,
+    // Identity — anchored to the WHOLE prompt so "what are you seeing in this
+    // chart?" / "what do you do with my data?" never match.
+    /^\s*(?:so\s+)?who\s+(?:are|r)\s+you\??\s*$/.source,
+    /^\s*what\s+(?:can|do)\s+you\s+do\??\s*$/.source,
+    /^\s*what\s+are\s+you\??\s*$/.source,
+  ].join('|'),
+  'iu',
+);
+/** Is the question about the assistant itself (its languages or identity)
+ *  rather than any page, source, or topic? Deliberately narrow — see above. */
+export function isAssistantMetaQuestion(q: string): boolean {
+  const s = (q || '').trim();
+  if (!s || mentionsPageDeixis(s)) return false;
+  return ASSISTANT_META_RE.test(s);
 }
 
 // Strong page-referential phrases ("this project", "the docs", "on this site").

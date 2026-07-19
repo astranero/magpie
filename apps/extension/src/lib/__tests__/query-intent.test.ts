@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { needsIntentResolution, formatHistoryForIntent, parseRepoUrl, selectTreePaths, formatTreeBlock, isStructureQuestion, questionKeywords, expandNavKeywords, isImplementationQuestion, findRepoUrlInText, isPageMetaQuestion, mentionsPageDeixis, overlapsPage, isLocationDependent, timezoneToPlace, isEnumerationQuestion } from '../query-intent';
+import { needsIntentResolution, formatHistoryForIntent, parseRepoUrl, selectTreePaths, formatTreeBlock, isStructureQuestion, questionKeywords, expandNavKeywords, isImplementationQuestion, findRepoUrlInText, isPageMetaQuestion, mentionsPageDeixis, overlapsPage, isLocationDependent, timezoneToPlace, isEnumerationQuestion, isAssistantMetaQuestion } from '../query-intent';
 
 describe('isStructureQuestion', () => {
   it('true for layout / file-location questions', () => {
@@ -24,6 +24,42 @@ describe('questionKeywords', () => {
   it('drops stopwords, keeps content words', () => {
     expect(questionKeywords('how much is their pricing?')).toEqual(['pricing']);
     expect(questionKeywords('what is this about')).toEqual([]);
+  });
+  it('extracts non-Latin keywords (Sorani Kurdish, Finnish)', () => {
+    // The old ASCII-only regex returned [] for these, silently breaking
+    // page-overlap and link matching for any non-English question.
+    expect(questionKeywords('ئەم پەڕەیە دەربارەی چییە؟').length).toBeGreaterThan(0);
+    expect(questionKeywords('mitä tämä sivu käsittelee?')).toContain('käsittelee');
+  });
+});
+
+describe('isAssistantMetaQuestion', () => {
+  it('catches capability/language questions about the assistant', () => {
+    expect(isAssistantMetaQuestion('do you support kurdish?')).toBe(true);
+    expect(isAssistantMetaQuestion('can you answer in kurdish')).toBe(true);
+    expect(isAssistantMetaQuestion('so you do not have capability of chtting in kurdish?')).toBe(true);
+    expect(isAssistantMetaQuestion('who are you?')).toBe(true);
+    expect(isAssistantMetaQuestion('what can you do')).toBe(true);
+  });
+  it('does NOT catch real questions or page questions', () => {
+    expect(isAssistantMetaQuestion('do you know the pricing of this tool?')).toBe(false);
+    expect(isAssistantMetaQuestion('can you help me fix this bug')).toBe(false);
+    expect(isAssistantMetaQuestion('can you summarize this page?')).toBe(false); // page deixis wins
+    expect(isAssistantMetaQuestion('what is event sourcing?')).toBe(false);
+    expect(isAssistantMetaQuestion('when is event sourcing useful?')).toBe(false);
+  });
+  it('does NOT hijack product-capability or formatting asks (precision over recall)', () => {
+    // "support/write/respond" are overloaded — only a LANGUAGE object makes them meta.
+    expect(isAssistantMetaQuestion('do you support webhooks?')).toBe(false);
+    expect(isAssistantMetaQuestion('do you support SSO?')).toBe(false);
+    expect(isAssistantMetaQuestion('can you respond in JSON?')).toBe(false);
+    expect(isAssistantMetaQuestion('can you write in Python instead')).toBe(false);
+    expect(isAssistantMetaQuestion('can you answer in more detail')).toBe(false);
+    expect(isAssistantMetaQuestion('can you respond in bullet points')).toBe(false);
+    // Identity patterns are anchored to the whole prompt.
+    expect(isAssistantMetaQuestion('what are you seeing in this chart?')).toBe(false);
+    expect(isAssistantMetaQuestion('what do you do with my data?')).toBe(false);
+    expect(isAssistantMetaQuestion('what are your capabilities for exporting?')).toBe(false);
   });
 });
 

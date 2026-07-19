@@ -30,7 +30,9 @@ async function builtinGeminiSession(systemPrompt: string): Promise<any> {
   const LM: any = (globalThis as any).LanguageModel;
   if (!LM?.create) throw new Error('Built-in Gemini is not available in this Chrome. Set an API endpoint in Settings.');
   return LM.create({
-    expectedOutputs: [{ type: 'text', languages: ['en'] }],
+    // No `languages` constraint: declaring ['en'] pinned every answer to
+    // English, so non-English users could never chat in their own language.
+    expectedOutputs: [{ type: 'text' }],
     initialPrompts: [{ role: 'system', content: systemPrompt }]
   });
 }
@@ -75,6 +77,37 @@ async function chatWithBuiltinGemini(systemPrompt: string, history: any[], userP
   }
 }
 
+/**
+ * Human-readable provider failure. Providers answer errors with a JSON blob
+ * (often nested, e.g. OpenRouter's `error.metadata.raw` + retry hints) — the
+ * raw dump used to be shown verbatim in the chat panel. Exported for tests.
+ */
+export function formatProviderError(status: number, body: string): string {
+  let detail = (body || '').trim();
+  let retryAfter: number | undefined;
+  try {
+    const parsed = JSON.parse(detail);
+    const e = parsed?.error ?? parsed;
+    const msg = typeof e?.message === 'string' ? e.message.trim() : '';
+    const raw = typeof e?.metadata?.raw === 'string' ? e.metadata.raw.trim() : '';
+    // Generic wrapper messages ("Provider returned error") hide the real cause
+    // that lives in metadata.raw — prefer the specific one.
+    detail = (raw && (!msg || /provider returned error|internal error|unknown/i.test(msg))) ? raw : (msg || raw || detail);
+    const ra = e?.metadata?.retry_after_seconds ?? parsed?.retry_after_seconds;
+    if (typeof ra === 'number' && ra > 0) retryAfter = ra;
+  } catch { /* not JSON — keep the raw text */ }
+  // Strip markdown-mangled URLs and cap length — this renders in a ~400px panel.
+  detail = detail.replace(/\s+/g, ' ').slice(0, 280);
+  const label =
+    status === 401 ? 'Provider rejected the API key (401)' :
+    status === 402 ? 'Provider needs credits (402)' :
+    status === 429 ? 'Provider rate-limited the request (429)' :
+    status >= 500 ? `Provider is having trouble (${status})` :
+    `Provider error ${status}`;
+  const retry = retryAfter ? ` Retry in ~${Math.ceil(retryAfter)}s.` : (status === 429 ? ' Wait a moment and retry, or add your own API key in Settings.' : '');
+  return `${label}: ${detail}${retry}`;
+}
+
 export async function chatWithCustom(systemPrompt: string, history: any[], userPrompt: string, signal?: AbortSignal): Promise<string> {
   const { apiKey, endpoint, model } = await getProviderSettings();
   if (!endpoint) throw new Error('Custom endpoint missing.');
@@ -104,7 +137,7 @@ export async function chatWithCustom(systemPrompt: string, history: any[], userP
 
   if (!res.ok) {
     const errText = await res.text().catch(() => '');
-    throw new Error(`Custom provider error ${res.status}: ${errText}`);
+    throw new Error(formatProviderError(res.status, errText));
   }
 
   const data = await res.json();
@@ -180,7 +213,7 @@ export async function chatWithCustomStream(
 
   if (!res.ok) {
     const errText = await res.text().catch(() => '');
-    throw new Error(`Custom provider error ${res.status}: ${errText}`);
+    throw new Error(formatProviderError(res.status, errText));
   }
 
   const contentType = res.headers.get('content-type') || '';
@@ -267,7 +300,7 @@ export async function chatWithTools(
   });
   if (!res.ok) {
     const errText = await res.text().catch(() => '');
-    throw new Error(`Custom provider error ${res.status}: ${errText}`);
+    throw new Error(formatProviderError(res.status, errText));
   }
   const data = await res.json();
   const msg = data.choices?.[0]?.message ?? {};

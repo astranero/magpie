@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { timeAgo, resolveRelativePath } from '../format';
+import { timeAgo, resolveRelativePath, stripSourcesFooter } from '../format';
 
 afterEach(() => { vi.useRealTimers(); });
 
@@ -24,5 +24,16 @@ describe('resolveRelativePath', () => {
   it('handles no base dir and URL-decoding', () => {
     expect(resolveRelativePath('', 'a/b.png')).toBe('a/b.png');
     expect(resolveRelativePath('d', 'my%20file.png')).toBe('d/my file.png');
+  });
+});
+
+describe('stripSourcesFooter', () => {
+  it('removes the deterministic footer from a saved assistant message', () => {
+    const msg = 'Ev rûpel li ser gera "Wild CARLOS" e.\n\n---\n*Sources:* [Learning Kurdish](https://youtube.com/watch?v=x) · [site.com](https://site.com)';
+    expect(stripSourcesFooter(msg)).toBe('Ev rûpel li ser gera "Wild CARLOS" e.');
+  });
+  it('leaves messages without a footer untouched', () => {
+    expect(stripSourcesFooter('plain answer')).toBe('plain answer');
+    expect(stripSourcesFooter('uses --- \n*Sources:* mid-text\nand more')).toBe('uses --- \n*Sources:* mid-text\nand more');
   });
 });

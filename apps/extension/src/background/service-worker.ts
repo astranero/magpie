@@ -16,7 +16,9 @@ import { buildFrontmatter, hasFrontmatter } from '../lib/frontmatter';
 import { get as idbGet } from 'idb-keyval';
 import { runDeepResearch, generateSubQuestions, scrapeUrl, isJunkUrl, gatherWebSnippets } from './deep-researcher';
 import { harvestReferences } from '../lib/reference-harvest';
-import { needsIntentResolution, formatHistoryForIntent, parseRepoUrl, selectTreePaths, formatTreeBlock, isChitchat, isRefusalAnswer, isStructureQuestion, isImplementationQuestion, findRepoUrlInText, isPageMetaQuestion, questionKeywords, mentionsPageDeixis, overlapsPage, isLocationDependent, timezoneToPlace, isEnumerationQuestion, RepoRef } from '../lib/query-intent';
+import { needsIntentResolution, formatHistoryForIntent, parseRepoUrl, selectTreePaths, formatTreeBlock, isChitchat, isRefusalAnswer, isStructureQuestion, isImplementationQuestion, findRepoUrlInText, isPageMetaQuestion, questionKeywords, mentionsPageDeixis, overlapsPage, isLocationDependent, timezoneToPlace, isEnumerationQuestion, isAssistantMetaQuestion, RepoRef } from '../lib/query-intent';
+import { sanitizeCliOutput, isCliErrorOutput, composeCliPrompt } from '../lib/cli-output';
+import { stripSourcesFooter } from '../lib/format';
 import { selectSemantic, fetchWithinBudget, parseRouterSelection, TOTAL_CTX_BUDGET, RerankFn, LinkRef, Selection } from '../lib/context-retrieval';
 import { getResearchLimits } from '../lib/research-limits';
 import { looksLikeBuildLog, extractLogHighlights } from '../lib/log-highlights';
@@ -956,6 +958,7 @@ async function handleImportLocalMd(request: Record<string, unknown>): Promise<Re
 // Re-export as a local alias so existing call-sites don't need updating.
 const ensureOffscreen = ensureOffscreenDoc;
 
+
 /** Does this URL serve a PDF? Checked via HEAD when the URL has no .pdf extension. */
 async function urlIsPdf(url: string): Promise<boolean> {
   try {
@@ -1330,6 +1333,11 @@ async function isQuestionAboutPage(q: string, page: PageContext, signal: AbortSi
   // Weather / "near me" / local asks are about the world, not the open page —
   // route them out even if the page happens to contain a matching word.
   if (isLocationDependent(q)) return false;
+  // Questions about the assistant itself ("do you support kurdish?") are never
+  // page questions, even when the page shares the keyword (a Kurdish-region
+  // travel page must not hijack them). Belt-and-braces: buildChatRequest
+  // intercepts the raw prompt, this catches intent-rewritten forms.
+  if (isAssistantMetaQuestion(q)) return false;
   if (mentionsPageDeixis(q)) return true;
   if (overlapsPage(q, `${page.title} ${page.markdown.slice(0, 4000)}`)) return true;
 
@@ -1353,7 +1361,19 @@ async function isQuestionAboutPage(q: string, page: PageContext, signal: AbortSi
   }
 }
 
-async function buildChatRequest(chatId: string, projectId: string, prompt: string, signal: AbortSignal, pageContext?: PageContext | null, onStatus?: (s: string) => void): Promise<{ systemPrompt: string; formattedHistory: Array<{ role: string; content: string }>; linkedPages: Array<{ title: string; url: string }>; grounded: boolean; place?: string }> {
+/** Which pipeline produced the turn's system prompt. `general` lets the
+ *  streaming layer emit the "answering from general knowledge" disclosure
+ *  deterministically instead of trusting the model to include it. */
+type ChatBranch = 'chitchat' | 'meta' | 'citation' | 'page' | 'web' | 'general';
+
+// The languages/tone rule for EVERY chat branch. Small models default to the
+// system prompt's language (English) — without this, a Kurdish/Finnish/… user
+// gets English answers, or worse, wrong-language text labeled as theirs.
+const LANGUAGE_RULE =
+  ` ALWAYS write your answer in the language of the user's latest message — or the language they explicitly ask for — ` +
+  `even when the sources, page, or these instructions are in another language. Never claim you cannot chat in a language you can write.`;
+
+async function buildChatRequest(chatId: string, projectId: string, prompt: string, signal: AbortSignal, pageContext?: PageContext | null, onStatus?: (s: string) => void): Promise<{ systemPrompt: string; formattedHistory: Array<{ role: string; content: string }>; linkedPages: Array<{ title: string; url: string }>; grounded: boolean; place?: string; branch: ChatBranch }> {
   // Get all documents for this project
   const allDocs = await listDocuments(projectId);
   const enabledDocs = allDocs.filter(d => d.enabled !== false);
@@ -1391,7 +1411,11 @@ async function buildChatRequest(chatId: string, projectId: string, prompt: strin
   const history = await getChatHistory(chatId);
   const formattedHistory = history
     .filter((msg: any) => msg.role === 'user' || msg.role === 'assistant')
-    .map((msg: any) => ({ role: msg.role, content: msg.text }));
+    // Strip the deterministic "*Sources:*" footer from saved assistant turns.
+    // Fed back verbatim, the model learns the pattern and appends its own copy
+    // — which then doubles with the footer the stream layer adds (observed:
+    // two identical "Sources:" lines on one answer).
+    .map((msg: any) => ({ role: msg.role, content: stripSourcesFooter(msg.text) }));
 
   // Greetings / small talk must NOT run retrieval: it returns weak top-k
   // chunks that trip the strict "I cannot answer from the sources" refusal
@@ -1404,8 +1428,25 @@ async function buildChatRequest(chatId: string, projectId: string, prompt: strin
     const systemPrompt = rulesBlock +
       `You are Magpie, a warm, concise research assistant. The user sent a greeting or small talk — NOT a research question. ` +
       `Reply in ONE friendly sentence, then briefly invite them to ask about their captured sources or to run /research <topic>. ` +
-      `Do NOT mention "sources" as though they asked a question, and do NOT say you can't answer.`;
-    return { systemPrompt, formattedHistory, linkedPages: [], grounded: false };
+      `Do NOT mention "sources" as though they asked a question, and do NOT say you can't answer.` +
+      LANGUAGE_RULE;
+    return { systemPrompt, formattedHistory, linkedPages: [], grounded: false, branch: 'chitchat' };
+  }
+
+  // Questions about the ASSISTANT itself ("do you support kurdish?", "what can
+  // you do?") answer conversationally — no page, no retrieval, no web search.
+  // Without this, "do you support kurdish?" with a Kurdish-region travel page
+  // attached keyword-matched the page and got answered as a page question.
+  if (isAssistantMetaQuestion(prompt)) {
+    onStatus?.('Writing the answer…');
+    const systemPrompt = rulesBlock +
+      `You are Magpie, a research assistant that lives in the user's browser side panel. The user is asking about YOU — ` +
+      `your capabilities, languages, or identity — NOT about the open page or their sources; do not answer from those. ` +
+      `Answer honestly and concisely. You are multilingual: you can chat in whatever language the user writes or requests ` +
+      `(including Kurdish — Sorani and Kurmanji), you answer questions from their captured sources and the page they attach with 📄, ` +
+      `you can search the web, and you run deep research via /research <topic>.` +
+      LANGUAGE_RULE;
+    return { systemPrompt, formattedHistory, linkedPages: [], grounded: false, branch: 'meta' };
   }
 
   // Follow-up questions get rewritten into standalone ones so retrieval,
@@ -1490,7 +1531,8 @@ async function buildChatRequest(chatId: string, projectId: string, prompt: strin
     `• Prefer scannable structure — bold key terms, short lists, a comparison table — over dense paragraphs. Section headings only when several distinct things were asked.\n` +
     `• FAIL FAST: if the sources/page/inputs don't contain what's needed, or the request is ambiguous, SAY SO in one line — never guess persuasively to sound helpful.\n` +
     `• If a complex request is underspecified, state the key assumptions you're making in one line, then proceed.\n` +
-    `• When fixing an error, name the ROOT CAUSE (why it failed) before the corrected version.`;
+    `• When fixing an error, name the ROOT CAUSE (why it failed) before the corrected version.\n` +
+    `•${LANGUAGE_RULE}`;
 
   // Web-search fallback sources (below) surface as clickable footer links.
   let webSources: Array<{ title: string; url: string }> = [];
@@ -1542,6 +1584,17 @@ async function buildChatRequest(chatId: string, projectId: string, prompt: strin
       `use your general knowledge only to fill small, obvious gaps. Do NOT invent citations. ` +
       `If the page doesn't cover the question, say so in one line rather than guessing or padding with unrelated facts.` +
       RESPONSE_STYLE;
+  } else if (!pageContext && mentionsPageDeixis(effectiveQuery)) {
+    // "What does this page say?" with NO page attached: a web search for that
+    // phrasing returns arbitrary pages (observed: IBM Granite results appended
+    // as Sources under an unrelated answer). Explain the situation instead.
+    systemPrompt =
+      `You are Magpie, a research assistant in the user's browser side panel. The user asked about "this page" but NO page is attached to this chat. ` +
+      `Tell them, in one or two friendly sentences, to open the page in the browser and toggle 📄 ON (or paste a URL/text) so you can read it. ` +
+      `Do NOT guess what the page might be, and do NOT answer from unrelated knowledge.` +
+      RESPONSE_STYLE;
+    onStatus?.('Writing the answer…');
+    return { systemPrompt: rulesBlock + localeBlock + systemPrompt, formattedHistory, linkedPages: [], grounded: false, place, branch: 'meta' };
   } else {
     // No workspace match and no open page. Before conceding to stale "general
     // knowledge", escalate to a quick live web search (+ any enabled search
@@ -1572,10 +1625,12 @@ async function buildChatRequest(chatId: string, projectId: string, prompt: strin
         `\n--- WEB RESULTS ---\n${web.context}\n--- END WEB RESULTS ---`;
     } else {
       console.warn(`[RAG] No confident workspace match for project ${projectId} — falling back to general knowledge`);
-      // General conversation fallback
+      // General conversation fallback. The "answering from general knowledge"
+      // disclosure is EMITTED by the streaming layer (branch === 'general'), not
+      // requested here — small models skipped the instruction, leaving users
+      // unable to tell a sourced answer from a from-memory one.
       systemPrompt = `You are a helpful AI assistant. No relevant documents were found in the user's research workspace for this question. ` +
-        `Begin your answer with this exact italic line: *No matching sources in this workspace — answering from general knowledge.* ` +
-        `Then answer using your general knowledge. Do not fabricate citations.` +
+        `Answer using your general knowledge. Do not fabricate citations.` +
         RESPONSE_STYLE;
     }
   }
@@ -1727,8 +1782,10 @@ async function buildChatRequest(chatId: string, projectId: string, prompt: strin
   }
 
   onStatus?.('Writing the answer…');
-  return { systemPrompt: rulesBlock + localeBlock + systemPrompt, formattedHistory, linkedPages, grounded, place };
+  const branch: ChatBranch = grounded ? 'citation' : usePage ? 'page' : webSources.length ? 'web' : 'general';
+  return { systemPrompt: rulesBlock + localeBlock + systemPrompt, formattedHistory, linkedPages, grounded, place, branch };
 }
+
 
 /**
  * Clickable trail of the links the expansion step actually followed —
@@ -2160,44 +2217,113 @@ Rules:
     .filter((line: string) => line.length > 3 && line.length < 100)
     .slice(0, 3);
 }
-async function resolveCliCommand(cmdTemplate: string, companionUrl: string, prompt: string): Promise<string> {
-  let template = cmdTemplate;
-  if (cmdTemplate === 'auto') {
-    try {
-      const res = await fetch(companionUrl, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          jsonrpc: '2.0',
-          id: Date.now(),
-          method: 'tools/call',
-          params: {
-            name: 'execute_command',
-            arguments: { command: 'which claude || which agy || which copilot || which gh' }
-          }
-        })
-      });
-      if (res.ok) {
-        const data = await res.json();
-        const path = data.result?.content?.[0]?.text || '';
-        if (path.includes('claude')) {
-          template = 'claude "{prompt}"';
-        } else if (path.includes('agy')) {
-          template = 'agy chat "{prompt}"';
-        } else if (path.includes('copilot') || path.includes('gh')) {
-          template = 'copilot explain "{prompt}"';
-        } else {
-          throw new Error('No supported CLI found on PATH (claude, agy, copilot).');
-        }
-      } else {
-        throw new Error('Local companion probe failed.');
-      }
-    } catch (e: any) {
-      throw new Error(`Auto CLI detection failed: ${e.message || String(e)}`);
-    }
+async function callCompanion(companionUrl: string, args: Record<string, unknown>): Promise<any> {
+  const res = await fetch(companionUrl, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      jsonrpc: '2.0',
+      id: Date.now(),
+      method: 'tools/call',
+      params: { name: 'execute_command', arguments: args }
+    })
+  });
+  if (!res.ok) throw new Error(`HTTP error ${res.status}`);
+  const data = await res.json();
+  if (data.error) throw new Error(data.error.message || 'JSON-RPC error');
+  return data;
+}
+
+/** Does the running companion accept a `stdin` argument (v1.1+)? Old builds
+ *  concatenate stderr into the answer and can't pipe a prompt — detect so we
+ *  can degrade loudly instead of silently. */
+async function companionSupportsStdin(companionUrl: string): Promise<boolean> {
+  try {
+    const healthUrl = companionUrl.replace(/\/mcp\/?$/, '/health').replace(/\/$/, '/health');
+    const r = await fetch(healthUrl, { signal: AbortSignal.timeout(1000) });
+    if (!r.ok) return false;
+    const j = await r.json();
+    return j?.capabilities?.stdin === true;
+  } catch {
+    return false;
   }
-  const escapedPrompt = prompt.replace(/"/g, '\\"').replace(/\n/g, ' ');
-  return template.replace('{prompt}', escapedPrompt);
+}
+
+async function resolveCliTemplate(cmdTemplate: string, companionUrl: string): Promise<string> {
+  if (cmdTemplate !== 'auto') return cmdTemplate;
+  try {
+    const data = await callCompanion(companionUrl, { command: 'which claude || which agy || which copilot || which gh' });
+    const path = data.result?.content?.[0]?.text || '';
+    if (path.includes('claude')) return 'claude "{prompt}"';
+    if (path.includes('agy')) return 'agy chat "{prompt}"';
+    if (path.includes('copilot') || path.includes('gh')) return 'copilot explain "{prompt}"';
+    throw new Error('No supported CLI found on PATH (claude, agy, copilot).');
+  } catch (e: any) {
+    throw new Error(`Auto CLI detection failed: ${e.message || String(e)}`);
+  }
+}
+
+/**
+ * One chat turn through the user's local CLI. Unlike the old path — which sent
+ * ONLY the raw user message, so CLI-mode answers ignored the workspace sources,
+ * the attached page, and the whole conversation — this pipes the SAME composed
+ * context the standard provider gets.
+ *
+ * Untrusted context (page content, retrieved chunks) goes over STDIN, never
+ * into the shell command string: interpolating it into `exec()` would be a
+ * command-injection surface. When the companion is too old to pipe stdin, the
+ * claude CLI falls back to argv with just the user's message (context lost) —
+ * `onStatus` says so instead of failing silently.
+ *
+ * Throws when the CLI output is an error state (logged out, usage dump) so the
+ * caller falls back to the standard provider instead of rendering
+ * "Not logged in · Please run /login" as the assistant's answer.
+ */
+async function runCliChat(
+  companionUrl: string,
+  cmdTemplate: string,
+  systemPrompt: string,
+  history: Array<{ role: string; content: string }>,
+  prompt: string,
+  onStatus?: (s: string) => void,
+): Promise<string> {
+  const template = await resolveCliTemplate(cmdTemplate, companionUrl);
+  const isClaude = /^\s*claude\b/.test(template);
+
+  let command: string;
+  let stdin: string | undefined;
+  if (isClaude && await companionSupportsStdin(companionUrl)) {
+    // Non-interactive print mode; the full composed turn rides stdin. `-p` with
+    // a piped prompt also kills the "no stdin data received in 3s" probe wait.
+    // Derived from the user's template (minus the {prompt} placeholder) so
+    // configured flags like `--model opus` survive the stdin route.
+    command = template.replace(/\s*"?\{prompt\}"?/, '').trim();
+    if (!/(?:^|\s)(?:-p|--print)\b/.test(command)) command += ' -p';
+    stdin = composeCliPrompt(systemPrompt, history, prompt);
+  } else {
+    if (isClaude) {
+      // Old companion: no stdin channel. Keep it working, but say what's lost.
+      onStatus?.('Companion server is outdated — restart it so CLI chat can see your sources.');
+      command = template.includes('{prompt}') ? template : `${template.trim()} "{prompt}"`;
+      if (!/\s(-p|--print)\b/.test(command)) command = command.replace(/^\s*claude\b/, 'claude -p');
+    } else {
+      command = template;
+    }
+    // argv carries ONLY the user's own message (short, and escaped) — never
+    // page/source context, which is attacker-influenced.
+    const escaped = prompt.replace(/[\\"`$]/g, '\\$&').replace(/\n/g, ' ');
+    command = command.replace('{prompt}', escaped);
+  }
+
+  const data = await callCompanion(companionUrl, { command, stdin, timeoutMs: 240_000 });
+  const raw = data.result?.content?.[0]?.text;
+  if (raw === undefined) throw new Error('No output from CLI');
+  const text = sanitizeCliOutput(raw);
+  if (data.result?.isError) throw new Error((text || 'CLI command failed').slice(0, 300));
+  if (isCliErrorOutput(text)) {
+    throw new Error('Local CLI is not ready (not logged in or errored) — using the standard provider instead.');
+  }
+  return text;
 }
 
 
@@ -2216,7 +2342,7 @@ async function handleChat(request: Record<string, unknown>): Promise<Record<stri
   interactiveDepth++;
   try {
     const pageCtx = request.includePageContext ? await getPageContext().catch(() => null) : null;
-    const { systemPrompt, formattedHistory, linkedPages } = await buildChatRequest(chatId, projectId, prompt, signal, pageCtx);
+    const { systemPrompt, formattedHistory, linkedPages, branch } = await buildChatRequest(chatId, projectId, prompt, signal, pageCtx);
 
     // Persist the user message immediately so it survives errors/reloads
     await saveChatMessage({
@@ -2252,33 +2378,22 @@ async function handleChat(request: Record<string, unknown>): Promise<Record<stri
 
     if (useCli) {
       try {
-        const command = await resolveCliCommand(cmdTemplate, companionUrl, prompt);
-        const res = await fetch(companionUrl, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            jsonrpc: '2.0',
-            id: Date.now(),
-            method: 'tools/call',
-            params: {
-              name: 'execute_command',
-              arguments: { command }
-            }
-          })
-        });
-        if (!res.ok) throw new Error(`HTTP error ${res.status}`);
-        const data = await res.json();
-        if (data.error) throw new Error(data.error.message || 'JSON-RPC error');
-        reply = data.result?.content?.[0]?.text || '';
+        reply = await runCliChat(companionUrl, cmdTemplate, systemPrompt, formattedHistory, prompt);
+        reply += linkedPagesFooter(linkedPages);
         cliSuccess = true;
-      } catch {
-        // fallback
+      } catch (e) {
+        console.warn('[CLI] chat via local CLI failed — falling back to standard provider:', e);
       }
     }
 
     if (!cliSuccess) {
       reply = await chatWithCustom(systemPrompt, formattedHistory, prompt, signal)
         + linkedPagesFooter(linkedPages);
+    }
+
+    // Same deterministic disclosure the streaming path emits (see chat-stream).
+    if (branch === 'general') {
+      reply = `*No matching sources in this workspace — answering from general knowledge.*\n\n${reply}`;
     }
 
     await saveChatMessage({
@@ -2355,7 +2470,7 @@ chrome.runtime.onConnect.addListener((port) => {
     interactiveDepth++;
     try {
       const pageCtx = req.includePageContext ? await getPageContext().catch(() => null) : null;
-      let { systemPrompt, formattedHistory, linkedPages, grounded, place } = await buildChatRequest(
+      let { systemPrompt, formattedHistory, linkedPages, grounded, place, branch } = await buildChatRequest(
         chatId, projectId, prompt, localController.signal, pageCtx,
         (text) => safePost({ type: 'STATUS', text })
       );
@@ -2376,6 +2491,22 @@ chrome.runtime.onConnect.addListener((port) => {
       // they mirror it live: `prompt` lets them show the question immediately,
       // then CHAT_DELTA broadcasts stream the answer, CHAT_STATE:false ends it.
       chrome.runtime.sendMessage({ action: 'CHAT_STATE', chatId, projectId, generating: true, prompt }).catch(() => {});
+
+      // General-knowledge turns disclose themselves DETERMINISTICALLY — the old
+      // prompt-side "begin with this italic line" instruction was routinely
+      // skipped by small models, so users couldn't tell a sourced answer from a
+      // from-memory one (the exact complaint behind "where did you find this?").
+      // Emitted LAZILY on the first real token: emitting before the provider
+      // call meant an immediate provider failure (401/429/…) persisted an
+      // orphan assistant bubble containing only the disclosure line.
+      let disclosed = branch !== 'general' || !!systemPromptOverride;
+      const emitAnswerDelta = (text: string) => {
+        if (!disclosed) {
+          disclosed = true;
+          emitDelta(`*No matching sources in this workspace — answering from general knowledge.*\n\n`);
+        }
+        emitDelta(text);
+      };
 
       // Check if routing chat through CLI is enabled
       const storage = await chrome.storage.local.get(['routeChatThroughCli', 'cliCommandTemplate', 'localMcpCompanionUrl']);
@@ -2400,33 +2531,18 @@ chrome.runtime.onConnect.addListener((port) => {
 
       let cliSuccess = false;
       if (useCli) {
-        safePost({ type: 'STATUS', text: 'Executing local CLI command…' });
+        safePost({ type: 'STATUS', text: 'Asking your local CLI…' });
         try {
-          const command = await resolveCliCommand(cmdTemplate, companionUrl, prompt);
-          const res = await fetch(companionUrl, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              jsonrpc: '2.0',
-              id: Date.now(),
-              method: 'tools/call',
-              params: {
-                name: 'execute_command',
-                arguments: { command }
-              }
-            })
-          });
-          if (!res.ok) throw new Error(`HTTP error ${res.status}`);
-          const data = await res.json();
-          if (data.error) throw new Error(data.error.message || 'JSON-RPC error');
-          const outputText = data.result?.content?.[0]?.text;
-          if (outputText === undefined) throw new Error('No output from CLI');
+          const outputText = await runCliChat(
+            companionUrl, cmdTemplate, systemPrompt, formattedHistory, prompt,
+            (text) => safePost({ type: 'STATUS', text }),
+          );
 
           // Simulate streaming back word by word
           const words = outputText.split(/(\s+)/);
           for (const word of words) {
             if (localController.signal.aborted) break;
-            emitDelta(word);
+            emitAnswerDelta(word);
             await new Promise(r => setTimeout(r, 6));
           }
           cliSuccess = true;
@@ -2437,7 +2553,7 @@ chrome.runtime.onConnect.addListener((port) => {
       }
 
       if (!cliSuccess) {
-        await chatWithCustomStream(systemPrompt, formattedHistory, prompt, localController.signal, emitDelta);
+        await chatWithCustomStream(systemPrompt, formattedHistory, prompt, localController.signal, emitAnswerDelta);
       }
 
       // RELIABLE NET: the score gate can still let a workspace-grounded turn
@@ -2464,6 +2580,7 @@ chrome.runtime.onConnect.addListener((port) => {
             `You are a friendly, knowledgeable assistant. The excerpts below are from a live web search run just now — treat them as your facts. ` +
             `Answer like a sharp, helpful friend: lead with the direct answer in natural, plain language, then just enough detail. ` +
             `Don't clutter the prose with [W#] tags — the sources are shown as links below. Use only what the excerpts support; if they don't answer it, say so plainly.` +
+            LANGUAGE_RULE +
             `\n--- WEB RESULTS ---\n${web.context}\n--- END WEB RESULTS ---`;
           await chatWithCustomStream(webSys, [], prompt, localController.signal, emitDelta);
           linkedPages = web.sources; // footer below now points at the web sources

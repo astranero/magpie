@@ -908,6 +908,17 @@ function escLinkUrl(url: string): string {
  * the synthesis prompt asks for individual brackets) are left as-is. Returns the
  * linked text plus the cited records in citation order.
  */
+/**
+ * Remove `[STAGE 4 BRIEF]`-style pseudo-citations. The stage-brief writer is
+ * told to cite everything; when a claim came from the prior-stage handoff
+ * (which has no anchor), some models invent a bracket for it, and the final
+ * report ships with dead "[STAGE 4 BRIEF]" markers. The prompt now forbids
+ * this; the strip guarantees it. Pure — unit-tested.
+ */
+export function stripStageBriefPseudoCitations(text: string): string {
+  return (text || '').replace(/ ?\[stage\s+\d+\s+briefs?\]/gi, '');
+}
+
 export function linkifyReportCitations(
   synthesis: string,
   records: SourceRecord[]
@@ -1683,7 +1694,8 @@ async function saveSynthesisReport(
   // Turn inline [anchor] citations into real links, and number the Sources list
   // to match — cited sources first (in citation order), then any uncited ones.
   // Strip a leading H1 first so the doc title isn't doubled by the model's own.
-  const { text: linkedSynthesis, cited } = linkifyReportCitations(stripLeadingTitle(synthesis, topic), sources);
+  const { text: linkedSynthesis, cited } = linkifyReportCitations(
+    stripStageBriefPseudoCitations(stripLeadingTitle(synthesis, topic)), sources);
   const unique = dedupeSourceRecords(sources).filter(r => r.url || r.title);
   const citedKeys = new Set(cited.map(r => r.docId || r.url));
   const ordered = [...cited, ...unique.filter(r => !citedKeys.has(r.docId || r.url))];
@@ -2598,6 +2610,7 @@ Requirements:
 - Cite EVERY factual claim inline with its anchor id: "...text [anchor_id]."
 - Where multiple sources agree, cite all of them together: [id1][id2].
 - Where sources conflict, state the conflict explicitly and cite both sides.
+- The CONTEXT FROM PRIOR STAGES block is orientation only, NOT a citable source: never cite it (no "[STAGE N BRIEF]" or other invented pseudo-anchors). A claim with no [anchor_id] in THIS stage's excerpts is dropped, not attributed to a prior stage.
 - End with a section "## Open Questions from Stage ${stage}" listing 3-5 bullet gaps this stage did NOT answer, including any unresolved contradictions between sources.
 
 ${EPISTEMIC_RULES}
@@ -3310,6 +3323,9 @@ async function runDeeperResearch(
       ? 'CORPUS NOTE: this run was papers-only BY DESIGN (/academic — Semantic Scholar, CrossRef, arXiv, HuggingFace). Do NOT penalize the absence of web, news, industry, or market sources; judge coverage against the academic literature only.'
       : undefined
   );
+  // The chat message renders this return value directly — strip pseudo-anchors
+  // here too, not only in the saved-document path (saveSynthesisReport).
+  synthesis = stripStageBriefPseudoCitations(synthesis);
 
   await saveSynthesisReport(projectId, topic, synthesis, allSources, 'deep');
   onProgress(`[DONE] ${completedBriefs.length} stage briefs → final paper — ${allSources.length} sources total.`);

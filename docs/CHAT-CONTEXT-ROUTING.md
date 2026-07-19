@@ -17,16 +17,31 @@ Order matters — the FIRST matching branch wins:
 
 1. **Chit-chat** (`isChitchat`) → conversational reply, no retrieval. A greeting
    stays a greeting even with a page open.
-2. **Intent router** decides `usePage` (below). Everything after keys off it.
-3. **Workspace citation** — only when `!usePage` AND `!isLocationDependent` AND
+2. **Assistant-meta** (`isAssistantMetaQuestion`) — "do you support kurdish?",
+   "who are you?" → conversational capabilities reply, no page/retrieval/web.
+   The matcher is DELIBERATELY narrow (language objects + anchored identity
+   asks only): a false positive hijacks a real question ("do you support
+   webhooks?" on a product page) into a canned blurb, so precision beats
+   recall — a missed meta question just takes the normal route.
+3. **Intent router** decides `usePage` (below). Everything after keys off it.
+4. **Workspace citation** — only when `!usePage` AND `!isLocationDependent` AND
    `isConfidentMatch(chunks)`. Strict anti-hallucination prompt; sets
    `grounded=true`.
-4. **Page branch** — `usePage`. Answer from the current page (+ selective
+5. **Page branch** — `usePage`. Answer from the current page (+ selective
    enrichment below). No web search, no library docs.
-5. **Web / general** — live web fallback (`gatherWebSnippets`, localized) else
-   general knowledge.
+6. **No-page deixis** — a page-deictic question ("what does this page say?")
+   with NO page attached explains how to attach one instead of web-searching
+   the phrase (which returned arbitrary pages as "Sources").
+7. **Web / general** — live web fallback (`gatherWebSnippets`, localized) else
+   general knowledge. General-knowledge turns get a deterministic
+   "*No matching sources…*" disclosure emitted by the STREAM layer on the
+   first real token (never before the provider call — an early emit persisted
+   orphan disclosure-only bubbles when the provider failed instantly).
 
-A **locale block** (approx. place + timezone) is prepended to *every* branch.
+A **locale block** (approx. place + timezone) is prepended to *every* branch,
+and a **language rule** (answer in the user's language) rides every branch's
+prompt — `questionKeywords` is Unicode-aware so non-Latin questions still
+produce routing signal.
 
 ## The intent router (`isQuestionAboutPage`)
 
@@ -127,6 +142,22 @@ The side panel is **per-tab**, so each window/tab is a separate React instance.
 - **Agentic must throw**, not return empty, when the provider can't tool-call.
 - **Session sync is a pair**, never separate project/chat keys.
 - **Mirrors don't use rAF.**
+- **Assistant-meta stays narrow** — language/identity asks only. "do you
+  support webhooks?" / "can you respond in JSON?" must keep routing to the
+  page/workspace, and page deixis always wins over meta.
+- **History fed to the model strips the `*Sources:*` footer**
+  (`stripSourcesFooter`) — left in, the model imitates it and answers end with
+  two Sources lines.
+- **CLI route gets the SAME composed context** as the standard provider
+  (`composeCliPrompt` over stdin via companion ≥1.1; `claude -p` derived from
+  the user's template so configured flags survive). Untrusted page/source
+  content NEVER goes into the shell command string — stdin only. CLI output is
+  sanitized (`sanitizeCliOutput`) and error states (logged-out, usage dumps —
+  length-gated) throw so the turn falls back to the standard provider instead
+  of rendering "Not logged in" as an answer.
+- **Don't pre-embed before `saveDocument`** — it already embeds every chunk
+  (`embedTextsBatched`, db.ts); a wrapper embed doubles the work and its
+  vectors are discarded.
 
 ## Config keys (`chrome.storage.local`)
 
