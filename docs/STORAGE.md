@@ -64,7 +64,7 @@ here instead of the network. Cleared when a job starts/finishes.
 Magpie provides two main synchronization mechanisms for matching your local research library with external tools like Obsidian:
 
 ### 1. Google Drive Sync (Remote)
-* **Auth & Scopes:** Uses Google OAuth2 (interactive sign-in) with the narrow `drive.file` scope. Magpie can only view and edit files/folders that it created itself.
+* **Auth & Scopes:** Uses Google OAuth2 (interactive sign-in). The `drive.file` scope means Magpie can only view and edit files/folders it created itself; `userinfo.email` + `userinfo.profile` are also granted, used only to display the connected account. See `docs/SECURITY.md` for the full egress inventory.
 * **Obsidian Formatting:** Syncs research documents as `.md` files with Obsidian-compatible YAML frontmatter to a configured sync folder (`driveFolderName`, default: `Magpie`).
 * **Automatic Background Sync:** Runs silently in the background:
   * When capturing a web page (`captureTab`).

@@ -23,11 +23,13 @@ no remote code, no inline script. Web-accessible resources are limited to
 - **IndexedDB** (documents, chunks, embeddings, chat history): unencrypted,
   device-local, profile-scoped — standard for extensions.
 - **`chrome.storage.local`**: provider API key (`customKey`), `s2ApiKey`,
-  `searchApiKeys` (Tavily/Brave/Serper), MCP `authToken`s — stored in
-  plaintext. This is the extension-platform norm (no OS keychain access from
-  MV3), and any process that can read the Chrome profile already owns the
-  browser session. ⚖ encrypting at rest buys little without a separate key
-  but could be revisited.
+  `searchApiKeys` (Tavily/Brave/Serper), MCP `authToken`s, and the GitHub
+  Copilot SSO credentials (`magpie-copilot-auth`: the GitHub `accessToken` +
+  the short-lived Copilot `sessionToken`) — stored in plaintext. This is the
+  extension-platform norm (no OS keychain access from MV3), and any process
+  that can read the Chrome profile already owns the browser session.
+  ⚖ encrypting at rest buys little without a separate key but could be
+  revisited.
 - Local-folder sync mirrors documents as plaintext `.md` to a user-picked
   directory — explicit user action grants the handle.
 
@@ -44,7 +46,9 @@ These endpoints ARE contacted:
 | `api.semanticscholar.org`, `api.crossref.org`, `huggingface.co` (papers + model weights), `arxiv.org` | Academic agent, model download | Queries, DOIs; nothing user-authored |
 | Tavily/Brave/Serper | Only when the user adds a key | Search queries |
 | User-registered MCP servers | Only when the user enables the server | The research topic (and bearer token, if configured) |
-| Google APIs | Only after interactive OAuth | Synced documents (Drive) |
+| Google APIs | Only after interactive OAuth | Synced documents (Drive); the signed-in account's email + profile (`oauth2/v2/userinfo`, to display who's connected) |
+| `github.com`, `api.github.com` (Copilot SSO) | Only if the user signs in with GitHub Copilot | Device-code OAuth handshake + access-token→session-token exchange (no user content) |
+| `api.githubcopilot.com` | Only when Copilot SSO is the active LLM provider | Same as any LLM endpoint below: retrieved chunk text, chat history, page content |
 
 No telemetry, no first-party backend.
 
@@ -68,7 +72,10 @@ contacts `openrouter.ai` with a key read from env or the gitignored
    against the local chunk store.
 3. **MCP servers.** Registering + enabling a server is the permission grant:
    research will POST the topic to that URL and index what comes back as a
-   source. No scheme/origin restriction is enforced on the URL. ⚖
+   source. The URL is constrained: `isAllowedMcpUrl` (`lib/mcp-client.ts`)
+   permits `https://` to any host but `http://` only to loopback
+   (`localhost`/`127.0.0.1`/`[::1]`) — a non-conforming URL is rejected at
+   save and connect time.
 4. **Imported files.** Local `.md`/PDF/images are parsed on-device
    (pdf.js with `isEvalSupported: false`; images inlined as data URLs).
 
@@ -77,11 +84,16 @@ contacts `openrouter.ai` with a key read from env or the gitignored
 - `<all_urls>` host permission + content script: capture must work on any
   page the user is reading. Capture is user-initiated (toolbar/context menu).
 - `unlimitedStorage`: exempts the library from quota eviction.
-- `identity` is **optional** and only requested for Drive sync.
+- `identity` is **optional** and only requested for Drive sync. The OAuth
+  grant (`manifest.json` `oauth2.scopes`) is `drive.file` (files Magpie
+  itself created — not the whole Drive) plus `userinfo.email` +
+  `userinfo.profile`, used solely to show which Google account is connected.
 
 ## ⚖ Open decisions (tracked, not settled here)
 
-- MCP URL policy: allow any http(s) URL (status quo) vs https-or-localhost.
 - Prompt-injection hardening for research synthesis (delimiting scraped
   content + explicit "ignore embedded instructions" contract).
 - Jina Reader privacy trade-off: opt-out toggle vs status quo.
+
+(Resolved: the MCP URL policy is now enforced as https-anywhere /
+loopback-http-only — see `isAllowedMcpUrl`.)
