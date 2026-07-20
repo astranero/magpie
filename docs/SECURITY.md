@@ -78,6 +78,13 @@ contacts `openrouter.ai` with a key read from env or the gitignored
    save and connect time.
 4. **Imported files.** Local `.md`/PDF/images are parsed on-device
    (pdf.js with `isEvalSupported: false`; images inlined as data URLs).
+5. **Companion server (optional, `companion-mcp.js`).** If the user runs it,
+   it exposes an `execute_command` MCP tool on `localhost:3920` that runs
+   arbitrary shell commands (the CLI-LLM route depends on this). It sets
+   `Access-Control-Allow-Origin: *` and currently enforces no auth token, so
+   while it is running any origin the browser can reach may invoke it. Treat
+   running the companion as granting local shell access. ⚖ (hardening options
+   below).
 
 ## Permissions rationale
 
@@ -94,6 +101,10 @@ contacts `openrouter.ai` with a key read from env or the gitignored
 - Prompt-injection hardening for research synthesis (delimiting scraped
   content + explicit "ignore embedded instructions" contract).
 - Jina Reader privacy trade-off: opt-out toggle vs status quo.
+- Companion-server hardening: the local `execute_command` bridge accepts any
+  origin with no auth (`Access-Control-Allow-Origin: *`, no token). Options:
+  restrict the CORS origin to the extension id, require the configured MCP
+  `authToken` (Bearer) before executing, and/or bind to loopback only.
 
 (Resolved: the MCP URL policy is now enforced as https-anywhere /
 loopback-http-only — see `isAllowedMcpUrl`.)

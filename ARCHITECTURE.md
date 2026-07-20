@@ -16,6 +16,7 @@ lifetime and capability:
 | **Offscreen document** (`src/offscreen/`) | Unbounded (`DOM_PARSER` reason) | Heavy compute: pdf.js parsing, HTML→markdown (Readability), embedding + reranker models (transformers.js) |
 | **Content script** (`src/content/`) | Bound to tab | DOM scraping (Readability + Turndown), YouTube transcripts |
 | **Side panel** (`src/sidepanel/`) | While open | React UI: Lore / Chat / Config views |
+| **Companion server** (`companion-mcp.js`, *optional*) | User-run Node process | Local HTTP MCP bridge on `localhost:3920` that runs CLI LLMs / shell tools (`execute_command`) for the CLI provider route — only present if the user installs and registers it |
 
 Communication: `chrome.runtime.sendMessage` for request/response,
 long-lived ports for chat streaming (`chat-stream`, also acts as SW
@@ -73,7 +74,9 @@ question ──▶ hybrid retrieval (Orama BM25 + vectors, in-memory per project
 ## Design invariants
 
 1. **Local-first** — content, chunks, vectors, models: all on-device. Only
-   the user's configured LLM endpoint and research fetchers touch the network.
+   the user's configured LLM endpoint and research fetchers touch the network
+   (plus the optional local companion server on `localhost:3920`, if the user
+   runs one — see the trust-boundary note in `docs/SECURITY.md`).
 2. **Citations are anchors, not vibes** — every retrievable chunk carries a
    stable anchor; the model may only cite anchors present in context;
    unresolvable anchors are dropped by the renderer.
