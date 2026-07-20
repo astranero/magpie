@@ -1,4 +1,5 @@
 import React from 'react';
+import { useTranslation } from 'react-i18next';
 import { Library, MessageSquare, SlidersHorizontal } from 'lucide-react';
 import { View } from '../../types';
 
@@ -19,11 +20,12 @@ export const Navbar: React.FC<NavbarProps> = ({
   chatScrollTopRef,
   chatScrollToBottomRef
 }) => {
+  const { t } = useTranslation();
   const tabs = [
-    { key: 'lore' as View, label: 'Lore', Icon: Library, onClick: () => setView('lore') },
+    { key: 'lore' as View, label: t('nav.lore'), Icon: Library, onClick: () => setView('lore') },
     {
       key: 'chat' as View,
-      label: 'Chat',
+      label: t('nav.chat'),
       Icon: MessageSquare,
       onClick: () => {
         chatScrollTopRef.current = null;
@@ -31,7 +33,7 @@ export const Navbar: React.FC<NavbarProps> = ({
         chatScrollToBottomRef.current?.();
       }
     },
-    { key: 'settings' as View, label: 'Config', Icon: SlidersHorizontal, onClick: () => setView('settings') },
+    { key: 'settings' as View, label: t('nav.config'), Icon: SlidersHorizontal, onClick: () => setView('settings') },
   ];
 
   return (

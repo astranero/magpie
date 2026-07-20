@@ -23,7 +23,8 @@ keep-alive), `BroadcastChannel` for progress fan-out (imports, re-index,
 sync). Multi-MB payloads (PDFs) never cross the message boundary — the
 offscreen document fetches URLs itself (`OFFSCREEN_PARSE_PDF_URL`).
 Offscreen calls go through `lib/offscreen-client.ts` (retry, failure
-counting, forced recreation, health check) rather than raw `sendMessage`.
+counting, forced recreation on repeated failures, health check) rather than
+raw `sendMessage`.
 
 ## Service worker layout
 
@@ -45,12 +46,12 @@ page/PDF/YouTube ──content script / offscreen──▶ markdown
   ▶ quality gate (anti-bot, paywall, thin, table-soup rejected)
   ▶ frontmatter (Obsidian-compatible YAML)
   ▶ chunker (heading/paragraph-aware, stable citation anchors d{id}.s{n}.p{n})
-  ▶ embeddings (384-dim, local all-MiniLM-L6-v2 in offscreen)
+  ▶ embeddings (384-dim, multilingual-e5-small in offscreen)
   ▶ IndexedDB (documents + chunks WITH vectors)
 
 question ──▶ hybrid retrieval (Orama BM25 + vectors, in-memory per project,
              rehydrated from IDB after SW restarts — no re-embedding)
-  ▶ cross-encoder rerank (ms-marco-MiniLM) + relevance gate + score cliff
+  ▶ cross-encoder rerank (bge-reranker-v2-m3) + relevance gate + score cliff
   ▶ citation-anchored context → LLM (user's OpenAI-compatible endpoint)
   ▶ streamed reply; [anchor] citations resolve to chips → click opens the
     document at the cited passage (text-match highlighting in the
@@ -64,7 +65,7 @@ question ──▶ hybrid retrieval (Orama BM25 + vectors, in-memory per project
   document — planned).
 - **Crash-safe research**: job state in `chrome.storage.local`, scraped
   pages in a dedicated IndexedDB; auto-resume on worker start gated by an
-  `active` flag, heartbeat freshness, job age, and a 3-attempt cap
+  `active` flag, job age, and a 12-attempt cap
   (see `docs/MV3-PERSISTENT-AGENT-STATE.md`).
 - **Storage durability**: `unlimitedStorage` permission exempts the library
   from quota eviction.
@@ -91,3 +92,6 @@ question ──▶ hybrid retrieval (Orama BM25 + vectors, in-memory per project
    cross-window live-answer sync each have subtle invariants that were bug
    fixes; see `docs/CHAT-CONTEXT-ROUTING.md` before editing chat routing or the
    sidepanel sync layer.
+6. **Authentication** — GitHub Copilot SSO auth is supported as an alternative
+   provider path (token exchange via `lib/copilot-auth.ts`); treat it as a
+   first-class LLM endpoint alongside direct OpenAI-compatible keys.

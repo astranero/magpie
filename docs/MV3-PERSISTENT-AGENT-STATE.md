@@ -32,7 +32,7 @@ While a job runs, the service worker updates a `lastHeartbeatAt` timestamp on th
 
 ### 4. Resume Gates to Prevent Duplicate Work
 
-Before resuming a job at startup, require ALL of: job marked `active`, heartbeat **stale** (>3 min — a fresh heartbeat means a completed run's cleanup write lost a race with worker death, so skip), job age under 12 h, and fewer than 3 prior resume attempts (then fail loudly into the chat instead of looping).
+Before resuming a job at startup, require ALL of: job marked `active`, job age under 12 h, and fewer than 12 prior resume attempts (then fail loudly into the chat instead of looping). Note: the fresh-heartbeat gating was deliberately removed — an `active` job always triggers resume regardless of heartbeat freshness.
 
 ### 5. Worker Startup as the Waker
 
@@ -51,7 +51,7 @@ We fixed this by adding:
 - An explicit `lastHeartbeatAt` timestamp updated every 20 seconds while the run executes
 - A staleness threshold `HEARTBEAT_STALE_MS = 3 * 60 * 1000` (3 minutes)
 - An explicit `active: false` state written upon job completion (before the checkpoint is cleared, so losing the clear-write race can't cause a spurious resume)
-- A resume-attempt counter capped at 3, after which the job fails loudly into the chat
+- A resume-attempt counter capped at 12, after which the job fails loudly into the chat
 - Service worker checks these signals before launching or resuming jobs
 
 ## Code Highlights

@@ -21,17 +21,21 @@ survive chat switches; history keeps the command + the final report.
 
 One research run at a time (the crash-resume checkpoint is a singleton);
 a second start is **queued**, not rejected — a persisted FIFO
-(`lib/research-queue.ts`) drains one run at a time as each finishes. Chat is NOT blocked during a run:
-streaming chat and research share the worker via separate abort
-controllers (chatId vs projectId), and progress renders as a live card
-with its own Stop.
+(`lib/research-queue.ts`) drains one run at a time as each finishes. Chat is
+NOT blocked during a run (confirmed fixed): streaming chat and research share
+the worker via separate abort controllers (chatId vs projectId), and progress
+renders as a live card with its own Stop.
+
+**Language rules**: the report language follows REPORT_LANGUAGE (user setting
+or auto-detected from query locale). Search queries are generated bilingually
+(original language + English) to maximize discovery across sources.
 
 ## Settings that shape a run
 
 - **Research depth** (`researchDepth`): Standard / Deep / Exhaustive —
   scales every limit (`lib/research-limits.ts`): URLs per query, academic
   caps (S2/HF/CrossRef), news count, retrieval pool, and **stage count
-  (2/4/6)**.
+  (2/8/10)**.
 - **Source quality** (`sourceQuality`): `all` vs `high` (authority-domain
   allowlist + DOI/arXiv only; papers need ≥10 citations or ≤1 year old,
   with a starvation guard).
@@ -147,7 +151,8 @@ stage queries, stage briefs, the living outline + handoff, gathered doc ids,
 and per-section synthesis drafts — a worker death mid-final-synthesis resumes
 without rewriting finished sections), scraped pages in `ResearchJobCacheDB`. A 20 s heartbeat keeps the
 worker alive through long LLM calls **and** timestamps liveness. On worker
-start, auto-resume runs only if: job `active`, heartbeat stale (fresh =
-clearJob lost a race — skip), age < 12 h, and < 3 prior resume attempts
-(then it fails loudly into the chat). Cancel/complete clear the job.
+start, auto-resume runs only if: job `active`, age < 12 h, and < 12 prior
+resume attempts (then it fails loudly into the chat). Cancel/complete clear
+the job. (The fresh-heartbeat skip was deliberately removed — an active job
+always means resume.)
 See `MV3-PERSISTENT-AGENT-STATE.md` for the war story.

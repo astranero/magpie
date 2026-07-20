@@ -1,4 +1,5 @@
 import React, { useRef, useEffect, useMemo, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import ReactMarkdown, { defaultUrlTransform } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import remarkMath from 'remark-math';
@@ -828,6 +829,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
   const scrollBox = useRef<HTMLDivElement>(null);
   // Two-step clear confirmation
   const [confirmClear, setConfirmClear] = useState(false);
+  const { t } = useTranslation();
   // Slash-command palette keyboard navigation
   const [paletteIdx, setPaletteIdx] = useState(0);
 
@@ -1063,18 +1065,18 @@ export const ChatView: React.FC<ChatViewProps> = ({
             <div className="flex items-center gap-1.5 px-1 text-[11px] font-semibold text-muted-foreground/80">
               {m.role === 'user' ? (
                 <>
-                  <span>You</span>
+                  <span>{t('chat.you')}</span>
                   <User size={10} className="text-muted-foreground/60" />
                 </>
               ) : m.role === 'system' ? (
                 <>
                   {m.streaming && <Loader2 size={10} className="text-muted-foreground/60 animate-spin" />}
-                  <span>System</span>
+                  <span>{t('chat.system')}</span>
                 </>
               ) : (
                 <>
                   <Sparkles size={10} className="text-primary shrink-0" />
-                  <span>Magpie Assistant</span>
+                  <span>{t('chat.assistant')}</span>
                   {/* Show the model that GENERATED this message (stored in provider field),
                       not the currently-selected model which changes all labels retroactively */}
                   {(m.provider && m.provider !== 'custom') ? (
@@ -1211,8 +1213,8 @@ export const ChatView: React.FC<ChatViewProps> = ({
             rows={1}
             className="flex-1 w-full max-h-40 resize-none bg-transparent px-3 py-2.5 text-sm leading-relaxed placeholder:text-muted-foreground focus:outline-none disabled:cursor-not-allowed disabled:opacity-50 font-sans no-scrollbar"
             placeholder={hasDraftPlan
-              ? 'Refine the plan, or type "start"…'
-              : 'Ask a question, or / for commands…'}
+              ? t('chat.placeholderPlan')
+              : t('chat.placeholder')}
             value={input}
             onChange={e => {
               setInput(e.target.value);
@@ -1258,8 +1260,8 @@ export const ChatView: React.FC<ChatViewProps> = ({
                 size="icon"
                 className="h-8 w-8 rounded-lg text-destructive hover:text-destructive hover:bg-destructive/10"
                 onClick={cancelTask}
-                title="Stop generation"
-                aria-label="Stop generation"
+                title={t('chat.stop')}
+                aria-label={t('chat.stop')}
               >
                 <StopCircle size={18} />
               </Button>
@@ -1270,8 +1272,8 @@ export const ChatView: React.FC<ChatViewProps> = ({
                 className={`h-8 w-8 rounded-lg transition-colors ${input.trim() ? 'bg-primary text-primary-foreground hover:bg-primary/90' : 'text-muted-foreground'}`}
                 onClick={send}
                 disabled={!input.trim()}
-                title="Send message"
-                aria-label="Send message"
+                title={t('chat.send')}
+                aria-label={t('chat.send')}
               >
                 <Send size={14} className={input.trim() ? 'ml-0.5' : ''} />
               </Button>

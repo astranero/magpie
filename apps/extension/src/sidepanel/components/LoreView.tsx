@@ -1,4 +1,5 @@
 import React, { useState, useRef, useEffect, useMemo } from 'react';
+import { useTranslation } from 'react-i18next';
 import { LocalDocument } from '../types';
 import { contentHasTag } from '../../lib/frontmatter';
 
@@ -55,6 +56,7 @@ export const LoreView: React.FC<LoreViewProps> = ({
   searchQuery,
   setSearchQuery,
 }) => {
+  const { t } = useTranslation();
   const [showLore, setShowLore] = useState(false);
 
   // ── Library search: title filter (instant) + semantic search (debounced) ──
@@ -115,14 +117,14 @@ export const LoreView: React.FC<LoreViewProps> = ({
           className="flex-1 h-8 text-xs"
           onClick={() => setShowLore(false)}
         >
-          <BookOpen className="w-3.5 h-3.5 mr-1.5" /> Session Lore
+          <BookOpen className="w-3.5 h-3.5 mr-1.5" /> {t('lore.workspace')}
         </Button>
         <Button
           variant={showLore ? 'default' : 'secondary'}
           className="flex-1 h-8 text-xs"
           onClick={() => setShowLore(true)}
         >
-          <Library className="w-3.5 h-3.5 mr-1.5" /> Global Lore
+          <Library className="w-3.5 h-3.5 mr-1.5" /> {t('lore.globalLore')}
         </Button>
       </div>
 
@@ -134,7 +136,7 @@ export const LoreView: React.FC<LoreViewProps> = ({
             type="text"
             value={searchQuery}
             onChange={e => setSearchQuery(e.target.value)}
-            placeholder="Search your lore — titles instantly, contents semantically…"
+            placeholder={t('lore.search')}
             className="w-full h-8 rounded-md border border-border bg-background pl-8 pr-7 text-xs font-mono placeholder:text-muted-foreground focus:outline-none focus:border-primary"
             aria-label="Search library"
           />

@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
+import { useTranslation } from 'react-i18next';
 import { get, set } from 'idb-keyval';
 
 // Collision-free message ids. `Date.now()` and `Date.now()+1` for a paired
@@ -73,6 +74,7 @@ export default function App() {
   // view it was closed in (restored below — 'document' is transient, so its
   // return view is what gets remembered instead).
   const [view, setView] = useState<View>('chat');
+  const { t } = useTranslation();
 
   // Restore the last view once on mount, then persist every stable change.
   useEffect(() => {
@@ -1263,7 +1265,7 @@ export default function App() {
 
     // Honest copy: deletion is permanent — no undo exists.
     if (removed) {
-      showToast('success', `Deleted "${removed.title.slice(0, 30)}" permanently`);
+      showToast('success', t('toast.deletedPermanently', { title: removed.title.slice(0, 30) }));
     }
 
     loadDocuments(activeProjectId);
@@ -1500,7 +1502,7 @@ export default function App() {
         page: '/page <question>', recall: '/recall <topic>', follow: '/follow <url>',
         research: '/research <topic>', deepresearch: '/deepresearch <topic>', academic: '/academic <topic>',
       };
-      showToast('error', `Usage: ${usage[bareArg[1].toLowerCase()]}`);
+      showToast('error', t('commands.usageHint', { usage: usage[bareArg[1].toLowerCase()] }));
       return;
     }
 
@@ -1988,7 +1990,7 @@ export default function App() {
             )}
             <div className="text-sm truncate font-medium flex-1 text-foreground">{tabInfo.title}</div>
             <Button size="sm" onClick={capture} disabled={capturing} variant="default" className="shrink-0 h-8 text-xs rounded-lg font-semibold">
-              {capturing ? 'Capturing…' : 'Capture'}
+              {capturing ? t('lore.capturing') : t('lore.capture')}
             </Button>
           </div>
         )}
