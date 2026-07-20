@@ -15,6 +15,23 @@ export interface GateResult {
 const MIN_CHARS = 200;
 const MIN_WORDS = 50;
 
+/**
+ * Language-aware word count. `split(/\s+/)` sees a whole Japanese/Chinese
+ * article as ~1 "word" (no spaces) — such pages were rejected as thin-content
+ * and could never enter deep research. Intl.Segmenter counts words for every
+ * script (ja/zh via its dictionary, de/fi via spaces + compounds).
+ */
+export function countWords(text: string): number {
+  try {
+    const seg = new Intl.Segmenter(undefined, { granularity: 'word' });
+    let n = 0;
+    for (const s of seg.segment(text)) if ((s as any).isWordLike) n++;
+    return n;
+  } catch {
+    return text.split(/\s+/).filter(Boolean).length;
+  }
+}
+
 /** Anti-bot / challenge interstitials (Cloudflare, PerimeterX, DataDome…). */
 const BOT_PATTERNS: RegExp[] = [
   /just a moment/i,
@@ -79,8 +96,10 @@ export function checkContentQuality(markdown: string, title?: string): GateResul
   const text = (markdown || '').trim();
   if (text.length < MIN_CHARS) return { pass: false, reason: 'empty-content' };
 
+  const wordCount = countWords(text);
+  if (wordCount < MIN_WORDS) return { pass: false, reason: 'thin-content' };
+
   const words = text.split(/\s+/).filter(Boolean);
-  if (words.length < MIN_WORDS) return { pass: false, reason: 'thin-content' };
 
   // Spaced-out garble: some PDF extractors render each glyph as its own token
   // ("O k a y , l e t ' s . . ."). Real prose has very few single-char words
@@ -90,16 +109,16 @@ export function checkContentQuality(markdown: string, title?: string): GateResul
   if (words.length >= 40 && singles / words.length > 0.4) return { pass: false, reason: 'garbled-spacing' };
 
   const probe = `${title || ''}\n${text.slice(0, 2000)}`;
-  if (words.length <= PATTERN_CHECK_MAX_WORDS) {
+  if (wordCount <= PATTERN_CHECK_MAX_WORDS) {
     if (matchAny(probe, BOT_PATTERNS)) return { pass: false, reason: 'anti-bot' };
     if (matchAny(probe, JS_REQUIRED_PATTERNS)) return { pass: false, reason: 'js-required' };
     if (matchAny(probe, PAYWALL_PATTERNS)) return { pass: false, reason: 'paywall' };
     if (matchAny(probe, LOGIN_PATTERNS)) return { pass: false, reason: 'login-wall' };
     if (matchAny(probe, ERROR_PAGE_PATTERNS)) return { pass: false, reason: 'error-page' };
 
-    // Cookie wall: consent text dominating a short page
-    const cookieHits = (probe.match(/\bcookies?\b/gi) || []).length;
-    if (cookieHits >= 3 && words.length < 150) return { pass: false, reason: 'cookie-wall' };
+    // Cookie wall: consent text dominating a short page (en/de/fi terms)
+    const cookieHits = (probe.match(/\bcookies?\b|\bcookierichtlinie\b|eväste(?:itä|et)?/gi) || []).length;
+    if (cookieHits >= 3 && wordCount < 150) return { pass: false, reason: 'cookie-wall' };
   }
 
   return { pass: true };
@@ -112,7 +131,9 @@ export function checkContentQuality(markdown: string, title?: string): GateResul
 export function looksLikeOcrGarbage(text: string): boolean {
   const t = (text || '').trim();
   if (t.length < 100) return false; // too short to judge — let length gates decide
-  const alnum = (t.match(/[a-zA-Z0-9À-ɏЀ-ӿ]/g) || []).length;
+  // Unicode-aware: the old Latin/Cyrillic-only class flagged REAL Japanese and
+  // Arabic PDF text as OCR garbage.
+  const alnum = (t.match(/[\p{L}\p{N}]/gu) || []).length;
   return alnum / t.length < 0.3;
 }
 

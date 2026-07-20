@@ -112,7 +112,8 @@ export async function ensureOffscreen(): Promise<void> {
 export async function pdfBase64ToBody(
   base64: string,
   ocrFn?: (dataUrl: string, instruction: string) => Promise<string>,
-  silent = false
+  silent = false,
+  imagesOut?: EmbeddedImage[]
 ): Promise<string> {
   // Guard against the sendMessage payload cap (~64 MB). base64 is ~1.33× the
   // byte size; anything near the cap must go through the URL path instead.
@@ -133,7 +134,7 @@ export async function pdfBase64ToBody(
     throw new Error(`PDF transfer failed (likely too large, ~${Math.round(base64.length / 1.33 / 1024 / 1024)} MB): ${e.message}`);
   }
   if (!res?.ok) throw new Error(res?.error || 'PDF parse failed');
-  return assemblePdfBody(res, ocrFn);
+  return assemblePdfBody(res, ocrFn, imagesOut);
 }
 
 /**
@@ -146,13 +147,14 @@ export async function pdfOpfsToBody(
   opfsName: string,
   sizeBytes: number,
   ocrFn?: (dataUrl: string, instruction: string) => Promise<string>,
-  silent = false
+  silent = false,
+  imagesOut?: EmbeddedImage[]
 ): Promise<string> {
   const approxMb = sizeBytes / 1024 / 1024;
   const timeoutMs = Math.min(25 * 60 * 1000, Math.max(8 * 60 * 1000, Math.round(approxMb) * 60 * 1000));
   const res: any = await sendToOffscreen({ action: 'OFFSCREEN_PARSE_PDF_OPFS', opfsName, silent }, timeoutMs);
   if (!res?.ok) throw new Error(res?.error || 'PDF parse failed');
-  return assemblePdfBody(res, ocrFn);
+  return assemblePdfBody(res, ocrFn, imagesOut);
 }
 
 /**
@@ -163,18 +165,28 @@ export async function pdfOpfsToBody(
 export async function pdfUrlToBody(
   url: string,
   ocrFn?: (dataUrl: string, instruction: string) => Promise<string>,
-  silent = false
+  silent = false,
+  imagesOut?: EmbeddedImage[]
 ): Promise<string> {
   // Offscreen fetch is itself capped at 5 min (size-scaled) + parse time —
   // give the round-trip 8 min before declaring the offscreen doc wedged.
   const res: any = await sendToOffscreen({ action: 'OFFSCREEN_PARSE_PDF_URL', url, silent }, 8 * 60 * 1000);
   if (!res?.ok) throw new Error(res?.error || 'PDF parse failed');
-  return assemblePdfBody(res, ocrFn);
+  return assemblePdfBody(res, ocrFn, imagesOut);
+}
+
+export interface EmbeddedImage {
+  imgId: string;
+  page: number;
+  dataUrl: string;
+  width: number;
+  height: number;
 }
 
 async function assemblePdfBody(
-  res: { pages?: string[]; imagePages?: Array<{ index: number; dataUrl: string }> },
-  ocrFn?: (dataUrl: string, instruction: string) => Promise<string>
+  res: { pages?: string[]; imagePages?: Array<{ index: number; dataUrl: string }>; images?: EmbeddedImage[] },
+  ocrFn?: (dataUrl: string, instruction: string) => Promise<string>,
+  imagesOut?: EmbeddedImage[]
 ): Promise<string> {
   const pages: string[] = res.pages || [];
   const imagePages: Array<{ index: number; dataUrl: string }> = res.imagePages || [];
@@ -194,6 +206,18 @@ async function assemblePdfBody(
     }
   }
 
+  // Hand the extracted embedded images to the caller (it stores them as IDB
+  // blobs keyed by docId) and reference them inline at the end of their page
+  // section via magpie-img:// refs the viewer resolves.
+  const extracted = res.images || [];
+  if (imagesOut) imagesOut.push(...extracted);
+  const imgsByPage = new Map<number, EmbeddedImage[]>();
+  for (const im of extracted) {
+    const arr = imgsByPage.get(im.page) ?? [];
+    arr.push(im);
+    imgsByPage.set(im.page, arr);
+  }
+
   return pages.map((t, i) => {
     const pageNo = i + 1;
     const codeText = t.trim();
@@ -205,6 +229,10 @@ async function assemblePdfBody(
       console.warn(`PDF page ${pageNo}: extracted text looks like OCR garbage, skipping`);
       chosen = '';
     }
-    return `## Page ${pageNo}\n\n${chosen || '*(no extractable text)*'}`;
+    const refs = (imgsByPage.get(pageNo) || [])
+      .map(im => `![figure ${im.imgId}](magpie-img://${im.imgId})`)
+      .join('\n\n');
+    const body = chosen || '*(no extractable text)*';
+    return `## Page ${pageNo}\n\n${body}${refs ? `\n\n${refs}` : ''}`;
   }).join('\n\n');
 }

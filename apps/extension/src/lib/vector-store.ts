@@ -2,6 +2,7 @@ import { create, insert, search as oramaSearch } from '@orama/orama';
 import { Chunk, listDocuments, getChunksForDocs } from './db';
 import { sendToOffscreen } from './offscreen-client';
 import { crumb } from './crash-log';
+import { meaningfulTokens } from './unicode-text';
 
 // Hard ceiling on how many chunks the IN-MEMORY index holds per session. A deep
 // research run indexes every scraped source's chunks live (some PDFs alone are
@@ -34,6 +35,14 @@ async function initSessionDB(sessionId: string) {
       heading: 'string',
       sectionPath: 'string',
       embedding: 'vector[384]'
+    },
+    components: {
+      tokenizer: {
+        // English stemming mangles German/Finnish compounds and does nothing
+        // for CJK. Exact-token matching is the language-agnostic default; the
+        // vector + rerank legs supply the fuzziness.
+        stemming: false,
+      }
     }
   });
   sessionVectorDBs.set(sessionId, db);
@@ -199,7 +208,7 @@ export async function searchSessionChunks(
     // concurrently with a research run's ONNX batch → WASM OOM → renderer crash.
     // `priority` lets an interactive chat query jump ahead of the run's queue so
     // the panel answers in seconds instead of freezing until the run finishes.
-    const res: any = await sendToOffscreen({ action: 'OFFSCREEN_GET_EMBEDDINGS', texts: [searchTerms] }, undefined, { priority: !!opts?.priority });
+    const res: any = await sendToOffscreen({ action: 'OFFSCREEN_GET_EMBEDDINGS', texts: [searchTerms], kind: 'query' }, undefined, { priority: !!opts?.priority });
     if (res?.ok && res.embeddings && res.embeddings[0]) {
       queryVector = res.embeddings[0];
     }
@@ -214,7 +223,9 @@ export async function searchSessionChunks(
 
   // ── Strategy 2: Keyword fallback — search individual words if full query returns few results ──
   if (candidateChunks.length < limit) {
-    const words = query.split(/\s+/).filter(w => w.length > 3); // Only meaningful words
+    // Unicode-aware tokenization: split(/\s+/) saw a Japanese query as ONE word
+    // and skipped the fallback entirely.
+    const words = meaningfulTokens(query).filter(w => w.length > 3 || /[぀-ヿ㐀-䶿一-鿿]/.test(w));
     if (words.length > 1) {
       const existingIds = new Set(candidateChunks.map(c => (c as any).id || c.anchorId));
       for (const word of words) {

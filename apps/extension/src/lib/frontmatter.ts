@@ -30,9 +30,11 @@ function yamlEscape(s: string): string {
   return `"${s.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, ' ')}"`;
 }
 
-/** Obsidian tags allow letters, digits, `_`, `-`, `/` — normalize the rest. */
+/** Obsidian tags allow letters, digits, `_`, `-`, `/` — normalize the rest.
+ *  Unicode-aware: the ASCII-only version turned non-Latin tags ("tutkimus",
+ *  "研究") into empty strings. */
 function toTag(s: string): string {
-  return s.toLowerCase().replace(/[^a-z0-9_/-]+/g, '-').replace(/^-+|-+$/g, '');
+  return s.toLowerCase().replace(/[^\p{L}\p{N}_/-]+/gu, '-').replace(/^-+|-+$/g, '');
 }
 
 export function buildFrontmatter(f: FrontmatterFields): string {

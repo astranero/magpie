@@ -21,9 +21,10 @@
  */
 export function fixSmallCapsSpacing(text: string): string {
   return text.split('\n').map(line => {
-    const letters = line.replace(/[^a-zA-Z]/g, '');
+    // Unicode letter classes so German caps (ÄÖÜ) are handled too.
+    const letters = line.replace(/[^\p{L}]/gu, '');
     if (letters.length < 6) return line;
-    const upper = letters.replace(/[^A-Z]/g, '').length;
+    const upper = letters.replace(/[^\p{Lu}]/gu, '').length;
     if (upper / letters.length < 0.7) return line;
 
     let out = line;
@@ -31,15 +32,15 @@ export function fixSmallCapsSpacing(text: string): string {
     let prev = '';
     while (prev !== out) {
       prev = out;
-      out = out.replace(/\b([A-Z]) (?=[A-Z]{2,}\b)/g, '$1');
+      out = out.replace(/(^|[^\p{L}\p{N}])(\p{Lu}) (?=\p{Lu}{2,})/gu, '$1$2');
     }
     // "CHAIN - OF" / "OF -THOUGHT" → hyphens re-tightened between caps words
-    out = out.replace(/([A-Z]) *- *(?=[A-Z])/g, '$1-');
+    out = out.replace(/(\p{Lu}) *- *(?=\p{Lu})/gu, '$1-');
     return out;
   }).join('\n');
 }
 
-const SECFIG_RE = /\b(?:Sec|Fig|Tab|Eq)s?\.\s*\d*/g;
+const SECFIG_RE = /\b(?:Sec|Fig|Tab|Eq|Abb|Kap|Kuva|Taulukko)s?\.?\s*\d*|(?:図|表)\s*\d+/g;
 
 /**
  * Score a paragraph for "diagram debris": isolated capital letters (subfigure
@@ -48,7 +49,7 @@ const SECFIG_RE = /\b(?:Sec|Fig|Tab|Eq)s?\.\s*\d*/g;
 export function figureFragmentScore(paragraph: string): number {
   const tokens = paragraph.split(/\s+/).filter(Boolean);
   if (tokens.length === 0) return 0;
-  const isolatedCaps = tokens.filter(t => /^[A-Z][.,)]?$/.test(t)).length;
+  const isolatedCaps = tokens.filter(t => /^\p{Lu}[.,)]?$/u.test(t)).length;
   const secRefs = (paragraph.match(SECFIG_RE) || []).length;
   return (isolatedCaps + 2 * secRefs) / tokens.length;
 }
@@ -64,12 +65,12 @@ export function isFigureFragment(paragraph: string): boolean {
 
   // Short orphan lines: "A B", "C D", "BioMedQ&A Domain specific Sec. 4"
   if (tokens.length <= 7) {
-    const isolatedCaps = tokens.filter(t => /^[A-Z][.,)]?$/.test(t)).length;
+    const isolatedCaps = tokens.filter(t => /^\p{Lu}[.,)]?$/u.test(t)).length;
     const hasSecRef = SECFIG_RE.test(p); SECFIG_RE.lastIndex = 0;
     if (isolatedCaps === tokens.length) return true;                  // "A B"
     // Diagram callouts reference sections without ending as a sentence;
     // prose that mentions "Sec. 4" ends with punctuation and survives.
-    if (hasSecRef && !/[.!?:;]$/.test(p)) return true;
+    if (hasSecRef && !/[.!?:;。！？]$/.test(p)) return true;
   }
   return false;
 }

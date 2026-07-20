@@ -8,9 +8,11 @@ import {
   saveDocument, listDocuments, updateDocumentSync,
   getUnsyncedDocuments, getChatHistory, clearChatHistory, saveChatMessage,
   linkDocumentToProject, getProject,
-  getChunkByAnchor, deleteOrphanDocuments, resetSyncStatus
+  getChunkByAnchor, deleteOrphanDocuments, resetSyncStatus,
+  saveDocImages, getDocImage, listDocImages
 } from '../lib/db';
 import { chunkDocument, makeDocShortId } from '../lib/chunker';
+import type { EmbeddedImage } from '../lib/pdf-parser';
 import { buildCitationContext, CITATION_SYSTEM_PROMPT, parseResponseCitations } from '../lib/citations';
 import { buildFrontmatter, hasFrontmatter } from '../lib/frontmatter';
 import { get as idbGet } from 'idb-keyval';
@@ -21,11 +23,12 @@ import { sanitizeCliOutput, isCliErrorOutput, composeCliPrompt } from '../lib/cl
 import { stripSourcesFooter } from '../lib/format';
 import { selectSemantic, fetchWithinBudget, parseRouterSelection, TOTAL_CTX_BUDGET, RerankFn, LinkRef, Selection } from '../lib/context-retrieval';
 import { getResearchLimits } from '../lib/research-limits';
+import { DEFAULT_COMPANION_MCP_URL, CLI_TEMPLATE_AUTO } from '../lib/settings';
 import { looksLikeBuildLog, extractLogHighlights } from '../lib/log-highlights';
 import { addChunksToVectorStore, searchSessionChunks, resetSessionIndex, resetAllSessionIndexes, isConfidentMatch } from '../lib/vector-store';
 import { replaceChunksForDoc } from '../lib/db';
-import { pdfUrlToBody, pdfOpfsToBody, pdfBase64ToBody, ensureOffscreen as ensureOffscreenDoc } from '../lib/pdf-parser';
-import { setEnsureOffscreen, sendToOffscreen } from '../lib/offscreen-client';
+import { pdfUrlToBody, pdfOpfsToBody, pdfBase64ToBody, ensureOffscreen as ensureOffscreenDoc, recreateOffscreen } from '../lib/pdf-parser';
+import { setEnsureOffscreen, setRecreateOffscreen, sendToOffscreen } from '../lib/offscreen-client';
 import { crumb, dumpCrashLog, installCrashHandlers, installCrumbReceiver } from '../lib/crash-log';
 import { getProviderSettings, chatWithCustom, chatWithCustomStream, handleFetchCustomModels, chatWithTools, ToolDef } from './llm-client';
 import { handleSearchLibrary, handleRecallDocs } from './library-handlers';
@@ -60,6 +63,7 @@ let offscreenHealthCheckInterval: number | null = null;
 
 // Register ensureOffscreen with the robust client for auto-recreation
 setEnsureOffscreen(ensureOffscreenDoc);
+setRecreateOffscreen(recreateOffscreen);
 
 // Start periodic offscreen health check (every 60s)
 function startOffscreenHealthCheck() {
@@ -81,6 +85,16 @@ startOffscreenHealthCheck();
 // Defaults and State
 // ─────────────────────────────────────────────
 const abortControllers = new Map<string, AbortController>();
+// Research runs get their OWN controller map (keyed by projectId). Previously
+// chat turns and research shared `abortControllers`, so any in-flight chat
+// stream made the research-queue drainer think a run was busy — a wedged chat
+// parked the whole queue forever.
+const researchControllers = new Map<string, AbortController>();
+// ProjectIds whose research run is in its STARTUP window (claimed but not yet
+// registered in researchControllers / marked active). Claimed SYNCHRONOUSLY at
+// message entry so two rapid START_DEEP_RESEARCH messages can't both pass the
+// busy check before the first one's awaits land.
+const researchStartsPending = new Set<string>();
 // Accumulated answer text for chats currently streaming, keyed by chatId. Lets a
 // sidepanel that mounts mid-answer (a per-tab panel just switched to) pull the
 // in-flight text and keep streaming, instead of missing the whole answer.
@@ -354,6 +368,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
       const isOpen = !!res.sidePanelOpen;
       if (isOpen) {
         chrome.runtime.sendMessage({ action: 'close_sidepanel' }).catch(() => {});
+        sendResponse({ success: true });
       } else {
         if (sender.tab && sender.tab.id) {
           chrome.sidePanel.open({ tabId: sender.tab.id })
@@ -377,37 +392,41 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   }
 
   if (request.action === 'capture_current_page_via_hotkey') {
-    chrome.storage.local.get(['activeProjectId'], (res) => {
-      const projectId = res.activeProjectId || null;
-      chrome.tabs.query({ active: true, lastFocusedWindow: true }, (tabs) => {
-        const tab = tabs[0];
-        if (!tab?.id || !tab.url) {
-          if (sender.tab && sender.tab.id) {
-            chrome.tabs.sendMessage(sender.tab.id, { 
-              action: 'SHOW_ONPAGE_TOAST', 
-              message: '✕ Capture failed: No active tab found', 
-              isError: true 
-            }).catch(() => {});
-          }
-          return;
+    // Project linking goes through resolveLinkTarget inside captureTab (which
+    // reads the idb active-project key AND honors autoLinkCaptures). The old
+    // chrome.storage 'activeProjectId' read here was dead — nothing ever wrote
+    // that key — and it bypassed the autoLinkCaptures toggle.
+    chrome.tabs.query({ active: true, lastFocusedWindow: true }, (tabs) => {
+      const tab = tabs[0];
+      if (!tab?.id || !tab.url) {
+        if (sender.tab && sender.tab.id) {
+          chrome.tabs.sendMessage(sender.tab.id, {
+            action: 'SHOW_ONPAGE_TOAST',
+            message: '✕ Capture failed: No active tab found',
+            isError: true
+          }).catch(() => {});
         }
+        sendResponse({ success: false, error: 'No active tab found' });
+        return;
+      }
 
-        captureTab(tab, projectId)
-          .then(() => {
-            chrome.tabs.sendMessage(tab.id!, { 
-              action: 'SHOW_ONPAGE_TOAST', 
-              message: `✓ Saved to Library${projectId ? ' (Workspace)' : ''}` 
-            }).catch(() => {});
-            chrome.runtime.sendMessage({ action: 'DOCUMENT_IMPORTED' }).catch(() => {});
-          })
-          .catch((err: any) => {
-            chrome.tabs.sendMessage(tab.id!, { 
-              action: 'SHOW_ONPAGE_TOAST', 
-              message: `✕ Capture failed: ${err.message || err}`, 
-              isError: true 
-            }).catch(() => {});
-          });
-      });
+      captureTab(tab, null)
+        .then(() => {
+          chrome.tabs.sendMessage(tab.id!, {
+            action: 'SHOW_ONPAGE_TOAST',
+            message: `✓ Saved to Library`
+          }).catch(() => {});
+          chrome.runtime.sendMessage({ action: 'DOCUMENT_IMPORTED' }).catch(() => {});
+          sendResponse({ success: true });
+        })
+        .catch((err: any) => {
+          chrome.tabs.sendMessage(tab.id!, {
+            action: 'SHOW_ONPAGE_TOAST',
+            message: `✕ Capture failed: ${err.message || err}`,
+            isError: true
+          }).catch(() => {});
+          sendResponse({ success: false, error: String(err?.message || err) });
+        });
     });
     return true;
   }
@@ -468,7 +487,7 @@ const messageHandlers: Record<string, MessageHandler> = {
   },
 
   // ── Chat ──
-  CHAT_WITH_KNOWLEDGE: handleChat,
+  CHAT_WITH_KNOWLEDGE: handleChatRemoved,
   GET_CHAT_HISTORY: handleGetChatHistory,
   // In-flight answer for a chat (for a panel that mounts mid-stream).
   GET_CHAT_STREAM: async (req: Record<string, unknown>) => {
@@ -493,7 +512,7 @@ const messageHandlers: Record<string, MessageHandler> = {
     // a fresh heartbeat (a run in another worker instance, or one still in
     // its startup window before the controller is registered).
     const fresh = !!job?.lastHeartbeatAt && Date.now() - job.lastHeartbeatAt < HEARTBEAT_STALE_MS;
-    const running = !!job && (abortControllers.has(job.projectId) || (job.active && fresh));
+    const running = !!job && (researchControllers.has(job.projectId) || researchStartsPending.has(job.projectId) || (job.active && fresh));
     return { job, running };
   },
 
@@ -501,6 +520,26 @@ const messageHandlers: Record<string, MessageHandler> = {
   IMPORT_LOCAL_MD: handleImportLocalMd,
   IMPORT_LOCAL_PDF: handleImportLocalPdf,
   IMPORT_LOCAL_IMAGES: handleImportLocalImages,
+
+  // Resolve a magpie-img:// ref to a renderable data URL (DocumentView img).
+  GET_DOC_IMAGE: async (request) => {
+    const docId = request.docId as string;
+    const imgId = request.imgId as string;
+    if (!docId || !imgId) throw new Error('docId and imgId are required');
+    const img = await getDocImage(docId, imgId);
+    if (!img) return { found: false };
+    return { found: true, dataUrl: await blobToDataUrl(img.blob), width: img.width, height: img.height };
+  },
+
+  // All images of a doc (export materialization): id → dataUrl.
+  LIST_DOC_IMAGES: async (request) => {
+    const docId = request.docId as string;
+    if (!docId) throw new Error('docId is required');
+    const imgs = await listDocImages(docId);
+    const out: Array<{ imgId: string; dataUrl: string }> = [];
+    for (const im of imgs) out.push({ imgId: im.imgId, dataUrl: await blobToDataUrl(im.blob) });
+    return { images: out };
+  },
 
 
   // ── Citations ──
@@ -733,7 +772,7 @@ async function selectPageMarkdown(ctx: PageContext, question: string): Promise<s
       if (entry) entry.chunks = chunks;
     }
 
-    const qRes: any = await sendToOffscreen({ action: 'OFFSCREEN_GET_EMBEDDINGS', texts: [question] }, undefined, embedOpts());
+    const qRes: any = await sendToOffscreen({ action: 'OFFSCREEN_GET_EMBEDDINGS', texts: [question], kind: 'query' }, undefined, embedOpts());
     const qVec: number[] | undefined = qRes?.ok ? qRes.embeddings?.[0] : undefined;
     if (!qVec) throw new Error('no query embedding');
 
@@ -919,16 +958,23 @@ async function handleImportLocalMd(request: Record<string, unknown>): Promise<Re
       const title = file.name.replace(/\.(md|markdown)$/i, '');
       const tempId = crypto.randomUUID?.() ?? `${Date.now()}`;
       const docShortId = makeDocShortId(tempId);
-      // Chunk a version with data URLs stripped so base64 blobs never end up
-      // in the search index or LLM context. Full content (with images) is
-      // still stored on the document for viewing.
-      const wordCount = file.content.replace(/\(data:[^)]+\)/g, '').split(/\s+/).filter(Boolean).length;
-      // Keep existing frontmatter (Obsidian notes etc.); add ours when absent
-      const content = hasFrontmatter(file.content)
+      // Inline data-URL images are EXTRACTED to the docImages blob store and
+      // replaced with magpie-img:// refs (replaces the old "(embedded-image)"
+      // placeholder hack): stored content stays small, chunk text exactly
+      // matches stored content (no offset divergence), images view + export.
+      const withFm = hasFrontmatter(file.content)
         ? file.content
-        : buildFrontmatter({ title, type: 'local-import', source: 'local-file', wordCount }) + file.content;
-      const visibleText = content.replace(/\(data:[^)]+\)/g, '(embedded-image)');
-      const chunks = chunkDocument({ docShortId, content: visibleText });
+        : null; // frontmatter applied below once wordCount is known
+      const extracted: Array<{ imgId: string; dataUrl: string }> = [];
+      const extractImages = (text: string) => text.replace(/!\[([^\]]*)\]\((data:image\/[^)\s]+)\)/g, (_m, alt, du) => {
+        const imgId = `md.${extracted.length + 1}`;
+        extracted.push({ imgId, dataUrl: du });
+        return `![${alt}](magpie-img://${imgId})`;
+      });
+      const stripped = extractImages(file.content);
+      const wordCount = stripped.split(/\s+/).filter(Boolean).length;
+      const content = withFm ?? (buildFrontmatter({ title, type: 'local-import', source: 'local-file', wordCount }) + stripped);
+      const chunks = chunkDocument({ docShortId, content });
 
       const { id: docId, chunks: savedChunks } = await saveDocument({
         title,
@@ -939,6 +985,11 @@ async function handleImportLocalMd(request: Record<string, unknown>): Promise<Re
         wordCount,
         syncedToDrive: false
       }, chunks);
+
+      if (extracted.length) {
+        const blobs = await Promise.all(extracted.map(async im => ({ imgId: im.imgId, blob: await dataUrlToBlob(im.dataUrl) })));
+        await saveDocImages(docId, blobs).catch(e => console.warn('saveDocImages failed', e));
+      }
 
       await linkDocumentToProject(projectId, docId);
       await addChunksToVectorStore(projectId, savedChunks);
@@ -977,9 +1028,10 @@ async function urlIsPdf(url: string): Promise<boolean> {
 async function capturePdfUrl(projectId: string | null, tab: chrome.tabs.Tab): Promise<Record<string, unknown>> {
   const url = tab.url!;
   let body = '';
+  const pdfImages: EmbeddedImage[] = [];
 
   try {
-    body = await pdfUrlToBody(url, imageToText);
+    body = await pdfUrlToBody(url, imageToText, false, pdfImages);
   } catch (e) {
     console.warn('Local PDF parse failed, falling back to Jina Reader', e);
   }
@@ -991,6 +1043,7 @@ async function capturePdfUrl(projectId: string | null, tab: chrome.tabs.Tab): Pr
       throw new Error('Could not extract text from this PDF (it may be scanned — try Import PDF instead).');
     }
     body = md;
+    pdfImages.length = 0; // Jina markdown has no extracted figures
   }
 
   const nameFromUrl = decodeURIComponent(url.split('/').pop() || 'PDF').replace(/\.pdf.*$/i, '');
@@ -998,12 +1051,13 @@ async function capturePdfUrl(projectId: string | null, tab: chrome.tabs.Tab): Pr
   const title = (tab.title && tab.title.trim() && tab.title !== url)
     ? tab.title.replace(/\.pdf$/i, '').trim()
     : nameFromUrl;
-  return savePdfDocument(projectId, url, title, tab.favIconUrl || '', body);
+  return savePdfDocument(projectId, url, title, tab.favIconUrl || '', body, pdfImages);
 }
 
 /** Persist a parsed PDF body as a first-class `pdf` document (+ vector store). */
 async function savePdfDocument(
   projectId: string | null, url: string, title: string, favicon: string, body: string,
+  images?: EmbeddedImage[],
 ): Promise<Record<string, unknown>> {
   const now = new Date().toISOString();
   const wordCount = body.split(/\s+/).filter(Boolean).length;
@@ -1013,6 +1067,14 @@ async function savePdfDocument(
   const { id: docId, chunks: savedChunks } = await saveDocument({
     title, url, content: fullMarkdown, capturedAt: now, favicon, wordCount, syncedToDrive: false,
   }, chunks);
+  // Embedded figures land in the docImages store; the markdown already
+  // references them via magpie-img://{imgId} (doc-relative).
+  if (images?.length) {
+    const blobs = await Promise.all(images.map(async im => ({
+      imgId: im.imgId, blob: await dataUrlToBlob(im.dataUrl), width: im.width, height: im.height,
+    })));
+    await saveDocImages(docId, blobs).catch(e => console.warn('saveDocImages failed', e));
+  }
   if (projectId) {
     await linkDocumentToProject(projectId, docId);
     await addChunksToVectorStore(projectId, savedChunks);
@@ -1039,15 +1101,16 @@ async function captureEmbeddedPdf(
     console.warn('[capture] EXTRACT_PDF:', ex?.error || 'no bytes');
     return null;
   }
-  const body = await pdfBase64ToBody(ex.base64 as string, imageToText);
+  const pdfImages: EmbeddedImage[] = [];
+  const body = await pdfBase64ToBody(ex.base64 as string, imageToText, false, pdfImages);
   const textOnly = body.replace(/## Page \d+/g, '').replace(/\*\(no extractable text\)\*/g, '').trim();
   if (textOnly.length < 50) throw new Error('captured PDF had no extractable text (scanned — try Import PDF)');
   const title = ((ex.title as string) || fallbackTitle || (ex.url as string) || pdfUrl).replace(/\.pdf$/i, '').trim();
-  return savePdfDocument(projectId, (ex.url as string) || pdfUrl, title, tab.favIconUrl || '', body);
+  return savePdfDocument(projectId, (ex.url as string) || pdfUrl, title, tab.favIconUrl || '', body, pdfImages);
 }
 
 /** Save one processed document (text) into IndexedDB + vector store + project. */
-async function saveProcessedDoc(projectId: string, title: string, content: string): Promise<void> {
+async function saveProcessedDoc(projectId: string, title: string, content: string, images?: EmbeddedImage[]): Promise<string> {
   const tempId = crypto.randomUUID?.() ?? `${Date.now()}`;
   const docShortId = makeDocShortId(tempId);
   const chunks = chunkDocument({ docShortId, content });
@@ -1060,8 +1123,15 @@ async function saveProcessedDoc(projectId: string, title: string, content: strin
     wordCount: content.split(/\s+/).filter(Boolean).length,
     syncedToDrive: false
   }, chunks);
+  if (images?.length) {
+    const blobs = await Promise.all(images.map(async im => ({
+      imgId: im.imgId, blob: await dataUrlToBlob(im.dataUrl), width: im.width, height: im.height,
+    })));
+    await saveDocImages(docId, blobs).catch(e => console.warn('saveDocImages failed', e));
+  }
   await linkDocumentToProject(projectId, docId);
   await addChunksToVectorStore(projectId, savedChunks);
+  return docId;
 }
 
 /**
@@ -1095,12 +1165,13 @@ async function handleImportLocalPdf(request: Record<string, unknown>): Promise<R
           throw new Error(`only ${file.size} bytes — this looks like a shortcut/alias to the real file; open its location and pick the original`);
         }
 
-        const body = await pdfOpfsToBody(file.opfsName, file.size, imageToText);
+        const pdfImages: EmbeddedImage[] = [];
+        const body = await pdfOpfsToBody(file.opfsName, file.size, imageToText, false, pdfImages);
         const content = buildFrontmatter({
           title, type: 'pdf', source: 'local-pdf',
           wordCount: body.split(/\s+/).filter(Boolean).length
         }) + body;
-        await saveProcessedDoc(projectId, title, content);
+        await saveProcessedDoc(projectId, title, content, pdfImages);
         imported++;
         notifyImportProgress({ type: 'pdf-progress', file: file.name, status: 'done', imported, total: files.length });
       } catch (err) {
@@ -1248,8 +1319,9 @@ async function handleCancelTask(request: Record<string, unknown>): Promise<Recor
     abortControllers.delete(chatId);
   }
   if (projectId) {
-    abortControllers.get(projectId)?.abort();
-    abortControllers.delete(projectId);
+    researchControllers.get(projectId)?.abort();
+    researchControllers.delete(projectId);
+    researchStartsPending.delete(projectId);
     // Stop is a FORCE-clear, not just an abort: a run wedged in a
     // non-abortable await (hung offscreen call, stalled stream) never
     // reaches its cleanup `finally`, leaving the active job record
@@ -1289,7 +1361,7 @@ async function resolveQuestionIntent(
 ): Promise<string> {
   if (!needsIntentResolution(prompt, formattedHistory.length)) return prompt;
   try {
-    const sys = `Rewrite the user's latest message as ONE standalone, search-friendly question. Resolve pronouns and references ("it", "this page", "the skill") using the conversation${pageTitle ? ' and the page they are viewing' : ''}. Keep the user's intent exactly — do not answer, broaden, or narrow it. Return ONLY the rewritten question.`;
+    const sys = `Rewrite the user's latest message as ONE standalone, search-friendly question. Resolve pronouns and references ("it", "this page", "the skill") using the conversation${pageTitle ? ' and the page they are viewing' : ''}. Keep the user's intent exactly — do not answer, broaden, or narrow it. Keep the SAME language as the user's message. Return ONLY the rewritten question.`;
     const user = `${pageTitle ? `Page being viewed: ${pageTitle}\n\n` : ''}Conversation:\n${formatHistoryForIntent(formattedHistory)}\n\nLatest message: ${prompt}`;
     const rewritten = (await chatWithCustom(sys, [], user, signal)).trim().replace(/^["']|["']$/g, '').split('\n')[0].trim();
     if (rewritten.length > 5 && rewritten.length < 300) {
@@ -1351,20 +1423,26 @@ async function isQuestionAboutPage(q: string, page: PageContext, signal: AbortSi
       `Decide whether their question is about THIS page (its subject, site, or content) or is an unrelated general question ` +
       `— weather, math, world facts, another website, personal chit-chat. Reply with exactly one word: PAGE or OTHER.`;
     const ans = await chatWithCustom(sys, [], q, signal);
-    const val = !/\bOTHER\b/i.test(ans);
+    // Only an explicit PAGE verdict routes to the page. An unparseable answer
+    // (refusal, prose, empty string) is AMBIGUOUS — the old fail-open treated
+    // garbage as PAGE and forced unrelated questions through the page path.
+    const val = /\bPAGE\b/i.test(ans) && !/\bOTHER\b/i.test(ans);
     if (pageRelevanceCache.size > 200) pageRelevanceCache.clear(); // bound memory
     pageRelevanceCache.set(key, { val, ts: Date.now() });
     return val;
   } catch (e) {
     if (signal.aborted) throw e;
-    return true; // provider hiccup — honor the attached page rather than drop it
+    // Provider hiccup: prefer the heuristic result (keyword overlap already
+    // said no) over honoring the page blindly — a misrouted turn is worse
+    // than an ungrounded one.
+    return false;
   }
 }
 
 /** Which pipeline produced the turn's system prompt. `general` lets the
  *  streaming layer emit the "answering from general knowledge" disclosure
  *  deterministically instead of trusting the model to include it. */
-type ChatBranch = 'chitchat' | 'meta' | 'citation' | 'page' | 'web' | 'general';
+type ChatBranch = 'chitchat' | 'meta' | 'no-page' | 'citation' | 'page' | 'web' | 'general';
 
 // The languages/tone rule for EVERY chat branch. Small models default to the
 // system prompt's language (English) — without this, a Kurdish/Finnish/… user
@@ -1423,7 +1501,11 @@ async function buildChatRequest(chatId: string, projectId: string, prompt: strin
   // active research run at the offscreen embedder. Answer conversationally.
   // A greeting stays a greeting even with a web page open — an open tab
   // doesn't turn "hi" into a question, so don't gate this on pageContext.
-  if (isChitchat(prompt)) {
+  // HISTORY GUARD: only at conversation start. Mid-conversation "ok"/"thanks"
+  // used to hijack the turn into the ONBOARDING greeting — nonsense at turn 12.
+  // With history present, an acknowledgement falls through to the normal
+  // pipeline (the confidence gate + refusal net handle it).
+  if (isChitchat(prompt) && formattedHistory.length < 2) {
     onStatus?.('Writing the answer…');
     const systemPrompt = rulesBlock +
       `You are Magpie, a warm, concise research assistant. The user sent a greeting or small talk — NOT a research question. ` +
@@ -1563,7 +1645,7 @@ async function buildChatRequest(chatId: string, projectId: string, prompt: strin
 
     // We add strict anti-hallucination prompts to the system prompt
     systemPrompt = CITATION_SYSTEM_PROMPT +
-      `\nCRITICAL ANTI-HALLUCINATION RULE: If the answer cannot be found in the provided sources, you MUST say "I cannot answer this based on the provided sources." DO NOT rely on external knowledge.\n` +
+      `\nCRITICAL ANTI-HALLUCINATION RULE: If the answer cannot be found in the provided sources, reply with ONLY NO_SOURCES_IN_WORKSPACE. DO NOT rely on external knowledge.\n` +
       RESPONSE_STYLE +
       `\n--- SOURCES ---\n${context}\n--- END SOURCES ---`;
   } else if (usePage) {
@@ -1594,7 +1676,7 @@ async function buildChatRequest(chatId: string, projectId: string, prompt: strin
       `Do NOT guess what the page might be, and do NOT answer from unrelated knowledge.` +
       RESPONSE_STYLE;
     onStatus?.('Writing the answer…');
-    return { systemPrompt: rulesBlock + localeBlock + systemPrompt, formattedHistory, linkedPages: [], grounded: false, place, branch: 'meta' };
+    return { systemPrompt: rulesBlock + localeBlock + systemPrompt, formattedHistory, linkedPages: [], grounded: false, place, branch: 'no-page' };
   } else {
     // No workspace match and no open page. Before conceding to stale "general
     // knowledge", escalate to a quick live web search (+ any enabled search
@@ -2200,6 +2282,7 @@ Rules:
 - Use synonyms and related terms
 - Rephrase from different angles
 - Keep each query short (under 10 words)
+- Keep the SAME language as the original query (do not translate to English)
 - Output ONLY the 3 queries, one per line, no numbering, no explanation`
       }],
       temperature: 0.3,
@@ -2218,9 +2301,14 @@ Rules:
     .slice(0, 3);
 }
 async function callCompanion(companionUrl: string, args: Record<string, unknown>): Promise<any> {
+  // Bounded: a hung companion (half-open socket, wedged CLI) used to stall the
+  // chat turn until the browser's TCP timeout — minutes of apparent freeze.
+  // Command execution passes its own timeoutMs; default 30s for health-ish calls.
+  const timeoutMs = Math.min(Math.max(Number(args.timeoutMs) || 30_000, 5_000), 300_000) + 5_000;
   const res = await fetch(companionUrl, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
+    signal: AbortSignal.timeout(timeoutMs),
     body: JSON.stringify({
       jsonrpc: '2.0',
       id: Date.now(),
@@ -2327,88 +2415,12 @@ async function runCliChat(
 }
 
 
-async function handleChat(request: Record<string, unknown>): Promise<Record<string, unknown>> {
-  const prompt = request.prompt as string;
-  const chatId = request.chatId as string;
-  const projectId = request.projectId as string;
-
-  if (!chatId || !projectId) throw new Error('chatId and projectId are required for chat');
-
-  const controller = new AbortController();
-  abortControllers.set(chatId, controller);
-  const signal = controller.signal;
-
-  // Mark this an interactive turn so its embeds jump ahead of any research run.
-  interactiveDepth++;
-  try {
-    const pageCtx = request.includePageContext ? await getPageContext().catch(() => null) : null;
-    const { systemPrompt, formattedHistory, linkedPages, branch } = await buildChatRequest(chatId, projectId, prompt, signal, pageCtx);
-
-    // Persist the user message immediately so it survives errors/reloads
-    await saveChatMessage({
-      chatId,
-      role: 'user',
-      text: prompt,
-      timestamp: new Date().toISOString(),
-      provider: 'custom'
-    });
-
-    const storage = await chrome.storage.local.get(['routeChatThroughCli', 'cliCommandTemplate', 'localMcpCompanionUrl']);
-    const routeChat = storage.routeChatThroughCli;
-    const cmdTemplate = storage.cliCommandTemplate || 'claude "{prompt}"';
-    const companionUrl = storage.localMcpCompanionUrl || 'http://localhost:3920/mcp';
-
-    let useCli = false;
-    if (routeChat === 'enabled' || routeChat === true) {
-      useCli = true;
-    } else if (routeChat === 'auto') {
-      try {
-        const healthUrl = companionUrl.replace(/\/mcp\/?$/, '/health');
-        const probe = await fetch(healthUrl, { method: 'GET', signal: AbortSignal.timeout(1000) });
-        if (probe.ok) {
-          useCli = true;
-        }
-      } catch {
-        useCli = false;
-      }
-    }
-
-    let reply = '';
-    let cliSuccess = false;
-
-    if (useCli) {
-      try {
-        reply = await runCliChat(companionUrl, cmdTemplate, systemPrompt, formattedHistory, prompt);
-        reply += linkedPagesFooter(linkedPages);
-        cliSuccess = true;
-      } catch (e) {
-        console.warn('[CLI] chat via local CLI failed — falling back to standard provider:', e);
-      }
-    }
-
-    if (!cliSuccess) {
-      reply = await chatWithCustom(systemPrompt, formattedHistory, prompt, signal)
-        + linkedPagesFooter(linkedPages);
-    }
-
-    // Same deterministic disclosure the streaming path emits (see chat-stream).
-    if (branch === 'general') {
-      reply = `*No matching sources in this workspace — answering from general knowledge.*\n\n${reply}`;
-    }
-
-    await saveChatMessage({
-      chatId,
-      role: 'assistant',
-      text: reply,
-      timestamp: new Date().toISOString(),
-      provider: 'custom'
-    });
-
-    return { reply };
-  } finally {
-    interactiveDepth = Math.max(0, interactiveDepth - 1);
-    abortControllers.delete(chatId);
-  }
+async function handleChatRemoved(): Promise<Record<string, unknown>> {
+  // CHAT_WITH_KNOWLEDGE was deleted: it duplicated the chat-stream port router
+  // WITHOUT its refusal→web net, systemPromptOverride support, or streaming
+  // disclosure laziness — any caller silently got a worse pipeline. Nothing in
+  // the sidepanel called it (all chat flows use the `chat-stream` port).
+  throw new Error('CHAT_WITH_KNOWLEDGE is removed — use the chat-stream port.');
 }
 
 // ─────────────────────────────────────────────
@@ -2511,8 +2523,11 @@ chrome.runtime.onConnect.addListener((port) => {
       // Check if routing chat through CLI is enabled
       const storage = await chrome.storage.local.get(['routeChatThroughCli', 'cliCommandTemplate', 'localMcpCompanionUrl']);
       const routeChat = storage.routeChatThroughCli;
-      const cmdTemplate = storage.cliCommandTemplate || 'claude "{prompt}"';
-      const companionUrl = storage.localMcpCompanionUrl || 'http://localhost:3920/mcp';
+      // Same default as the UI ('auto' = detect an installed CLI) — the old
+      // 'claude "{prompt}"' fallback made a fresh install behave differently
+      // from what Settings displayed.
+      const cmdTemplate = storage.cliCommandTemplate || CLI_TEMPLATE_AUTO;
+      const companionUrl = storage.localMcpCompanionUrl || DEFAULT_COMPANION_MCP_URL;
 
       let useCli = false;
       if (routeChat === 'enabled' || routeChat === true) {
@@ -2561,7 +2576,9 @@ chrome.runtime.onConnect.addListener((port) => {
       // over the bar). If the model itself says it can't answer from the
       // sources, escalate to a live web search and REPLACE the refusal — the
       // model's own judgment is the ground truth the scores only approximate.
-      if (grounded && !systemPromptOverride && isRefusalAnswer(full) && await isChatWebFallbackEnabled()) {
+      // Command turns (systemPromptOverride, e.g. /compare) get the net too —
+      // a refusal there used to be FINAL, a dead end with no escalation.
+      if (grounded && isRefusalAnswer(full) && await isChatWebFallbackEnabled()) {
         safePost({ type: 'STATUS', text: 'Not in your workspace — searching the web…' });
         // Localize the query (same as the main web branch) so "weather today"
         // resolves to the user's region, not the search provider's server IP.
@@ -2585,6 +2602,12 @@ chrome.runtime.onConnect.addListener((port) => {
           await chatWithCustomStream(webSys, [], prompt, localController.signal, emitDelta);
           linkedPages = web.sources; // footer below now points at the web sources
         }
+      }
+
+      // Sentinel hygiene: if the refusal net didn't fire (web fallback off, or
+      // no web results), never leak the raw escalation token into the answer.
+      if (full.includes('NO_SOURCES_IN_WORKSPACE')) {
+        full = full.replace(/NO_SOURCES_IN_WORKSPACE/g, 'This information was not found in your sources.').trim();
       }
 
       // Deterministic clickable trail of auto-followed links — streamed as a
@@ -2682,7 +2705,7 @@ async function resolveResearchTopic(
   if (!recent && !titles) return topic;
 
   const res = await chatFn(
-    `Today's date is ${new Date().toISOString().slice(0, 10)}. You rewrite a user's research request into ONE self-contained, web-searchable research topic. The request may reference the conversation or the user's workspace documents ("these", "this model", "the above"). Resolve those references using the provided context. Return ONLY the rewritten topic as a single sentence — no quotes, no explanation. If the request is already self-contained, return it unchanged.`,
+    `Today's date is ${new Date().toISOString().slice(0, 10)}. You rewrite a user's research request into ONE self-contained, web-searchable research topic. The request may reference the conversation or the user's workspace documents ("these", "this model", "the above"). Resolve those references using the provided context. Return ONLY the rewritten topic as a single sentence — no quotes, no explanation, and KEEP the language of the original request. If the request is already self-contained, return it unchanged.`,
     `Workspace documents: ${titles || '(none)'}\n\nRecent conversation:\n${recent || '(none)'}\n\nResearch request: ${topic}`
   );
 
@@ -2876,20 +2899,31 @@ async function isResearchActive(): Promise<boolean> {
 
 /** Resolve the topic, checkpoint + mark the job active, and run it. Shared by the
  *  direct-start path and the queue drainer. */
-async function startResearchRun(params: { projectId: string; chatId?: string; topic: string; mode: 'quick' | 'deep'; sourceMode?: 'auto' | 'academic' }): Promise<Record<string, unknown>> {
-  const { projectId, chatId, topic, mode, sourceMode = 'auto' } = params;
-  const chatFn = (s: string, u: string) => chatWithCustom(s, [], u);
-  let effectiveTopic = topic;
+async function startResearchRun(params: { projectId: string; chatId?: string; topic: string; mode: 'quick' | 'deep'; sourceMode?: 'auto' | 'academic'; preResolved?: boolean }): Promise<Record<string, unknown>> {
+  const { projectId, chatId, topic, mode, sourceMode = 'auto', preResolved } = params;
+  researchStartsPending.add(projectId);
   try {
-    effectiveTopic = await resolveResearchTopic(topic, chatId, projectId, chatFn);
-  } catch (e) {
-    console.warn('Topic resolution failed, using raw topic', e);
+    const chatFn = (s: string, u: string) => chatWithCustom(s, [], u);
+    // A topic that already went through resolveResearchTopic at PREVIEW time
+    // (and was confirmed on the plan card) must run AS SHOWN — re-resolving
+    // against possibly-updated history made the executed run diverge from the
+    // confirmed plan (and cost a second LLM call).
+    let effectiveTopic = topic;
+    if (!preResolved) {
+      try {
+        effectiveTopic = await resolveResearchTopic(topic, chatId, projectId, chatFn);
+      } catch (e) {
+        console.warn('Topic resolution failed, using raw topic', e);
+      }
+    }
+    // Checkpoint so a worker/browser death can resume it; mark active BEFORE running
+    // so resumePendingResearch only resumes jobs that actually started.
+    await startResearchJob({ projectId, chatId, topic, effectiveTopic, mode, sourceMode }).catch(() => {});
+    await markJobActive().catch(() => {});
+    return await executeResearch({ projectId, chatId, topic, effectiveTopic, mode, sourceMode });
+  } finally {
+    researchStartsPending.delete(projectId);
   }
-  // Checkpoint so a worker/browser death can resume it; mark active BEFORE running
-  // so resumePendingResearch only resumes jobs that actually started.
-  await startResearchJob({ projectId, chatId, topic, effectiveTopic, mode, sourceMode }).catch(() => {});
-  await markJobActive().catch(() => {});
-  return executeResearch({ projectId, chatId, topic, effectiveTopic, mode, sourceMode });
 }
 
 // One research run at a time (the job checkpoint is a singleton). Rather than
@@ -2901,7 +2935,9 @@ async function drainResearchQueue(): Promise<void> {
   if (queueDraining) return;
   queueDraining = true;
   try {
-    if (abortControllers.size > 0 || await isResearchActive()) return; // still busy
+    // Only RESEARCH controllers count as busy — a chat stream must never park
+    // the research queue (chat during a run is a supported flow).
+    if (researchControllers.size > 0 || researchStartsPending.size > 0 || await isResearchActive()) return; // still busy
     const next = await dequeueResearch();
     if (!next) return;
     chrome.runtime.sendMessage({ action: 'DEEP_RESEARCH_LOG', projectId: next.projectId, status: '[QUEUE] Starting next queued research…' }).catch(() => {});
@@ -2920,6 +2956,14 @@ async function handleDeepResearch(request: Record<string, unknown>): Promise<Rec
   const sourceMode = (request.sourceMode as string) === 'academic' ? 'academic' as const : 'auto' as const;
   if (!projectId || !topic) throw new Error('projectId and topic are required');
 
+  // Claim the start slot SYNCHRONOUSLY (before any await). Two rapid
+  // START_DEEP_RESEARCH messages otherwise both pass the async busy check below
+  // (the first is still awaiting resolveResearchTopic) and run concurrently,
+  // stomping the singleton job checkpoint.
+  const pid = projectId as string;
+  const claimed = !researchStartsPending.has(pid) && !researchControllers.has(pid);
+  if (claimed) researchStartsPending.add(pid);
+
   // Persist the command in chat first so it shows in the conversation whether it
   // starts now or gets queued.
   if (chatId) {
@@ -2935,14 +2979,16 @@ async function handleDeepResearch(request: Record<string, unknown>): Promise<Rec
 
   // If a run is already active, queue this one instead of erroring — it starts
   // automatically when the current run finishes.
-  const busy = abortControllers.has(projectId as string) || await isResearchActive();
+  const busy = !claimed || researchControllers.has(pid) || await isResearchActive();
   if (busy) {
+    if (claimed) researchStartsPending.delete(pid);
     const position = await enqueueResearch({
       projectId: projectId as string,
       chatId: chatId as string | undefined,
       topic: topic as string,
       mode,
-      sourceMode
+      sourceMode,
+      preResolved: request.preResolved === true
     });
     if (chatId) {
       await saveChatMessage({
@@ -2962,7 +3008,8 @@ async function handleDeepResearch(request: Record<string, unknown>): Promise<Rec
     chatId: chatId as string | undefined,
     topic: topic as string,
     mode,
-    sourceMode
+    sourceMode,
+    preResolved: request.preResolved === true
   });
 }
 
@@ -3005,15 +3052,19 @@ function deadlineSignal(parent: AbortSignal, ms: number): { signal: AbortSignal;
 /** Run (or resume) a research job. Job checkpoint must already exist. */
 async function executeResearch({ projectId, chatId, topic, effectiveTopic, mode, sourceMode = 'auto' }: ResearchParams): Promise<Record<string, unknown>> {
   const controller = new AbortController();
-  abortControllers.set(projectId, controller);
+  researchControllers.set(projectId, controller);
   const signal = controller.signal;
 
   // Workspace instructions apply to research too — prepended to every research
   // LLM call's system prompt so the report follows the workspace's conventions.
   const rp = await getProject(projectId).catch(() => null);
-  const researchRules = rp?.rules?.trim()
+  const researchRules = (rp?.rules?.trim()
     ? `--- WORKSPACE INSTRUCTIONS (always follow these) ---\n${rp.rules.trim()}\n--- END WORKSPACE INSTRUCTIONS ---\n\n`
-    : '';
+    : '') +
+    // REPORT LANGUAGE: the whole report (briefs, sections, headings, verdicts)
+    // follows the TOPIC's language — otherwise a Finnish/Japanese research
+    // request silently produced an English report.
+    `--- REPORT LANGUAGE ---\nDetect the language of the research topic below and write ALL output (plans are exempt) in that language, including headings. Topic: "${effectiveTopic.slice(0, 300)}"\n--- END REPORT LANGUAGE ---\n\n`;
 
   // Every planning/analysis LLM call carries its own deadline; timing out
   // fails THAT call (callers all have fallbacks) instead of the whole run.
@@ -3143,7 +3194,7 @@ async function executeResearch({ projectId, chatId, topic, effectiveTopic, mode,
     return { success: false, error: message };
   } finally {
     clearInterval(heartbeatInterval);
-    abortControllers.delete(projectId);
+    researchControllers.delete(projectId);
     // Evict the in-memory Orama index for this session; persisted documents
     // (source pages + synthesis report) rehydrate from IDB on the next search.
     resetSessionIndex(projectId);
@@ -3191,7 +3242,7 @@ async function resumePendingResearch(): Promise<void> {
     // instead of resuming it. An active job = resume; the attempt cap below bounds
     // any genuine loop.
 
-    if (abortControllers.has(job.projectId)) return; // already running in this instance
+    if (researchControllers.has(job.projectId) || researchStartsPending.has(job.projectId)) return; // already running in this instance
     if (Date.now() - new Date(job.startedAt).getTime() > JOB_MAX_AGE_MS) {
       await clearResearchJob();
       return;
@@ -3244,6 +3295,30 @@ async function resumePendingResearch(): Promise<void> {
 // Give the worker a moment to settle, then check for an interrupted job.
 setTimeout(() => { void resumePendingResearch(); }, 2000);
 
+// ── Embedding-model migration ──
+// The embedder was swapped to multilingual-e5-small; embeddings from the old
+// English MiniLM are cosine-incompatible (stored vectors would match NOTHING
+// against new query vectors). Detect the swap once and re-index the library in
+// the background. Chunks stay keyword-searchable meanwhile.
+const EMBED_MODEL_STORAGE_KEY = 'magpie-embedding-model';
+const CURRENT_EMBED_MODEL = 'multilingual-e5-small';
+setTimeout(() => {
+  (async () => {
+    try {
+      const s = await chrome.storage.local.get([EMBED_MODEL_STORAGE_KEY]);
+      if (s[EMBED_MODEL_STORAGE_KEY] === CURRENT_EMBED_MODEL) return;
+      const docs = await listDocuments();
+      await chrome.storage.local.set({ [EMBED_MODEL_STORAGE_KEY]: CURRENT_EMBED_MODEL });
+      if (docs.length === 0) return;
+      crumb('sw', 'embedding model changed — background re-index', { docs: docs.length });
+      chrome.runtime.sendMessage({ action: 'DEEP_RESEARCH_LOG', status: '[INDEX] Upgrading the search index for multilingual support… (one-time, runs in background)' }).catch(() => {});
+      await handleReindexLibrary();
+    } catch (e) {
+      console.warn('[SW] embedding-model migration check failed', e);
+    }
+  })();
+}, 8000);
+
 // ─────────────────────────────────────────────
 // AI Provider Implementations
 // ─────────────────────────────────────────────
@@ -3251,8 +3326,37 @@ setTimeout(() => { void resumePendingResearch(); }, 2000);
 
 // ── Provider Settings Helper ──
 
+// ── Image blob helpers (docImages store) ──
+async function dataUrlToBlob(dataUrl: string): Promise<Blob> {
+  const m = dataUrl.match(/^data:([^;,]+)?(;base64)?,([\s\S]*)$/);
+  if (!m) throw new Error('bad data URL');
+  const mime = m[1] || 'image/png';
+  if (m[2]) {
+    const bin = atob(m[3]);
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    return new Blob([bytes], { type: mime });
+  }
+  return new Blob([decodeURIComponent(m[3])], { type: mime });
+}
+
+async function blobToDataUrl(blob: Blob): Promise<string> {
+  const bytes = new Uint8Array(await blob.arrayBuffer());
+  let binary = '';
+  const CHUNK = 0x8000;
+  for (let i = 0; i < bytes.length; i += CHUNK) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + CHUNK));
+  }
+  return `data:${blob.type || 'image/png'};base64,${btoa(binary)}`;
+}
+
 // ── Jina Reader: free web/PDF → markdown (no API key) ──
+// Central guard: the jinaReaderEnabled privacy toggle must hold on EVERY path
+// (page context, PDF capture fallback, deep research) — previously only the
+// deep-researcher checked it, so URLs leaked to r.jina.ai with the toggle OFF.
 async function fetchViaJina(url: string): Promise<string> {
+  const s = await chrome.storage.local.get(['jinaReaderEnabled']);
+  if (s.jinaReaderEnabled === false) throw new Error('Jina Reader disabled in Settings');
   const res = await fetch(`https://r.jina.ai/${url}`, {
     headers: { 'Accept': 'text/plain' },
     signal: AbortSignal.timeout(25000)
@@ -3268,7 +3372,9 @@ async function fetchViaJina(url: string): Promise<string> {
 async function imageToText(dataUrl: string, instruction?: string): Promise<string> {
   const { apiKey, endpoint, visionModel, model } = await getProviderSettings();
   if (!endpoint) throw new Error('Set an API Base URL in Settings first.');
-  const useModel = visionModel || model;
+  // trim(): a whitespace-only visionModel ("Use Text Model" sentinel bug) is
+  // truthy and would be sent as a literal " " model name — treat it as unset.
+  const useModel = (visionModel?.trim()) || model;
   if (!useModel) throw new Error('Set a Vision Model in Settings first.');
 
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
@@ -3277,6 +3383,9 @@ async function imageToText(dataUrl: string, instruction?: string): Promise<strin
   const res = await fetch(endpoint, {
     method: 'POST',
     headers,
+    // A stalled vision endpoint must not hang image import / PDF OCR forever —
+    // these run fire-and-forget with no watchdog of their own.
+    signal: AbortSignal.timeout(120_000),
     body: JSON.stringify({
       model: useModel,
       messages: [{

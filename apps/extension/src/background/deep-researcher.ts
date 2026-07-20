@@ -29,11 +29,9 @@ import {
 // processing keeps peak WASM memory ~constant regardless of session size.
 const indexingSem = semaphore(1);
 
-// Hard cap on markdown length fed to the embedder per research source.
-// ~60 k chars ≈ 15–20 k tokens — enough for a full abstract + methods
-// section. Full papers that exceed this are still stored in full; only the
-// embedding pass is truncated so ONNX never sees a single giant input.
-const MAX_EMBED_CHARS = 60_000;
+// (The old 60k doc-level embed cap was removed: per-chunk embed truncation +
+// batched embedding already bound ONNX memory, and the cap silently left long
+// papers with zero chunks past 60k — a retrieval hole.)
 
 // Active tier for the current run — set at run start from Settings. A single
 // research job runs at a time (enforced by the job store), so module state
@@ -157,7 +155,10 @@ const DATA_TRAILER =
  * section whose entries are bracket-led lines.
  */
 export function stripModelBibliography(synthesis: string): string {
-  const m = synthesis.match(/\n#{0,4}\s*\**\s*(Bibliography|References|Works Cited|Sources)\s*\**\s*\n/i);
+  // Heading names beyond English too (Literaturverzeichnis, Références,
+  // Lähteet/Viitteet, 参考文献…) — a non-English report's fake bibliography
+  // must strip just the same.
+  const m = synthesis.match(/\n#{0,4}\s*\**\s*(Bibliography|References|Works Cited|Sources|Literatur(?:verzeichnis)?|R[eé]f[eé]rences|Quellen|L[aä]hteet|Viitteet|参考文献)\s*\**\s*\n/i);
   if (!m || m.index === undefined) return synthesis;
   const tail = synthesis.slice(m.index + m[0].length);
   const tailLines = tail.split('\n').map(l => l.trim()).filter(Boolean);
@@ -188,8 +189,8 @@ export function stripLeadingTitle(synthesis: string, topic = ''): string {
   const text = h2[1].trim();
   if (/^(deep\s+)?research\b|^report\b|\breport\s*(on|:)/i.test(text)) return s.slice(h2[0].length);
   if (topic) {
-    const topicToks = new Set(topic.toLowerCase().split(/[^a-z0-9]+/).filter(t => t.length > 3));
-    const headToks = text.toLowerCase().split(/[^a-z0-9]+/).filter(t => t.length > 3);
+    const topicToks = new Set(topic.toLowerCase().split(/[^\p{L}\p{N}]+/u).filter(t => t.length > 3));
+    const headToks = text.toLowerCase().split(/[^\p{L}\p{N}]+/u).filter(t => t.length > 3);
     if (headToks.length > 0 && topicToks.size > 0) {
       const overlap = headToks.filter(t => topicToks.has(t)).length / headToks.length;
       if (overlap >= 0.6) return s.slice(h2[0].length); // restated title, not a section
@@ -245,10 +246,20 @@ async function parseHtmlOffscreen(html: string, url: string): Promise<ParsedPage
 
 // ── Fetch helpers ──
 
+// Accept-Language follows the browser UI locale (with English fallback) — a
+// hardcoded en-US made multilingual sites serve English even when the user's
+// local version existed.
+function acceptLanguage(): string {
+  try {
+    const ui = chrome.i18n?.getUILanguage?.() || 'en';
+    return ui.toLowerCase().startsWith('en') ? 'en-US,en;q=0.9' : `${ui},${ui.split('-')[0]};q=0.9,en;q=0.5`;
+  } catch { return 'en-US,en;q=0.9'; }
+}
+
 const FETCH_HEADERS = {
   'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36',
   'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-  'Accept-Language': 'en-US,en;q=0.9'
+  get 'Accept-Language'() { return acceptLanguage(); }
 };
 
 async function fetchText(url: string, timeoutMs: number, signal?: AbortSignal): Promise<string> {
@@ -478,8 +489,19 @@ async function performWebSearch(query: string, signal?: AbortSignal): Promise<Se
  */
 async function searchGoogleNewsRss(query: string, signal?: AbortSignal): Promise<string[]> {
   try {
+    // Locale from the browser UI language (was hardcoded en-US: a Finnish or
+    // Japanese topic got US-English news only).
+    let hl = 'en-US', gl = 'US', ceid = 'US:en';
+    try {
+      const ui = chrome.i18n?.getUILanguage?.() || 'en-US';
+      const [lang, region] = ui.split('-');
+      if (lang && lang !== 'en') {
+        const reg = (region || lang.toUpperCase());
+        hl = ui; gl = reg; ceid = `${reg}:${lang}`;
+      }
+    } catch { /* keep en-US */ }
     const xml = await fetchText(
-      `https://news.google.com/rss/search?q=${encodeURIComponent(query)}&hl=en-US&gl=US&ceid=US:en`,
+      `https://news.google.com/rss/search?q=${encodeURIComponent(query)}&hl=${hl}&gl=${gl}&ceid=${encodeURIComponent(ceid)}`,
       10000,
       signal
     );
@@ -712,6 +734,8 @@ export async function generateSearchQueries(topic: string, llmChatFn: (sys: stri
 
 Avoid queries that would return social media, forums, or content farms. Include "site:" operators when targeting specific authoritative domains would be beneficial.
 
+LANGUAGE: if the topic is not in English, write MOST queries in the topic's own language (local sources are the best sources), but keep 1-2 queries in English for the English-dominant academic literature. Never translate the topic away from the user's language entirely.
+
 Return ONLY a JSON array of strings, nothing else. Example: ["query 1", "query 2"]`;
   const res = await llmChatFn(sysPrompt, topic);
 
@@ -780,13 +804,11 @@ async function indexResearchDoc(
 
   const docShortId = makeDocShortId(crypto.randomUUID?.() ?? `${Date.now()}`);
 
-  // Truncate the content fed to the embedder to avoid ONNX WASM overflow on
-  // very long papers. The full content is stored in IndexedDB unchanged —
-  // only the chunk set passed to the embedding pipeline is capped.
-  const embedMarkdown = fullMarkdown.length > MAX_EMBED_CHARS
-    ? fullMarkdown.slice(0, MAX_EMBED_CHARS) + '\n\n*(document truncated for embedding)*'
-    : fullMarkdown;
-  const rawChunks = chunkDocument({ docShortId, content: embedMarkdown });
+  // Chunk the FULL document. The old 60k-char truncation left long papers
+  // with NO chunks past the cap — a silent retrieval hole (the model could
+  // never cite the tail). Per-chunk embed truncation already bounds the ONNX
+  // memory per text; embedTextsBatched bounds the batch. No doc-level cap.
+  const rawChunks = chunkDocument({ docShortId, content: fullMarkdown });
 
   // Serial indexing gate — one document at a time through the ONNX pipeline.
   const { id: docId, chunks: savedChunks, isDuplicate } = await indexingSem(() => saveDocument({
@@ -2234,7 +2256,7 @@ async function faithfulnessPass(synthesis: string, onProgress: (s: string) => vo
       },
       getChunkText: async (a) => (await getChunkByAnchor(a).catch(() => null))?.text ?? null,
     });
-    // MISCALIBRATION GATE: the ms-marco sigmoid score for a (claim, 1200-char
+    // MISCALIBRATION GATE: the ms-marco logit score for a (claim, 1200-char
     // chunk) pair is often low even when the chunk DOES support the claim, so a
     // fixed threshold can nuke most citations (observed: 29/32 dropped, which
     // destroys the report). If the pass wants to drop more than a quarter of

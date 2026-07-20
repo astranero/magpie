@@ -7,6 +7,8 @@ import { LocalDocument, ResolvedCitation } from '../types';
 import { Button } from '@/components/ui/button';
 import { ArrowLeft, ExternalLink, FileText, Check, Tag } from 'lucide-react';
 import { splitFrontmatter, parseFrontmatterFields } from '../../lib/frontmatter';
+import { cleanContent } from '../../lib/content-cleaner';
+import { MagpieImage } from './MagpieImage';
 
 // Same inline anchor format the chat renderer uses: [d3ab01.s1.p2] / [d3.s0.p1.0].
 // A research report's body carries these; some are pre-linkified to [[n](url)] by
@@ -37,8 +39,12 @@ function makeMdComponents(
   onOpenExternalLink?: (url: string) => void,
   citations?: Map<string, ResolvedCitation>,
   onOpenDocument?: (docId: string, anchorId?: string) => void,
+  docId?: string,
 ) {
   return {
+    img: ({ src, alt, ...props }: any) => (
+      <MagpieImage src={src} alt={alt} docId={docId} className="max-w-full rounded-lg border border-border my-2" {...props} />
+    ),
     a: ({ href, children, ...props }: any) => {
       // Internal citation chip — jump to the exact chunk the claim came from.
       if (typeof href === 'string' && href.startsWith('#cite:')) {
@@ -141,7 +147,26 @@ export const DocumentView: React.FC<DocumentViewProps> = ({
           }
 
           if (chunkText) {
-            // Fallback 1: whitespace-flexible match (content-cleaner collapses
+            // Tier 1: match in the CLEANED text (the chunk's own coordinate
+            // space — handles boilerplate/dedup removals), then map the hit
+            // back to the raw body via a whitespace-flexible anchor probe.
+            const cleaned = cleanContent(fullText);
+            if (cleaned !== fullText) {
+              const cIdx = cleaned.indexOf(chunkText);
+              if (cIdx !== -1) {
+                const probe = chunkText.slice(0, 120);
+                const escaped = probe.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\s+/g, '\\s+');
+                try {
+                  const m = new RegExp(escaped).exec(fullText);
+                  if (m) {
+                    setHighlight({ charStart: m.index, charEnd: Math.min(m.index + chunkText.length, fullText.length), text: chunkText });
+                    return;
+                  }
+                } catch { /* fall through to other fallbacks */ }
+              }
+            }
+
+            // Fallback 2: whitespace-flexible match (content-cleaner collapses
             // blank lines; chunk merging joins paragraphs differently). Cap
             // the pattern source so pathological chunks can't blow up regex.
             const probe = chunkText.slice(0, 600);
@@ -155,7 +180,7 @@ export const DocumentView: React.FC<DocumentViewProps> = ({
               }
             } catch { /* regex too complex/long — fall through */ }
 
-            // Fallback 2: anchor on the chunk's opening sentence.
+            // Fallback 3: anchor on the chunk's opening sentence.
             const opening = chunkText.slice(0, 100).trim();
             const openIdx = opening.length >= 30 ? fullText.indexOf(opening) : -1;
             if (openIdx !== -1) {
@@ -229,7 +254,7 @@ export const DocumentView: React.FC<DocumentViewProps> = ({
     return () => { alive = false; clearTimeout(timer); };
   }, [citeBody, anchorOrder.length, resolveCitations]);
 
-  const mdComponents = makeMdComponents(onOpenExternalLink, citations, onOpenDocument);
+  const mdComponents = makeMdComponents(onOpenExternalLink, citations, onOpenDocument, document?.id);
 
   // Turn raw [anchor] markers into numbered #cite links our renderer makes into
   // clickable chips. Unknown anchors (not seen during numbering) are left as-is.
@@ -364,7 +389,7 @@ export const DocumentView: React.FC<DocumentViewProps> = ({
         <ReactMarkdown
           remarkPlugins={[remarkGfm, remarkMath]}
           rehypePlugins={[[rehypeKatex, { strict: false, throwOnError: false }]]}
-          urlTransform={(url) => url.startsWith('data:image/') ? url : defaultUrlTransform(url)}
+          urlTransform={(url) => url.startsWith('data:image/') || url.startsWith('magpie-img://') ? url : defaultUrlTransform(url)}
           components={mdComponents}
         >
           {showRaw ? contentToRender : linkifyAnchors(contentToRender)}
@@ -390,7 +415,7 @@ export const DocumentView: React.FC<DocumentViewProps> = ({
             <ReactMarkdown
               remarkPlugins={[remarkGfm, remarkMath]}
               rehypePlugins={[[rehypeKatex, { strict: false, throwOnError: false }]]}
-              urlTransform={(url) => url.startsWith('data:image/') ? url : defaultUrlTransform(url)}
+              urlTransform={(url) => url.startsWith('data:image/') || url.startsWith('magpie-img://') ? url : defaultUrlTransform(url)}
               components={mdComponents}
             >
               {linkifyAnchors(highlight.text)}
@@ -399,7 +424,7 @@ export const DocumentView: React.FC<DocumentViewProps> = ({
           <ReactMarkdown
             remarkPlugins={[remarkGfm, remarkMath]}
             rehypePlugins={[[rehypeKatex, { strict: false, throwOnError: false }]]}
-            urlTransform={(url) => url.startsWith('data:image/') ? url : defaultUrlTransform(url)}
+            urlTransform={(url) => url.startsWith('data:image/') || url.startsWith('magpie-img://') ? url : defaultUrlTransform(url)}
             components={mdComponents}
           >
             {showRaw ? content : linkifyAnchors(fullText)}
@@ -409,8 +434,21 @@ export const DocumentView: React.FC<DocumentViewProps> = ({
     }
 
     // Clamp to valid bounds, adjusting by fmLength if showing raw frontmatter
-    const start = Math.max(0, Math.min(charStart + fmLength, fullText.length));
-    const end = Math.max(start, Math.min(charEnd + fmLength, fullText.length));
+    let start = Math.max(0, Math.min(charStart + fmLength, fullText.length));
+    let end = Math.max(start, Math.min(charEnd + fmLength, fullText.length));
+
+    // The before/highlight/after slices render as THREE separate ReactMarkdown
+    // trees — a split inside a fenced code block breaks the fence in two of
+    // them. Snap outward to the fence boundaries when the cut lands mid-block.
+    const fenceCount = (s: string) => (s.match(/```/g) || []).length;
+    if (fenceCount(fullText.slice(0, start)) % 2 === 1) {
+      const fenceStart = fullText.lastIndexOf('```', start);
+      if (fenceStart !== -1 && start - fenceStart < 2000) start = fenceStart;
+    }
+    if (fenceCount(fullText.slice(0, end)) % 2 === 1) {
+      const fenceEnd = fullText.indexOf('```', end);
+      if (fenceEnd !== -1 && fenceEnd - end < 2000) end = fenceEnd + 3;
+    }
 
     const before = fullText.slice(0, start);
     const highlighted = fullText.slice(start, end);
@@ -422,7 +460,7 @@ export const DocumentView: React.FC<DocumentViewProps> = ({
           <ReactMarkdown
             remarkPlugins={[remarkGfm, remarkMath]}
             rehypePlugins={[[rehypeKatex, { strict: false, throwOnError: false }]]}
-            urlTransform={(url) => url.startsWith('data:image/') ? url : defaultUrlTransform(url)}
+            urlTransform={(url) => url.startsWith('data:image/') || url.startsWith('magpie-img://') ? url : defaultUrlTransform(url)}
             components={mdComponents}
           >
             {showRaw ? before : linkifyAnchors(before)}
@@ -438,7 +476,7 @@ export const DocumentView: React.FC<DocumentViewProps> = ({
           <ReactMarkdown
             remarkPlugins={[remarkGfm, remarkMath]}
             rehypePlugins={[[rehypeKatex, { strict: false, throwOnError: false }]]}
-            urlTransform={(url) => url.startsWith('data:image/') ? url : defaultUrlTransform(url)}
+            urlTransform={(url) => url.startsWith('data:image/') || url.startsWith('magpie-img://') ? url : defaultUrlTransform(url)}
             components={mdComponents}
           >
             {showRaw ? highlighted : linkifyAnchors(highlighted)}
@@ -448,7 +486,7 @@ export const DocumentView: React.FC<DocumentViewProps> = ({
           <ReactMarkdown
             remarkPlugins={[remarkGfm, remarkMath]}
             rehypePlugins={[[rehypeKatex, { strict: false, throwOnError: false }]]}
-            urlTransform={(url) => url.startsWith('data:image/') ? url : defaultUrlTransform(url)}
+            urlTransform={(url) => url.startsWith('data:image/') || url.startsWith('magpie-img://') ? url : defaultUrlTransform(url)}
             components={mdComponents}
           >
             {showRaw ? after : linkifyAnchors(after)}
@@ -519,7 +557,7 @@ export const DocumentView: React.FC<DocumentViewProps> = ({
 
       {/* Content */}
       <div ref={contentRef} className="flex-1 overflow-y-auto p-6 bg-background">
-        <div className="prose prose-sans prose-sm dark:prose-invert max-w-none prose-img:rounded-md prose-img:border prose-img:border-border prose-headings:font-bold prose-a:text-primary prose-pre:rounded-md">
+        <div className="prose prose-sm dark:prose-invert max-w-none prose-img:rounded-md prose-img:border prose-img:border-border prose-headings:font-bold prose-a:text-primary prose-pre:rounded-md">
            <>
              {metadataCard}
              {renderContent()}

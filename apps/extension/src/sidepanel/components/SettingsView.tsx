@@ -5,7 +5,7 @@ import { Input } from '@/components/ui/input';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Section } from './Section';
 import { CustomSkill, sanitizeCustomSkill } from '../../lib/commands';
-import { McpServerConfig, McpConnection, getMcpServers, saveMcpServers } from '../../lib/mcp-client';
+import { McpServerConfig, McpConnection, getMcpServers, saveMcpServers, isAllowedMcpUrl } from '../../lib/mcp-client';
 import { SearchApiKeys, getSearchApiKeys, saveSearchApiKeys } from '../../lib/search-providers';
 import { getCrashLog, clearCrashLog, formatCrashLog } from '../../lib/crash-log';
 
@@ -211,8 +211,11 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   };
   const addMcpServer = () => {
     const url = mcpUrl.trim();
-    if (!/^https?:\/\//.test(url)) {
-      setMcpStatus(prev => ({ ...prev, _new: 'URL must start with http:// or https://' }));
+    // Same policy the runtime enforces (https, or http only to loopback) —
+    // previously the form accepted remote http:// URLs that then failed on
+    // EVERY call.
+    if (!isAllowedMcpUrl(url)) {
+      setMcpStatus(prev => ({ ...prev, _new: 'URL must be https, or http only to localhost/127.0.0.1' }));
       return;
     }
     const server: McpServerConfig = {
@@ -430,12 +433,14 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
             <label className="text-xs font-medium">Vision Model</label>
             <div className="flex gap-2">
               {customModels.length > 0 ? (
-                <Select value={visionModel} onValueChange={v => { setVisionModel(v as string); setTimeout(saveSettings, 0); }}>
+                // NB: Select forbids an empty-string value, so "use text model"
+                // rides a sentinel and maps to '' (unset) on change.
+                <Select value={visionModel || '__text_model__'} onValueChange={v => { setVisionModel(v === '__text_model__' ? '' : (v as string)); setTimeout(saveSettings, 0); }}>
                   <SelectTrigger className="flex-1 w-full rounded-lg text-xs">
                     <SelectValue placeholder="Select a vision model..." />
                   </SelectTrigger>
                   <SelectContent className="rounded-lg">
-                    <SelectItem value=" ">— Use Text Model —</SelectItem>
+                    <SelectItem value="__text_model__">— Use Text Model —</SelectItem>
                     {customModels.map(m => <SelectItem key={m} value={m}>{m}</SelectItem>)}
                     {!customModels.includes(visionModel) && visionModel && <SelectItem value={visionModel}>{visionModel}</SelectItem>}
                   </SelectContent>
@@ -477,7 +482,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           >
             <span
               className={`pointer-events-none block h-4 w-4 rounded-full bg-background shadow-sm transition-transform duration-200 ${
-                autoLinkCaptures ? 'translate-x-4.5' : 'translate-x-0.5'
+                autoLinkCaptures ? 'translate-x-[18px]' : 'translate-x-0.5'
               }`}
             />
           </button>
@@ -523,9 +528,9 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
       <Section id="answering" title="Answering" subtitle="Configure response generation sources.">
         <div className="flex items-center justify-between gap-3">
           <div className="min-w-0">
-            <span className="text-xs font-medium">Search the web when nothing matches</span>
+            <span className="text-xs font-medium">Search the web when nothing matches (chat)</span>
             <p className="text-[10px] text-muted-foreground font-mono mt-0.5 leading-normal">
-              Query search engines if your workspace and open page can't answer.
+              Query search engines in chat if your workspace and open page can't answer. /research always searches.
             </p>
           </div>
           <button
@@ -540,7 +545,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           >
             <span
               className={`pointer-events-none block h-4 w-4 rounded-full bg-background shadow-sm transition-transform duration-200 ${
-                webFallback ? 'translate-x-4.5' : 'translate-x-0.5'
+                webFallback ? 'translate-x-[18px]' : 'translate-x-0.5'
               }`}
             />
           </button>
@@ -565,7 +570,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           >
             <span
               className={`pointer-events-none block h-4 w-4 rounded-full bg-background shadow-sm transition-transform duration-200 ${
-                jinaEnabled ? 'translate-x-4.5' : 'translate-x-0.5'
+                jinaEnabled ? 'translate-x-[18px]' : 'translate-x-0.5'
               }`}
             />
           </button>
@@ -657,9 +662,9 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
               <SelectValue />
             </SelectTrigger>
             <SelectContent className="border border-border rounded-lg shadow-card">
-              <SelectItem value="standard" className="font-mono text-xs">Standard — ~30 sources</SelectItem>
-              <SelectItem value="deep" className="font-mono text-xs">Deep — ~80 sources</SelectItem>
-              <SelectItem value="exhaustive" className="font-mono text-xs">Exhaustive — ~150 sources</SelectItem>
+              <SelectItem value="standard" className="font-mono text-xs">Standard — up to 40 sources</SelectItem>
+              <SelectItem value="deep" className="font-mono text-xs">Deep — up to 160 sources</SelectItem>
+              <SelectItem value="exhaustive" className="font-mono text-xs">Exhaustive — up to 240 sources</SelectItem>
             </SelectContent>
           </Select>
           <p className="text-[10px] text-muted-foreground font-mono leading-normal">

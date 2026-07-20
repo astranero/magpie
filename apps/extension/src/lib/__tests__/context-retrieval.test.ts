@@ -9,9 +9,10 @@ import {
 } from '../context-retrieval';
 
 // A rerank that scores by substring presence of any query word in the passage.
+// Scores are ms-marco-style raw logits (relevant ≳ 0, junk < 0).
 const substringRerank: RerankFn = async (q, passages) => {
   const words = q.toLowerCase().split(/\W+/).filter(Boolean);
-  return passages.map(p => (words.some(w => p.toLowerCase().includes(w)) ? 0.9 : 0.1));
+  return passages.map(p => (words.some(w => p.toLowerCase().includes(w)) ? 3 : -3));
 };
 const nullRerank: RerankFn = async () => null;
 

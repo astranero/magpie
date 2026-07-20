@@ -152,6 +152,7 @@ describe('CITATION_SYSTEM_PROMPT', () => {
   });
 
   it('instructs the model to admit when information is not in sources', () => {
-    expect(CITATION_SYSTEM_PROMPT).toContain('not found in your sources');
+    // Language-independent sentinel (the refusal net works in any language).
+    expect(CITATION_SYSTEM_PROMPT).toContain('NO_SOURCES_IN_WORKSPACE');
   });
 });

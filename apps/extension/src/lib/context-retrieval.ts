@@ -15,7 +15,7 @@ export const MAX_LINKS = 2;
 export const MAX_SELECTED = 4;              // combined files + links per turn
 export const TOTAL_CTX_BUDGET = 40_000;     // chars across everything fetched
 export const FETCH_DEADLINE_MS = 8_000;     // wall-clock cap on the fetch phase
-const RERANK_MIN_SCORE = 0.5;               // ms-marco sigmoid: "more likely relevant than not"
+const RERANK_MIN_SCORE = 0;                 // ms-marco logit: "more likely relevant than not"
 // Links use the same bar as files. A higher bar (0.6) made the model stop
 // following relevant links ("what about other series?" → nothing). Precision now
 // comes from lexical-first matching + the isPageMetaQuestion gate (which keeps

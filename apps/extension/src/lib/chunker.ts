@@ -14,11 +14,17 @@ export interface ChunkInput {
   content: string;     // full markdown content
 }
 
+interface Para {
+  text: string;
+  /** Real offset of this paragraph's first character in the cleaned content. */
+  start: number;
+}
+
 interface Section {
   heading: string;
   level: number;
   path: string[];   // heading hierarchy
-  paragraphs: string[];
+  paragraphs: Para[];
   startChar: number;
 }
 
@@ -37,8 +43,10 @@ const MAX_CHUNK_SLACK = 1.15;
 function isNoiseParagraph(text: string): boolean {
   const stripped = text.trim();
   if (!stripped) return true;
-  // No letters at all (rules, separator rows, emoji lines)
-  if (!/[a-zA-ZÀ-ɏЀ-ӿ]/.test(stripped)) return true;
+  // No letters at all (rules, separator rows, emoji lines). Unicode-aware:
+  // the old [a-zA-ZÀ-ɏЀ-ӿ] class silently dropped pure Japanese/Chinese/
+  // Korean/Arabic paragraphs as "noise" — they never got indexed at all.
+  if (!/\p{L}/u.test(stripped)) return true;
   // Table separator / horizontal-rule lines only
   if (/^[\s|:\-=_*]+$/.test(stripped)) return true;
   // Image-only paragraph
@@ -82,15 +90,18 @@ export function chunkDocument(input: ChunkInput): Omit<Chunk, 'id' | 'docId'>[] 
   for (let sIdx = 0; sIdx < sections.length; sIdx++) {
     const section = sections[sIdx];
     const sectionPath = section.path.join(' > ') || 'Document';
-    let paraOffset = section.startChar;
 
     for (let pIdx = 0; pIdx < section.paragraphs.length; pIdx++) {
-      let text = section.paragraphs[pIdx].trim();
+      const para = section.paragraphs[pIdx];
+      const text = para.text.trim();
       if (!text) continue;
 
-      const charStart = paraOffset;
-      // Recalculate paraOffset before it's used to set charEnd
-      paraOffset += section.paragraphs[pIdx].length + 2; // +2 for assumed \n\n between paragraphs
+      // REAL offset: tracked by parseSections at the exact line the paragraph
+      // started (no "+2 assumed gap" arithmetic, no heading-line offset, CRLF-
+      // safe). Leading whitespace of the raw paragraph is skipped so
+      // content.slice(charStart, charEnd) === text.
+      const leadWs = para.text.length - para.text.trimStart().length;
+      const charStart = para.start + leadWs;
 
       // Knowledge-free paragraphs (link farms, separators, image-only) are
       // never indexed — they only surface as irrelevant citations.
@@ -98,9 +109,11 @@ export function chunkDocument(input: ChunkInput): Omit<Chunk, 'id' | 'docId'>[] 
 
       // Skip tiny chunks by merging with the next paragraph
       if (text.length < MIN_CHUNK_CHARS && pIdx < section.paragraphs.length - 1) {
-        // Merge current text into the next paragraph, adjusting its start position
-        // This avoids creating a new chunk for a very small paragraph
-        section.paragraphs[pIdx + 1] = text + '\n\n' + section.paragraphs[pIdx + 1];
+        // Merge current text into the next paragraph, keeping THIS paragraph's
+        // start offset so the merged chunk's span covers both parts.
+        const next = section.paragraphs[pIdx + 1];
+        next.text = text + '\n\n' + next.text;
+        next.start = charStart;
         continue;
       }
 
@@ -117,11 +130,16 @@ export function chunkDocument(input: ChunkInput): Omit<Chunk, 'id' | 'docId'>[] 
       // Split oversized chunks at sentence boundaries
       if (text.length > MAX_CHUNK_CHARS * MAX_CHUNK_SLACK) {
         const subChunks = splitAtSentences(text, MAX_CHUNK_CHARS);
-        let subOffset = charStart;
+        // Locate each sub-chunk inside the paragraph text for real offsets
+        // (splitAtSentences trims, so arithmetic lengths would drift).
+        let searchFrom = 0;
 
         for (let subIdx = 0; subIdx < subChunks.length; subIdx++) {
           const subText = subChunks[subIdx];
           const anchorId = `${docShortId}.s${sIdx}.p${pIdx}.${subIdx}`;
+          const rel = text.indexOf(subText, searchFrom);
+          const subStart = rel >= 0 ? charStart + rel : charStart + searchFrom;
+          if (rel >= 0) searchFrom = rel + subText.length;
 
           lastChunkSectionIdx = sIdx;
           chunks.push({
@@ -131,13 +149,9 @@ export function chunkDocument(input: ChunkInput): Omit<Chunk, 'id' | 'docId'>[] 
             sectionPath,
             paragraphIndex: pIdx,
             anchorId,
-            charStart: subOffset,
-            charEnd: subOffset + subText.length
+            charStart: subStart,
+            charEnd: subStart + subText.length
           });
-          // Note: subOffset adjustment for the next sub-chunk implicitly assumes
-          // that there are no gaps between split sentences. This is generally
-          // true for the current implementation of splitAtSentences.
-          subOffset += subText.length;
         }
         continue; // Move to the next paragraph
       }
@@ -164,6 +178,8 @@ export function chunkDocument(input: ChunkInput): Omit<Chunk, 'id' | 'docId'>[] 
 
 /**
  * Parse markdown into sections based on heading hierarchy.
+ * Each paragraph carries its REAL start offset in the input string — the
+ * offset chain every citation highlight ultimately relies on.
  */
 function parseSections(content: string): Section[] {
   const lines = content.split('\n');
@@ -172,14 +188,15 @@ function parseSections(content: string): Section[] {
   let currentHeading = '';
   let currentLevel = 0;
   const headingStack: string[] = [];
-  let currentParagraphs: string[] = [];
+  let currentParagraphs: Para[] = [];
   let currentParagraph = '';
+  let currentParaStart = 0;
   let sectionStartChar = 0;
   let charPos = 0;
 
   function flushParagraph() {
-    if (currentParagraph) { // Push the original paragraph with whitespace
-      currentParagraphs.push(currentParagraph);
+    if (currentParagraph) {
+      currentParagraphs.push({ text: currentParagraph, start: currentParaStart });
     }
     currentParagraph = '';
   }
@@ -216,7 +233,8 @@ function parseSections(content: string): Section[] {
 
       currentHeading = headingText;
       currentLevel = level;
-      // Section starts at the beginning of the heading line
+      // Section starts at the beginning of the heading line (paragraph offsets
+      // are what matter; this is only a coarse section marker).
       sectionStartChar = charPos;
     } else if (line.trim() === '') {
       // Paragraph break
@@ -226,19 +244,17 @@ function parseSections(content: string): Section[] {
       if (currentParagraph) {
         currentParagraph += '\n' + line;
       } else {
-        // Start of a new paragraph, capture its start position relative to content
+        // Start of a new paragraph — capture its REAL start offset.
         currentParagraph = line;
+        currentParaStart = charPos;
       }
     }
 
-    charPos += line.length + 1; // +1 for \n
+    charPos += line.length + 1; // +1 for \n (any \r stays counted inside the line)
   }
 
   // Flush final section
   flushSection();
-
-  // Post-process to find the start character of each paragraph within its section
-  // (Logic is handled inside chunkDocument to be more accurate)
 
   return sections;
 }
@@ -248,8 +264,10 @@ function parseSections(content: string): Section[] {
  * Split a long text into chunks at sentence boundaries.
  */
 function splitAtSentences(text: string, maxChars: number): string[] {
-  // Split on sentence-ending punctuation followed by space or newline
-  const sentences = text.match(/[^.!?\n]+[.!?\n]+[\s]*/g) || [text];
+  // Split on sentence-ending punctuation followed by space or newline.
+  // CJK terminators (。！？) included — otherwise a Japanese paragraph never
+  // splits and oversized chunks hit the embedder's truncation cap.
+  const sentences = text.match(/[^.!?\n。！？]+[.!?\n。！？]+[\s]*/g) || [text];
   const result: string[] = [];
   let current = '';
 

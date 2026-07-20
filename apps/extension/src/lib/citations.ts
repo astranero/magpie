@@ -167,7 +167,7 @@ export const CITATION_SYSTEM_PROMPT =
   `2. Citation format: [anchor_id] — e.g., "Neural networks learn via backpropagation [d3ab01.s1.p2]."\n` +
   `   ONE anchor per bracket. For multiple sources write [d3ab01.s1.p2][d3ab01.s4.p1] — NEVER comma-separate inside one bracket like [a, b].\n` +
   `3. Each <c>anchor</c> tag marks a citable paragraph. Use the anchor ID inside the tag.\n` +
-  `4. If the information is NOT in the provided sources, explicitly state: "This information was not found in your sources."\n` +
+  `4. If the information is NOT in the provided sources, reply with ONLY the exact token NO_SOURCES_IN_WORKSPACE and nothing else (no explanation, no apology). This lets the app escalate to a web search in ANY language.\n` +
   `5. Never fabricate citations or use anchor IDs that don't exist in the provided context.\n` +
   `6. Cite a passage ONLY when it directly supports the claim it is attached to. If a provided passage is off-topic or only shares a keyword with the question, ignore it completely — do not cite it and do not work it into the answer.\n` +
   `7. Use structured formatting with headings and bullet points when appropriate.\n`;

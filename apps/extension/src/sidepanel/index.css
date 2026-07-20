@@ -70,6 +70,8 @@
     --font-heading: var(--font-sans);
     --font-sans: 'Geist Variable', sans-serif;
   }
+  /* Dark plumage: applied by the small script in main.tsx (follows
+     prefers-color-scheme, overridable via the Theme setting). */
   .dark {
     /* Plumage at night: deep blue-black, never pure black */
     --background: 228 24% 8%;
@@ -114,22 +116,13 @@
   }
   body {
     @apply bg-background text-foreground;
-  }
-  html {
-    @apply font-sans;
-  }
-}
-
-@layer base {
-  * {
-    @apply border-border;
-  }
-  body {
-    @apply bg-background text-foreground;
     font-feature-settings: "rlig" 1, "calt" 1;
     margin: 0;
     padding: 0;
     overflow: hidden; /* Prevent global scrollbar */
+  }
+  html {
+    @apply font-sans;
   }
   #root {
     @apply h-screen w-full flex flex-col overflow-hidden;

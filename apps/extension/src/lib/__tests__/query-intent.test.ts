@@ -364,18 +364,31 @@ describe('isAcademicQuery (gate the academic agent)', () => {
   });
 });
 
-describe('isMessageQuery (answer from the on-page mailbox, not the web)', () => {
-  it('matches inbox / email / message intent', async () => {
-    const { isMessageQuery } = await import('../query-intent');
-    for (const s of ['what messages do I have', 'who emailed me today', 'anything in my inbox?', 'summarize my emails', 'any unread mail', 'what other messages I have']) {
-      expect(isMessageQuery(s)).toBe(true);
-    }
+describe('isLocationDependent — weak words need a co-signal (P4 hijack fixes)', () => {
+  it('does NOT hijack page/workspace questions containing weak location words', async () => {
+    const { isLocationDependent } = await import('../query-intent');
+    for (const s of [
+      'what do the bars in this chart mean?',
+      'why is this function hot?',
+      'what temperature should I brew coffee at?',
+      'how much traffic does this site get?',
+      'give me directions in the docs',
+    ]) expect(isLocationDependent(s)).toBe(false);
   });
-  it('does NOT match unrelated questions or commands', async () => {
-    const { isMessageQuery } = await import('../query-intent');
-    for (const s of ['what is TLS', 'summarize this paper', '/research batteries', 'how do I deploy']) {
-      expect(isMessageQuery(s)).toBe(false);
-    }
+  it('still catches real local asks', async () => {
+    const { isLocationDependent } = await import('../query-intent');
+    for (const s of [
+      'weather tomorrow', 'is it cold today?', 'restaurants near me',
+      'bars open now', 'traffic right now', 'hotels nearby',
+    ]) expect(isLocationDependent(s)).toBe(true);
+  });
+});
+
+describe('overlapsPage — word-boundary matching', () => {
+  it('does not bind "art" to a page containing "start"', async () => {
+    const { overlapsPage } = await import('../query-intent');
+    expect(overlapsPage('what is art history?', 'Quick start guide for learners')).toBe(false);
+    expect(overlapsPage('what is art history?', 'A history of art through ages')).toBe(true);
   });
 });
 

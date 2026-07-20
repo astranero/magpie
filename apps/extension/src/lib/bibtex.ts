@@ -34,16 +34,18 @@ export function formatBibAuthors(authors: string): string {
     .join(' and ');
 }
 
-/** Citation key: {surname}{year}{firstMeaningfulTitleWord}, all lowercase. */
+/** Citation key: {surname}{year}{firstMeaningfulTitleWord}, all lowercase.
+ *  Unicode-aware so non-Latin authors/titles don't collapse to "unknown". */
 export function makeBibKey(meta: BibtexMeta): string {
   const firstAuthor = (meta.authors || '').split(/\s*(?:,|;| and )\s*/i)[0] || 'unknown';
   const surname = firstAuthor.trim().split(/\s+/).pop() || 'unknown';
   const stop = new Set(['a', 'an', 'the', 'on', 'of', 'in', 'for', 'and', 'to', 'with']);
   const word = (meta.title || 'untitled')
     .toLowerCase()
-    .split(/[^a-z0-9]+/)
+    .split(/[^\p{L}\p{N}]+/u)
     .find(w => w.length > 1 && !stop.has(w)) || 'untitled';
-  return `${surname.toLowerCase().replace(/[^a-z0-9]/g, '')}${meta.year || ''}${word}`;
+  const slug = surname.toLowerCase().replace(/[^\p{L}\p{N}]/gu, '');
+  return `${slug || 'unknown'}${meta.year || ''}${word}`;
 }
 
 export function generateBibtex(meta: BibtexMeta): string {

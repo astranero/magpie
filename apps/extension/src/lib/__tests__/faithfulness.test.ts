@@ -18,9 +18,9 @@ describe('verifyFaithfulness', () => {
   const getChunkText = async (a: string) => chunks[a] ?? null;
 
   it('drops a citation whose chunk does not support the claim', async () => {
-    // Rerank: high for the on-topic chunk, low for the off-topic banana one.
+    // Rerank (logit space): high for the on-topic chunk, low for the off-topic banana one.
     const rerank = async (_claim: string, evidences: string[]) =>
-      evidences.map(e => (e.includes('banana') ? 0.02 : 0.9));
+      evidences.map(e => (e.includes('banana') ? -6 : 2));
 
     const src = 'Structured prompting cuts token usage by 66% [b.s2.p3][c.s0.p0].';
     const r = await verifyFaithfulness(src, { rerank, getChunkText });
@@ -33,7 +33,7 @@ describe('verifyFaithfulness', () => {
   });
 
   it('keeps everything when all citations are supported', async () => {
-    const rerank = async (_c: string, evidences: string[]) => evidences.map(() => 0.8);
+    const rerank = async (_c: string, evidences: string[]) => evidences.map(() => 2);
     const src = 'A supported claim [a.s1.p1].';
     const r = await verifyFaithfulness(src, { rerank, getChunkText });
     expect(r.dropped).toBe(0);
@@ -48,7 +48,7 @@ describe('verifyFaithfulness', () => {
   });
 
   it('leaves a citation alone when its chunk cannot be resolved', async () => {
-    const rerank = async (_c: string, evidences: string[]) => evidences.map(() => 0.01);
+    const rerank = async (_c: string, evidences: string[]) => evidences.map(() => -6);
     const src = 'Claim about a missing source [z.s9.p9].';
     const r = await verifyFaithfulness(src, { rerank, getChunkText });
     expect(r.total).toBe(0); // unresolved → not counted, not dropped

@@ -828,6 +828,8 @@ export const ChatView: React.FC<ChatViewProps> = ({
   const scrollBox = useRef<HTMLDivElement>(null);
   // Two-step clear confirmation
   const [confirmClear, setConfirmClear] = useState(false);
+  // Slash-command palette keyboard navigation
+  const [paletteIdx, setPaletteIdx] = useState(0);
 
   // Returning from a cited document: put the reader back on the message they
   // were reading instead of jumping to the bottom. The flag suppresses the
@@ -1066,8 +1068,8 @@ export const ChatView: React.FC<ChatViewProps> = ({
                 </>
               ) : m.role === 'system' ? (
                 <>
-                  <Loader2 size={10} className="text-muted-foreground/60 animate-spin" />
-                  <span>System Run</span>
+                  {m.streaming && <Loader2 size={10} className="text-muted-foreground/60 animate-spin" />}
+                  <span>System</span>
                 </>
               ) : (
                 <>
@@ -1171,15 +1173,17 @@ export const ChatView: React.FC<ChatViewProps> = ({
               <div
                 role="listbox"
                 aria-label="Command suggestions"
+                aria-activedescendant={`cmd-opt-${paletteIdx}`}
                 className="absolute bottom-full left-0 mb-2 w-full bg-popover rounded-lg border border-border shadow-card p-1 z-50 animate-in fade-in slide-in-from-bottom-2 max-h-64 overflow-y-auto no-scrollbar"
               >
-                {matches.map(c => (
+                {matches.map((c, i) => (
                   <div
                     key={c.cmd}
+                    id={`cmd-opt-${i}`}
                     role="option"
-                    aria-selected={false}
-                    className="flex items-center gap-2 p-2 hover:bg-accent cursor-pointer text-sm transition-colors rounded-md"
-                    onClick={() => { setInput(c.cmd + (c.takesArg ? ' ' : '')); document.getElementById('chat-input')?.focus(); }}
+                    aria-selected={i === paletteIdx}
+                    className={`flex items-center gap-2 p-2 cursor-pointer text-sm transition-colors rounded-md ${i === paletteIdx ? 'bg-accent' : 'hover:bg-accent'}`}
+                    onClick={() => { setInput(c.cmd + (c.takesArg ? ' ' : '')); setPaletteIdx(0); document.getElementById('chat-input')?.focus(); }}
                   >
                     <Sparkles size={14} className="text-primary shrink-0" aria-hidden="true" />
                     <span className="font-semibold font-mono text-foreground shrink-0">{c.cmd}</span>
@@ -1206,12 +1210,28 @@ export const ChatView: React.FC<ChatViewProps> = ({
             value={input}
             onChange={e => {
               setInput(e.target.value);
+              setPaletteIdx(0); // reset palette selection on any input change
               // Auto-grow up to max-h; shrink back when cleared
               const el = e.currentTarget;
               el.style.height = 'auto';
               el.style.height = `${Math.min(el.scrollHeight, 160)}px`;
             }}
             onKeyDown={e => {
+              // Slash palette keyboard navigation
+              if (input.startsWith('/') && !input.includes(' ')) {
+                const matches = paletteEntries(input, customCommands);
+                if (matches.length > 0) {
+                  if (e.key === 'ArrowDown') { e.preventDefault(); setPaletteIdx(i => (i + 1) % matches.length); return; }
+                  if (e.key === 'ArrowUp') { e.preventDefault(); setPaletteIdx(i => (i - 1 + matches.length) % matches.length); return; }
+                  if (e.key === 'Enter' && !e.shiftKey) {
+                    e.preventDefault();
+                    const sel = matches[paletteIdx];
+                    if (sel) { setInput(sel.cmd + (sel.takesArg ? ' ' : '')); setPaletteIdx(0); }
+                    return;
+                  }
+                  if (e.key === 'Escape') { setInput(''); setPaletteIdx(0); return; }
+                }
+              }
               if (e.key === 'Enter' && !e.shiftKey) {
                 e.preventDefault();
                 // While a reply streams, send() no-ops — typing stays possible

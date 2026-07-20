@@ -7,6 +7,7 @@
 // first ~2 KB of each doc is enough — the frontmatter block sits at the top.
 
 import { splitFrontmatter, parseFrontmatterFields } from './frontmatter';
+import { meaningfulTokens } from './unicode-text';
 
 export interface DocMeta {
   docId: string;
@@ -37,8 +38,10 @@ export function buildDocMeta(doc: { id: string; title: string; content?: string;
 
 const STOP = new Set(['the', 'a', 'an', 'of', 'and', 'or', 'to', 'in', 'for', 'on', 'with', 'how', 'what', 'is', 'are']);
 
+// Unicode-aware (was [a-z0-9]+ — /recall metadata scoring returned NOTHING for
+// non-Latin titles). Single CJK chars are meaningful and kept.
 function tokenize(text: string): string[] {
-  return (text.toLowerCase().match(/[a-z0-9]+/g) || []).filter(t => t.length > 1 && !STOP.has(t));
+  return meaningfulTokens(text, STOP);
 }
 
 /**

@@ -5,14 +5,19 @@
 // fetch — no DB, caches, or worker state. Guarded by e2e/chat.spec.ts.
 
 import { BUILTIN_GEMINI_SENTINEL } from '../lib/provider-detect';
+import { isAllowedProviderUrl } from '../lib/settings';
 
 export async function getProviderSettings(): Promise<Record<string, string>> {
   const s = await chrome.storage.local.get(['customUrl', 'customKey', 'customModel', 'visionModel']);
+  // Endpoint policy: https, or http only to loopback — a remote http:// URL
+  // would carry the API key in cleartext. Invalid/empty → no endpoint (callers
+  // surface their normal "configure Settings" error).
+  const rawUrl = typeof s.customUrl === 'string' && isAllowedProviderUrl(s.customUrl) ? s.customUrl : '';
   // Built-in Gemini sentinel passes through untouched — it's a client branch,
   // not a URL (appending /chat/completions to it would corrupt the check).
   const endpoint = s.customUrl === BUILTIN_GEMINI_SENTINEL
     ? BUILTIN_GEMINI_SENTINEL
-    : s.customUrl ? (s.customUrl.endsWith('/chat/completions') ? s.customUrl : `${s.customUrl.replace(/\/+$/, '')}/chat/completions`) : '';
+    : rawUrl ? (rawUrl.endsWith('/chat/completions') ? rawUrl : `${rawUrl.replace(/\/+$/, '')}/chat/completions`) : '';
   return {
     apiKey: s.customKey || '',
     endpoint,

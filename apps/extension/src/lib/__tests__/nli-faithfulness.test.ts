@@ -9,7 +9,7 @@ describe('Local NLI Factual Verification in verifyFaithfulness', () => {
   const getChunkText = async (a: string) => chunks[a] ?? null;
 
   it('keeps citations that have high entailment and low contradiction', async () => {
-    const rerank = vi.fn(async (_c: string, evidences: string[]) => evidences.map(() => 0.8));
+    const rerank = vi.fn(async (_c: string, evidences: string[]) => evidences.map(() => 2));
     const classifyNli = vi.fn(async (pairs) => pairs.map(() => ({
       entailment: 0.95,
       neutral: 0.04,
@@ -31,7 +31,7 @@ describe('Local NLI Factual Verification in verifyFaithfulness', () => {
   });
 
   it('drops citations that fail entailment threshold (< 0.25)', async () => {
-    const rerank = vi.fn(async (_c: string, evidences: string[]) => evidences.map(() => 0.8)); // Passes relevance
+    const rerank = vi.fn(async (_c: string, evidences: string[]) => evidences.map(() => 2)); // Passes relevance (logit)
     const classifyNli = vi.fn(async () => [
       { entailment: 0.10, neutral: 0.85, contradiction: 0.05 } // Low entailment (neutral but doesn't support)
     ]);
@@ -45,7 +45,7 @@ describe('Local NLI Factual Verification in verifyFaithfulness', () => {
   });
 
   it('drops citations that exceed contradiction threshold (> 0.40)', async () => {
-    const rerank = vi.fn(async (_c: string, evidences: string[]) => evidences.map(() => 0.8)); // Passes relevance
+    const rerank = vi.fn(async (_c: string, evidences: string[]) => evidences.map(() => 2)); // Passes relevance (logit)
     const classifyNli = vi.fn(async () => [
       { entailment: 0.10, neutral: 0.10, contradiction: 0.80 } // High contradiction
     ]);
@@ -59,7 +59,7 @@ describe('Local NLI Factual Verification in verifyFaithfulness', () => {
   });
 
   it('does not drop citations if relevance check fails before NLI is reached', async () => {
-    const rerank = vi.fn(async (_c: string, evidences: string[]) => evidences.map(() => 0.01)); // Fails relevance (rel < 0.12)
+    const rerank = vi.fn(async (_c: string, evidences: string[]) => evidences.map(() => -6)); // Fails relevance (rel < -2, logit)
     const classifyNli = vi.fn(async () => [
       { entailment: 0.95, neutral: 0.04, contradiction: 0.01 }
     ]);
@@ -72,7 +72,7 @@ describe('Local NLI Factual Verification in verifyFaithfulness', () => {
   });
 
   it('falls back to relevance results if NLI throws an error', async () => {
-    const rerank = vi.fn(async (_c: string, evidences: string[]) => evidences.map(() => 0.8)); // Passes relevance
+    const rerank = vi.fn(async (_c: string, evidences: string[]) => evidences.map(() => 2)); // Passes relevance (logit)
     const classifyNli = vi.fn(async () => { throw new Error('NLI classifier error'); });
 
     const src = 'Structured prompting cuts token usage by 66% [b.s2.p3].';

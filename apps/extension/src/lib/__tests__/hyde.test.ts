@@ -36,7 +36,7 @@ describe('HyDE Query Expansion', () => {
     expect(llmChatFn).toHaveBeenCalledTimes(1);
     expect(sendToOffscreen).toHaveBeenCalledWith({
       action: 'OFFSCREEN_GET_EMBEDDINGS',
-      texts: ['Hypothetical response about RAG'],
+      texts: ['Hypothetical response about RAG'], kind: 'query',
     }, undefined, { priority: false });
   });
 
@@ -54,7 +54,7 @@ describe('HyDE Query Expansion', () => {
     expect(llmChatFn).not.toHaveBeenCalled();
     expect(sendToOffscreen).toHaveBeenCalledWith({
       action: 'OFFSCREEN_GET_EMBEDDINGS',
-      texts: ['what is RAG?'],
+      texts: ['what is RAG?'], kind: 'query',
     }, undefined, { priority: false });
   });
 
@@ -72,7 +72,7 @@ describe('HyDE Query Expansion', () => {
     expect(llmChatFn).toHaveBeenCalledTimes(1);
     expect(sendToOffscreen).toHaveBeenCalledWith({
       action: 'OFFSCREEN_GET_EMBEDDINGS',
-      texts: ['what is RAG?'],
+      texts: ['what is RAG?'], kind: 'query',
     }, undefined, { priority: false });
   });
 });

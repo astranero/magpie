@@ -25,11 +25,20 @@ interface NliResult {
 type Req =
   | { type: 'init'; wasmPaths: string; device?: Device }
   | { type: 'set_device'; device: Device }
-  | { id: number; type: 'embed'; texts: string[] }
+  | { id: number; type: 'embed'; texts: string[]; kind?: 'query' | 'passage' }
   | { id: number; type: 'rerank'; query: string; passages: string[] }
   | { id: number; type: 'nli'; pairs: NliPair[] };
 
 // ── Embeddings ──
+//
+// multilingual-e5-small: 384-dim (schema-compatible with the old MiniLM
+// store), 100+ languages, cross-lingual (a Finnish query matches English
+// sources). E5 models REQUIRE role prefixes — "query: " for the search
+// question, "passage: " for stored documents — or retrieval quality tanks.
+// Old all-MiniLM embeddings are INCOMPATIBLE with this model: a storage-key
+// migration in the service worker triggers a full re-index on first run.
+const EMBED_MODEL_ID = 'Xenova/multilingual-e5-small';
+export const EMBED_MODEL_TAG = 'multilingual-e5-small'; // storage marker (SW reads via offscreen)
 
 // Default WASM — see getEmbedder. The offscreen doc can override via the
 // `inferenceDevice` setting (init / set_device).
@@ -37,9 +46,6 @@ let embedDevice: Device = 'wasm';
 let embedder: any = null;
 async function getEmbedder() {
   if (!embedder) {
-    // Xenova mirror: onnx-community/all-MiniLM-L6-v2 went 401 (gated) on HF in
-    // mid-2026. Same base model + ONNX export, embeddings stay compatible.
-    //
     // Default WASM, not WebGPU: a heavy deep-research run embeds thousands of
     // chunks, and the WebGPU backend accumulates GPU buffers → the GPU/renderer
     // process OOMs and dies SILENTLY (no JS exception — the reported crash). WASM
@@ -47,12 +53,12 @@ async function getEmbedder() {
     // below, allocation stays bounded. WebGPU is faster and available as an opt-in
     // (Settings → Inference acceleration); we fall back to WASM if it can't init.
     try {
-      embedder = await pipeline('feature-extraction', 'Xenova/all-MiniLM-L6-v2', { device: embedDevice });
+      embedder = await pipeline('feature-extraction', EMBED_MODEL_ID, { device: embedDevice });
     } catch (e) {
       if (embedDevice !== 'wasm') {
         console.warn(`[worker] ${embedDevice} embedder init failed, falling back to wasm:`, e);
         embedDevice = 'wasm';
-        embedder = await pipeline('feature-extraction', 'Xenova/all-MiniLM-L6-v2', { device: 'wasm' });
+        embedder = await pipeline('feature-extraction', EMBED_MODEL_ID, { device: 'wasm' });
       } else throw e;
     }
   }
@@ -76,8 +82,11 @@ async function resetEmbedder(): Promise<void> {
 const MAX_EMBED_CHARS = 1000;
 const capText = (t: string) => (t.length > MAX_EMBED_CHARS ? t.slice(0, MAX_EMBED_CHARS) : t);
 
-async function generateEmbeddings(texts: string[]): Promise<number[][]> {
+async function generateEmbeddings(texts: string[], kind: 'query' | 'passage' = 'passage'): Promise<number[][]> {
   if (texts.length === 0) return [];
+  // E5 role prefix — mandatory for retrieval quality.
+  const prefix = kind === 'query' ? 'query: ' : 'passage: ';
+  texts = texts.map(t => prefix + t);
 
   // 8 caps how many capped sequences are padded together per OrtRun; throughput
   // loss is negligible next to model inference time.
@@ -154,19 +163,32 @@ async function generateEmbeddings(texts: string[]): Promise<number[][]> {
 }
 
 // ── Re-ranking ──
+// Scores are RAW LOGITS (not sigmoid probabilities) — the relevance gate,
+// confidence check and faithfulness thresholds in lib/ are all calibrated in
+// logit space (relevant ≳ 0, borderline ≈ -4, junk ≤ -8). Do NOT re-apply
+// sigmoid here; it silently disables every downstream gate.
 
 let tokenizer: any = null;
 let rerankerModel: any = null;
+// Multilingual cross-encoder (100+ languages) — ms-marco-MiniLM scored
+// non-English pairs near-randomly, which poisoned the relevance gate AND the
+// faithfulness check for de/fi/ja content. Falls back to the old English model
+// if the big one can't load (memory-constrained renderers).
+const RERANK_MODEL_PRIMARY = 'onnx-community/bge-reranker-v2-m3-ONNX';
+const RERANK_MODEL_FALLBACK = 'Xenova/ms-marco-MiniLM-L-6-v2';
 async function getReranker() {
   if (!tokenizer || !rerankerModel) {
-    const model_id = 'Xenova/ms-marco-MiniLM-L-6-v2';
-    tokenizer = await AutoTokenizer.from_pretrained(model_id);
-    rerankerModel = await AutoModelForSequenceClassification.from_pretrained(model_id);
+    try {
+      tokenizer = await AutoTokenizer.from_pretrained(RERANK_MODEL_PRIMARY);
+      rerankerModel = await AutoModelForSequenceClassification.from_pretrained(RERANK_MODEL_PRIMARY);
+    } catch (e) {
+      console.warn(`[worker] ${RERANK_MODEL_PRIMARY} load failed, falling back to ${RERANK_MODEL_FALLBACK}:`, e);
+      tokenizer = await AutoTokenizer.from_pretrained(RERANK_MODEL_FALLBACK);
+      rerankerModel = await AutoModelForSequenceClassification.from_pretrained(RERANK_MODEL_FALLBACK);
+    }
   }
   return { tokenizer, model: rerankerModel };
 }
-
-const sigmoid = (x: number) => 1 / (1 + Math.exp(-x));
 
 // Bound peak allocation the same way the embedder does. Without this a single
 // rerank of many long passages pads them ALL into one tensor, and if the
@@ -199,13 +221,13 @@ async function rerank(query: string, passages: string[]): Promise<number[]> {
       });
       const { logits } = await model(inputs);
       const data = logits.data as Float32Array;
-      for (let j = 0; j < batch.length; j++) scores.push(sigmoid(data[j]));
+      for (let j = 0; j < batch.length; j++) scores.push(data[j]);
     } catch (err) {
       // A batch OOM wedges the session — rebuild before continuing so the rest
       // of the run doesn't fail on a poisoned heap. Neutral score for this batch.
       console.warn('Rerank batch failed, resetting reranker:', err);
       await resetReranker();
-      for (let j = 0; j < batch.length; j++) scores.push(0.5);
+      for (let j = 0; j < batch.length; j++) scores.push(0);
     }
   }
   return scores;
@@ -239,13 +261,22 @@ const softmax = (logits: number[]) => {
  
 async function classifyNli(pairs: NliPair[]): Promise<NliResult[]> {
   const results: NliResult[] = [];
+
+  // The NLI model is English (MNLI). On non-Latin scripts its verdicts are
+  // near-random and the faithfulness check then drops VALID citations — so
+  // for those pairs we return a neutral "keep" instead of guessing.
+  const NON_LATIN_RE = /[぀-ヿ㐀-䶿一-鿿豈-﫿؀-ۿݐ-ݿЀ-ӿ가-힯]/;
+
   const { tokenizer, model } = await getNliModel();
  
-  // Resolve the label mapping from model config
+  // Resolve the label mapping from model config. Fallback order matches the
+  // canonical nli-deberta-v3 config: [contradiction, neutral, entailment].
+  // (The previous default [entailment, neutral, contradiction] silently
+  // INVERTED the check whenever id2label was absent.)
   const id2label = model.config?.id2label || {};
-  let entailmentIdx = 0;
+  let entailmentIdx = 2;
   let neutralIdx = 1;
-  let contradictionIdx = 2;
+  let contradictionIdx = 0;
  
   for (const [id, label] of Object.entries(id2label)) {
     const l = String(label).toLowerCase();
@@ -257,27 +288,41 @@ async function classifyNli(pairs: NliPair[]): Promise<NliResult[]> {
  
   const NLI_BATCH = 8;
   for (let i = 0; i < pairs.length; i += NLI_BATCH) {
-    const batch = pairs.slice(i, i + NLI_BATCH);
+    // Non-Latin pairs: keep (neutral) instead of letting an English-only model
+    // hallucinate contradiction/entailment verdicts.
+    const batch = pairs.slice(i, i + NLI_BATCH).map(p =>
+      (NON_LATIN_RE.test(p.premise) || NON_LATIN_RE.test(p.claim))
+        ? null
+        : p);
+    if (batch.every(b => b === null)) {
+      for (let j = 0; j < batch.length; j++) results.push({ entailment: 1, neutral: 0, contradiction: 0 });
+      continue;
+    }
     try {
-      const premises = batch.map(b => b.premise);
-      const claims = batch.map(b => b.claim);
- 
+      const scoredBatch = batch.map(b => b ?? { premise: '.', claim: '.' });
+      const premises = scoredBatch.map(b => b.premise);
+      const claims = scoredBatch.map(b => b.claim);
+
       const inputs = await tokenizer(premises, {
         text_pair: claims,
         padding: true,
         truncation: true,
         max_length: 512,
       });
- 
+
       const { logits } = await model(inputs);
       const data = logits.data as Float32Array;
       const numLabels = logits.dims[1]; // typically 3
- 
-      for (let j = 0; j < batch.length; j++) {
+
+      for (let j = 0; j < scoredBatch.length; j++) {
+        if (batch[j] === null) {
+          results.push({ entailment: 1, neutral: 0, contradiction: 0 });
+          continue;
+        }
         const start = j * numLabels;
         const slice = Array.from(data.slice(start, start + numLabels));
         const probs = softmax(slice);
- 
+
         results.push({
           entailment: probs[entailmentIdx] ?? 0,
           neutral: probs[neutralIdx] ?? 0,
@@ -324,7 +369,7 @@ self.onmessage = async (e: MessageEvent<Req>) => {
  
   try {
     if (req.type === 'embed') {
-      const embeddings = await generateEmbeddings(req.texts);
+      const embeddings = await generateEmbeddings(req.texts, req.kind);
       (self as any).postMessage({ id: req.id, ok: true, embeddings });
     } else if (req.type === 'rerank') {
       const scores = await rerank(req.query, req.passages);

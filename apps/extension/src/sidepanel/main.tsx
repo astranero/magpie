@@ -17,6 +17,22 @@ setInterval(() => {
   } catch { /* no performance.memory */ }
 }, 5000);
 
+// Dark mode: follows the OS by default; the Theme setting (Settings →
+// Appearance) overrides with explicit light/dark. Toggles the .dark class the
+// design tokens are keyed on (previously the theme was dead code — nothing
+// ever applied it).
+function applyThemePref(): void {
+  let pref = 'system';
+  try { pref = localStorage.getItem('magpie-theme') || 'system'; } catch { /* private mode */ }
+  const dark = pref === 'dark' || (pref === 'system' && window.matchMedia('(prefers-color-scheme: dark)').matches);
+  document.documentElement.classList.toggle('dark', dark);
+}
+applyThemePref();
+try {
+  window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', applyThemePref);
+  window.addEventListener('magpie-theme-changed', applyThemePref);
+} catch { /* older Chrome — no live switching */ }
+
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
     <ErrorBoundary label="app">

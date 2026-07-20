@@ -70,9 +70,8 @@ export const LoreView: React.FC<LoreViewProps> = ({
     searchTimer.current = window.setTimeout(() => {
       if (typeof chrome === 'undefined' || !chrome.runtime?.sendMessage) { setSearching(false); return; }
       chrome.runtime.sendMessage({ action: 'SEARCH_LIBRARY', query: q }, (res: any) => {
-        if (chrome.runtime.lastError) { return; } // dead SW — search silently no-ops
         if (chrome.runtime.lastError) {
-          setSearching(false);
+          setSearching(false); // previously missing → "Searching…" stuck forever
           return;
         }
         setSearching(false);
@@ -317,7 +316,7 @@ export const LoreView: React.FC<LoreViewProps> = ({
                   <div className="flex items-center justify-between min-h-[20px] text-[10px] text-muted-foreground/75 font-mono">
                     {/* Left: Metadata */}
                     <div className="flex items-center gap-1.5 truncate mr-2">
-                      <span className="bg-muted px-1 py-0.2 rounded text-[8px] font-semibold uppercase tracking-wide">
+                      <span className="bg-muted px-1 py-0.5 rounded text-[8px] font-semibold uppercase tracking-wide">
                         {doc.wordCount.toLocaleString()}w
                       </span>
                       <span>•</span>
@@ -332,8 +331,8 @@ export const LoreView: React.FC<LoreViewProps> = ({
                       )}
                     </div>
 
-                    {/* Right: Actions (Visible on group-hover, hidden by default) */}
-                    <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity duration-200 shrink-0">
+                    {/* Right: Actions (Visible on group-hover OR focus-within for keyboard) */}
+                    <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 transition-opacity duration-200 shrink-0">
                       {showLore ? (
                         isLinked ? (
                           <button

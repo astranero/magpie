@@ -22,7 +22,7 @@ const ANCHOR_SRC = '\\[([a-z0-9]+(?:\\.[a-z0-9]+)+)\\]';
 const anchorRe = () => new RegExp(ANCHOR_SRC, 'gi');
 
 export interface FaithfulnessDeps {
-  /** Reranker: score how well each evidence supports the claim (0..1, sigmoid). */
+  /** Reranker: score how well each evidence supports the claim (raw logit). */
   rerank: (claim: string, evidences: string[]) => Promise<number[]>;
   /** NLI classifier (optional). */
   classifyNli?: (pairs: { premise: string; claim: string }[]) => Promise<{ entailment: number, neutral: number, contradiction: number }[]>;
@@ -44,10 +44,13 @@ export interface FaithfulnessResult {
  */
 export function claimBefore(text: string, pos: number): string {
   const upto = text.slice(Math.max(0, pos - 400), pos);
+  // Sentence boundaries incl. CJK (。！？) so a Japanese claim doesn't grab the
+  // full 400-char window.
   const b = Math.max(
     upto.lastIndexOf('. '), upto.lastIndexOf('.\n'),
     upto.lastIndexOf('! '), upto.lastIndexOf('? '),
     upto.lastIndexOf('\n'), upto.lastIndexOf('; '),
+    upto.lastIndexOf('。'), upto.lastIndexOf('！'), upto.lastIndexOf('？'),
   );
   return upto.slice(b + 1).replace(anchorRe(), '').replace(/\s+/g, ' ').trim();
 }
@@ -55,7 +58,7 @@ export function claimBefore(text: string, pos: number): string {
 export async function verifyFaithfulness(
   synthesis: string,
   deps: FaithfulnessDeps,
-  threshold = 0.12,
+  threshold = -2, // logit space (≈ sigmoid 0.12): below this the chunk is off-claim
 ): Promise<FaithfulnessResult> {
   const re = anchorRe();
   const occ: { anchor: string; start: number; end: number; claim: string }[] = [];
@@ -98,7 +101,7 @@ export async function verifyFaithfulness(
     catch { continue; } // reranker hiccup — don't drop on a failed check
 
     resolved.forEach((r, k) => {
-      const rel = scores[k] ?? 1.0;
+      const rel = scores[k] ?? 0; // missing score → neutral (kept)
       if (rel < threshold) {
         drop.add(r.i);
       } else if (deps.classifyNli) {

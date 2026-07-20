@@ -7,6 +7,8 @@
 // rewrites such questions into standalone ones with one small LLM call —
 // these helpers decide WHEN that call is worth making.
 
+import { countWords } from './quality-gate';
+
 /** Pronouns and deictic phrases that only resolve against prior context. */
 const DEICTIC_RE = /\b(it|its|this|that|these|those|them|they|he|she|him|her|the (page|skill|tool|repo|site|article|paper|library|project|one)|the above|previous|earlier)\b/i;
 
@@ -25,8 +27,10 @@ export function needsIntentResolution(prompt: string, historyLength: number): bo
   if (p.startsWith('/')) return false;                 // commands are routed, not searched
   if (CONTINUATION_RE.test(p)) return true;
   if (DEICTIC_RE.test(p)) return true;
-  // Very short questions are almost always elliptical follow-ups
-  if (p.split(/\s+/).length <= 3) return true;
+  // Very short questions are almost always elliptical follow-ups. Count words
+  // language-aware: a Japanese sentence has no spaces — split(/\s+/) saw EVERY
+  // CJK question as "1 word" and over-triggered the rewrite LLM call.
+  if (countWords(p) <= 3) return true;
   return false;
 }
 
@@ -55,16 +59,14 @@ export function isChitchat(prompt: string): boolean {
  * clearly calls for research literature.
  */
 export function isAcademicQuery(topic: string): boolean {
-  return /\b(stud(?:y|ies)|research(?:ers?)?|evidence|clinical|trials?|meta-?analysis|peer[-\s]?reviewed|literature\s+review|systematic\s+review|efficacy|mechanisms?|hypothesis|empirical|scientific|biolog\w*|chemistr\w*|physics|neuroscience|genetics?|genomics?|epidemiolog\w*|pharmacolog\w*|molecular|proteins?|disease|pathophysiolog\w*|cognition|neural|quantum|theorem|equations?|academ\w*|papers?|journal|dataset)\b/i.test(topic || '');
-}
-
-/**
- * Is the user asking about their messages / inbox (as opposed to a workspace
- * doc)? When true and a webmail page is open, chat answers from the mailbox in
- * page context instead of running a pointless web search.
- */
-export function isMessageQuery(prompt: string): boolean {
-  return /\b(e-?mails?|inbox|messages?|gmail|who\s+(emailed|wrote|sent)|unread|my\s+mail)\b/i.test(prompt || '');
+  // Precision-tuned: bare "papers" matched newspaper topics, "dataset" matched
+  // sales data, "mechanisms" matched clockwork. Academic co-signals required
+  // for the ambiguous ones.
+  const strong = /\b(stud(?:y|ies)|research(?:ers?)?|evidence|clinical|trials?|meta-?analysis|peer[-\s]?reviewed|literature\s+review|systematic\s+review|efficacy|hypothesis|empirical|scientific|biolog\w*|chemistr\w*|physics|neuroscience|genetics?|genomics?|epidemiolog\w*|pharmacolog\w*|molecular|proteins?|disease|pathophysiolog\w*|cognition|neural|quantum|theorem|academ\w*|journal|preprints?|arxiv|doi\b|citations?)\b/i;
+  const weak = /\b(mechanisms?|equations?|papers?|dataset)\b/i;
+  const cosignal = /\b(research|stud(?:y|ies)|scientific|academ\w*|journal|clinical|theory|literature)\b/i;
+  const t = topic || '';
+  return strong.test(t) || (weak.test(t) && cosignal.test(t));
 }
 
 // ─────────────────────────────────────────────
@@ -89,7 +91,11 @@ const LINK_STOPWORDS = new Set([
  *  keywords — with the old ASCII-only `[a-z]` class, non-Latin questions
  *  yielded ZERO keywords, so page-overlap and link matching silently broke. */
 export function questionKeywords(q: string): string[] {
-  return [...new Set((q || '').toLowerCase().match(/[\p{L}][\p{L}\p{N}-]{2,}/gu) || [])].filter(w => !LINK_STOPWORDS.has(w));
+  const words = (q || '').toLowerCase().match(/[\p{L}][\p{L}\p{N}-]*/gu) || [];
+  // ≥3 chars for space-separated scripts (drops "a", "is"); CJK characters are
+  // meaningful at 1-2 chars (研究, 価格) and always kept.
+  return [...new Set(words)].filter(w =>
+    (w.length >= 3 || /[぀-ヿ㐀-䶿一-鿿]/.test(w)) && !LINK_STOPWORDS.has(w));
 }
 
 /** True when a question keyword lands on a link's anchor text or its URL —
@@ -136,10 +142,20 @@ export function isImplementationQuestion(q: string): boolean {
 }
 
 /** Is the question location- or "near me"-dependent (weather, local info)? Used
- *  to decide whether to inject the user's place into a web search query. */
-const LOCATION_RE = /\b(weather|forecast|temperature|climate|humidity|rain(?:ing|y)?|snow(?:ing|y)?|sunny|cold|hot|warm|chilly|freezing|near\s?me|nearby|around\s+here|local(?:ly)?|closest|nearest|restaurants?|cafes?|coffee|bars?|hotels?|traffic|directions|things\s+to\s+do|open\s+now|gas\s+prices?|my\s+area)\b/i;
+ *  to decide whether to inject the user's place into a web search query.
+ *
+ *  Two tiers: STRONG signals (weather, near me…) are location asks on their own;
+ *  WEAK words (bars, hot, traffic, temperature, coffee…) need a place/time
+ *  co-signal. Bare weak words hijacked real questions — "what do the bars in
+ *  this chart mean?" and "brew temperature for coffee?" were force-routed off
+ *  the attached page / workspace as if they were local-search asks. */
+const LOCATION_STRONG_RE = /\b(weather|forecast|climate|humidity|rain(?:ing|y)?|snow(?:ing|y)?|sunny|near\s?me|nearby|around\s+here|local(?:ly)?|closest|nearest|things\s+to\s+do|open\s+now|gas\s+prices?|my\s+area)\b/i;
+const LOCATION_WEAK_RE = /\b(temperature|cold|hot|warm|chilly|freezing|restaurants?|cafes?|coffee|bars?|hotels?|traffic|directions)\b/i;
+const LOCATION_COSIGNAL_RE = /\b(near|nearby|around\s+here|today|tomorrow|tonight|this\s+weekend|right\s+now|now\b|my\s+(?:area|city|town|neighbou?rhood)|outside)\b/i;
 export function isLocationDependent(q: string): boolean {
-  return LOCATION_RE.test(q || '');
+  const s = q || '';
+  if (LOCATION_STRONG_RE.test(s)) return true;
+  return LOCATION_WEAK_RE.test(s) && LOCATION_COSIGNAL_RE.test(s);
 }
 
 /** Best-effort place name from an IANA timezone: "Europe/Helsinki" → "Helsinki",
@@ -215,7 +231,14 @@ export function overlapsPage(q: string, pageText: string): boolean {
   const kw = questionKeywords(q).filter(k => !OVERLAP_STOP.has(k));
   if (!kw.length) return false;
   const hay = (pageText || '').toLowerCase();
-  return kw.some(k => hay.includes(k));
+  return kw.some(k => {
+    // CJK keywords have no word boundaries — substring is the only option.
+    if (/[぀-ヿ㐀-䶿一-鿿]/.test(k)) return hay.includes(k);
+    // Word-boundary match: substring matching bound "art" to "start", "ear" to
+    // "learn" — false page-binding hijacked unrelated questions onto the page.
+    try { return new RegExp(`\\b${k.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i').test(hay); }
+    catch { return hay.includes(k); }
+  });
 }
 
 /** Is the question a LIST / enumeration ("what series are published?", "list all
@@ -267,6 +290,9 @@ export function isStructureQuestion(q: string): boolean {
 export function isRefusalAnswer(text: string): boolean {
   const t = (text || '').toLowerCase().trim();
   if (t.length === 0 || t.length > 600) return false; // real answers run longer than a bare refusal
+  // Language-independent sentinel (see CITATION_SYSTEM_PROMPT rule 4): a German
+  // or Japanese refusal is undetectable by the English prose patterns below.
+  if (t.includes('no_sources_in_workspace')) return true;
   return /\b(can(?:not|'t)|could\s?n(?:o|')t|unable to|do(?:n'?t| not)|does(?:n'?t| not))\b[^.]*\banswer\b/.test(t)
     || /\bnot\s+(found|available|present|included|mentioned|contained|specified|covered)\b[^.]*\b(source|document|workspace|material)/.test(t)
     // Reversed order + present-tense: "the sources do not contain / mention …"
@@ -371,7 +397,7 @@ export function selectTreePaths(paths: string[], question: string, budget = 12_0
 
   const keywords = (question || '')
     .toLowerCase()
-    .split(/[^a-z0-9._-]+/)
+    .split(/[^\p{L}\p{N}._-]+/u)   // Unicode-aware — a German/Japanese question must still yield keywords
     .filter(w => w.length > 3);
 
   const matches = keywords.length > 0

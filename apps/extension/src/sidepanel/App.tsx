@@ -667,6 +667,23 @@ export default function App() {
   // one-shot File System Access grant used inside the click, so there is no
   // stored handle to expire and no download. Research-source scrapes are
   // excluded (the report + consolidated list are kept).
+
+  /** Resolve magpie-img:// refs to real image files for export. */
+  const materializeDocImages = async (docId: string, content: string): Promise<{ content: string; images: Array<{ name: string; dataUrl: string }> }> => {
+    if (!content.includes('magpie-img://')) return { content, images: [] };
+    const res = await msg('LIST_DOC_IMAGES', { docId }).catch(() => null);
+    const imgs = ((res as any)?.images || []) as Array<{ imgId: string; dataUrl: string }>;
+    let out = content;
+    const images: Array<{ name: string; dataUrl: string }> = [];
+    for (const im of imgs) {
+      const ext = im.dataUrl.startsWith('data:image/jpeg') ? 'jpg' : 'png';
+      const name = `${docId.slice(0, 8)}-${im.imgId.replace(/[^\w.-]/g, '_')}.${ext}`;
+      out = out.split(`magpie-img://${im.imgId}`).join(`images/${name}`);
+      images.push({ name, dataUrl: im.dataUrl });
+    }
+    return { content: out, images };
+  };
+
   const exportWorkspaceToFolder = async () => {
     // @ts-ignore — showDirectoryPicker isn't in older TS lib DOM defs
     if (typeof window.showDirectoryPicker !== 'function') {
@@ -676,7 +693,7 @@ export default function App() {
     const project = projects.find(p => p.id === activeProjectId);
     const files = documents
       .filter(doc => doc.content && !contentHasTag(doc.content, 'research-source'))
-      .map(doc => ({ name: doc.title, content: doc.content }));
+      .map(doc => ({ id: doc.id, name: doc.title, content: doc.content }));
     if (files.length === 0) { showToast('error', 'Nothing to export in this workspace yet.'); return; }
     try {
       // requestPermission is implicit in showDirectoryPicker; keep it the FIRST
@@ -686,19 +703,33 @@ export default function App() {
       const wsName = sanitizeSegment(project?.title || 'workspace');
       const wsDir = await dir.getDirectoryHandle(wsName, { create: true });
       let written = 0;
+      let imagesWritten = 0;
       for (const f of files) {
         const fileName = `${sanitizeSegment(f.name) || 'untitled'}.md`;
         try {
+          const { content, images } = await materializeDocImages(f.id, f.content || '');
           const fh = await wsDir.getFileHandle(fileName, { create: true });
           const w = await fh.createWritable();
-          await w.write(f.content);
+          await w.write(content);
           await w.close();
           written++;
+          if (images.length) {
+            const imgDir = await wsDir.getDirectoryHandle('images', { create: true });
+            for (const im of images) {
+              try {
+                const ifh = await imgDir.getFileHandle(im.name, { create: true });
+                const iw = await ifh.createWritable();
+                iw.write(await (await fetch(im.dataUrl)).blob());
+                await iw.close();
+                imagesWritten++;
+              } catch (e) { console.warn(`[export] image failed ${im.name}:`, e); }
+            }
+          }
         } catch (e) {
           console.warn(`[export] failed ${fileName}:`, e);
         }
       }
-      showToast('success', `Exported ${written} file(s) to ${dir.name}/${wsName}/`);
+      showToast('success', `Exported ${written} file(s)${imagesWritten ? ` + ${imagesWritten} image(s)` : ''} to ${dir.name}/${wsName}/`);
     } catch (err: any) {
       if (err?.name !== 'AbortError') {
         console.error('[export] failed:', err);
@@ -1021,12 +1052,15 @@ export default function App() {
   const loadSettings = () => {
     if (typeof chrome !== 'undefined' && chrome.storage) {
       chrome.storage.local.get(
-        ['driveFolderName', 'customUrl', 'customKey', 'customModel', 'visionModel', 'autoLinkCaptures', 'includePageContext', 'syncResearchSources', 'routeChatThroughCli', 'cliCommandTemplate', 'localMcpCompanionUrl'],
+        ['driveFolderName', 'customUrl', 'customKey', 'customModel', 'customModels', 'visionModel', 'autoLinkCaptures', 'includePageContext', 'syncResearchSources', 'routeChatThroughCli', 'cliCommandTemplate', 'localMcpCompanionUrl'],
         (r) => {
           if (r.driveFolderName) setFolderName(r.driveFolderName);
           if (r.customUrl) setCustomUrl(r.customUrl);
           if (r.customKey) setCustomKey(r.customKey);
           if (r.customModel) setCustomModel(r.customModel);
+          // Persisted model list: the dropdown survives a panel reload without
+          // a refetch round-trip.
+          if (Array.isArray(r.customModels)) setCustomModels(r.customModels);
           if (r.visionModel) setVisionModel(r.visionModel);
           setAutoLinkCaptures(r.autoLinkCaptures !== false); // default ON
           setIncludePageContext(r.includePageContext === true); // default OFF
@@ -1063,9 +1097,13 @@ export default function App() {
   };
 
   // ──────── Actions ────────
+  const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const showToast = (type: 'success' | 'error' | 'info', text: string) => {
+    // Clear the PREVIOUS toast's timer — otherwise a second toast within 4s
+    // gets dismissed early by the first toast's countdown.
+    if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
     setToast({ type, text });
-    setTimeout(() => setToast(null), 4000);
+    toastTimerRef.current = setTimeout(() => setToast(null), 4000);
   };
 
   const capture = async () => {
@@ -1234,12 +1272,9 @@ export default function App() {
 
     await msg('DELETE_DOCUMENT', { docId: id });
 
-    // Show undo toast — user has 5 seconds to reconsider
-    // (After this window, the document is gone permanently)
+    // Honest copy: deletion is permanent — no undo exists.
     if (removed) {
-      const undoToast = { type: 'success' as const, text: `Deleted "${removed.title.slice(0, 30)}" — reload to undo` };
-      setToast(undoToast);
-      setTimeout(() => setToast(t => t === undoToast ? null : t), 5000);
+      showToast('success', `Deleted "${removed.title.slice(0, 30)}" permanently`);
     }
 
     loadDocuments(activeProjectId);
@@ -1261,6 +1296,14 @@ export default function App() {
     if (!content) {
       showToast('error', 'Content not available for download.');
       return;
+    }
+    // Single-file download: inline any magpie-img:// refs as data URLs so the
+    // .md is self-contained (a folder export writes real image files instead).
+    if (content.includes('magpie-img://')) {
+      const res = await msg('LIST_DOC_IMAGES', { docId: doc.id }).catch(() => null);
+      for (const im of (((res as any)?.images || []) as Array<{ imgId: string; dataUrl: string }>)) {
+        content = content.split(`magpie-img://${im.imgId}`).join(im.dataUrl);
+      }
     }
     const blob = new Blob([content], { type: 'text/markdown' });
     const url = URL.createObjectURL(blob);
@@ -1340,20 +1383,30 @@ export default function App() {
 
   const saveSettings = () => {
     if (typeof chrome !== 'undefined' && chrome.storage) {
-      chrome.storage.local.set({
-        driveFolderName: folderName,
-        customUrl,
-        customKey,
-        customModel,
-        visionModel,
-        autoLinkCaptures,
-        includePageContext,   // was missing — ensure full state is persisted
-        syncResearchSources,
-        routeChatThroughCli,
-        cliCommandTemplate,
-        localMcpCompanionUrl
-      }, () => {
-        // Silently save settings without toast
+      // Clearing an auto-adopted provider (Ollama / built-in Gemini) must STICK:
+      // otherwise the next panel open re-runs autoConfigureProvider (it sees an
+      // empty customUrl = "nothing configured") and resurrects the provider the
+      // user just removed. Mark the clear as a deliberate decline.
+      chrome.storage.local.get(['providerAutoConfigured'], (cur) => {
+        const wasAuto = cur.providerAutoConfigured === 'ollama' || cur.providerAutoConfigured === 'builtin-gemini';
+        const declined = !customUrl.trim() && wasAuto ? { providerAutoConfigured: 'declined' } : {};
+        chrome.storage.local.set({
+          driveFolderName: folderName,
+          customUrl,
+          customKey,
+          customModel,
+          customModels,
+          visionModel: visionModel.trim(),   // never persist a whitespace sentinel
+          autoLinkCaptures,
+          includePageContext,   // was missing — ensure full state is persisted
+          syncResearchSources,
+          routeChatThroughCli,
+          cliCommandTemplate,
+          localMcpCompanionUrl,
+          ...declined
+        }, () => {
+          // Silently save settings without toast
+        });
       });
     }
   };
@@ -1450,6 +1503,19 @@ export default function App() {
       } else {
         await refineResearchPlan(draftPlanMsg, text);
       }
+      return;
+    }
+
+    // ── Bare arg-required commands ──
+    // "/research" typed alone matched no startsWith('/research ') branch and
+    // fell through as a LITERAL chat turn containing the command string.
+    const bareArg = text.match(/^\/(page|recall|follow|research|deepresearch|academic)\s*$/i);
+    if (bareArg) {
+      const usage: Record<string, string> = {
+        page: '/page <question>', recall: '/recall <topic>', follow: '/follow <url>',
+        research: '/research <topic>', deepresearch: '/deepresearch <topic>', academic: '/academic <topic>',
+      };
+      showToast('error', `Usage: ${usage[bareArg[1].toLowerCase()]}`);
       return;
     }
 
@@ -1863,6 +1929,7 @@ export default function App() {
       projectId: activeProjectId,
       chatId: activeChatId,
       topic: plan.effectiveTopic,
+      preResolved: true,   // the plan card IS the confirmed topic — don't re-resolve
       mode: plan.mode,
       sourceMode: plan.sourceMode ?? 'auto'
     }).catch(() => {});
@@ -1906,12 +1973,21 @@ export default function App() {
       {/* ── Main Content Area ── */}
       <main className="flex-1 flex flex-col overflow-hidden relative bg-background border-b border-border">
         {toast && (
-          <div className={`absolute top-4 left-1/2 -translate-x-1/2 z-50 px-4 py-2 text-xs font-medium rounded-lg animate-in slide-in-from-top-2 shadow-card ${
+          <div
+            role="status"
+            aria-live="polite"
+            className={`absolute top-4 left-1/2 -translate-x-1/2 z-50 px-4 py-2 text-xs font-medium rounded-lg animate-in slide-in-from-top-2 shadow-card ${
             toast.type === 'error' ? 'bg-destructive text-destructive-foreground'
               : toast.type === 'info' ? 'ink-panel'
               : 'bg-primary text-primary-foreground'
           }`}>
             {toast.text}
+            <button
+              type="button"
+              aria-label="Dismiss notification"
+              className="ml-2 opacity-70 hover:opacity-100"
+              onClick={() => { if (toastTimerRef.current) clearTimeout(toastTimerRef.current); setToast(null); }}
+            >✕</button>
           </div>
         )}
 
@@ -1927,7 +2003,7 @@ export default function App() {
             )}
             <div className="text-sm truncate font-medium flex-1 text-foreground">{tabInfo.title}</div>
             <Button size="sm" onClick={capture} disabled={capturing} variant="default" className="shrink-0 h-8 text-xs rounded-lg font-semibold">
-              {capturing ? 'CAPTURING...' : 'CAPTURE'}
+              {capturing ? 'Capturing…' : 'Capture'}
             </Button>
           </div>
         )}
@@ -2014,27 +2090,28 @@ export default function App() {
                 }
               }}
               customModels={customModels}
-              fetchCustomModels={async () => {
-                const res = await msg('FETCH_CUSTOM_MODELS', { url: customUrl, apiKey: customKey });
-                if (res.success) {
-                  const models = res.models as string[];
-                  setCustomModels(models);
-                  if (typeof chrome !== 'undefined' && chrome.storage) {
-                    chrome.storage.local.get(['customModel'], (r) => {
-                      const saved = r.customModel || customModel;
-                      if (saved) {
-                        setCustomModel(saved);
-                      } else if (models.length > 0) {
-                        setCustomModel(models[0]);
-                      }
-                    });
-                  } else if (models.length > 0 && !customModel) {
-                    setCustomModel(models[0]);
-                  }
-                } else {
-                  showToast('error', (res.error as string) || 'Failed to fetch custom models');
-                }
-              }}
+               fetchCustomModels={async () => {
+                 const res = await msg('FETCH_CUSTOM_MODELS', { url: customUrl, apiKey: customKey });
+                 if (res.success) {
+                   const models = res.models as string[];
+                   setCustomModels(models);
+                   if (typeof chrome !== 'undefined' && chrome.storage) {
+                     chrome.storage.local.set({ customModels: models });
+                     chrome.storage.local.get(['customModel'], (r) => {
+                       const saved = r.customModel || customModel;
+                       if (saved) {
+                         setCustomModel(saved);
+                       } else if (models.length > 0) {
+                         setCustomModel(models[0]);
+                       }
+                     });
+                   } else if (models.length > 0 && !customModel) {
+                     setCustomModel(models[0]);
+                   }
+                 } else {
+                   showToast('error', (res.error as string) || 'Failed to fetch custom models');
+                 }
+               }}
               customUrl={customUrl}
               toggleDoc={toggleDoc}
               onUploadMarkdown={importMarkdownFiles}
@@ -2053,26 +2130,27 @@ export default function App() {
               visionModel={visionModel}
               setVisionModel={setVisionModel}
               customModels={customModels}
-              fetchCustomModels={async () => {
-                const res = await msg('FETCH_CUSTOM_MODELS', { url: customUrl, apiKey: customKey });
-                if (res.success) {
-                  const models = res.models as string[];
-                  setCustomModels(models);
-                  if (typeof chrome !== 'undefined' && chrome.storage) {
-                    chrome.storage.local.get(['customModel'], (r) => {
-                      const saved = r.customModel || customModel;
-                      if (saved) {
-                        setCustomModel(saved);
-                      } else if (models.length > 0) {
-                        setCustomModel(models[0]);
-                      }
-                    });
-                  } else if (models.length > 0 && !customModel) {
-                    setCustomModel(models[0]);
-                  }
-                } else showToast('error', (res.error as string) || 'Failed to fetch custom models');
-              }}
-              docCount={docCount}
+               fetchCustomModels={async () => {
+                 const res = await msg('FETCH_CUSTOM_MODELS', { url: customUrl, apiKey: customKey });
+                 if (res.success) {
+                   const models = res.models as string[];
+                   setCustomModels(models);
+                   if (typeof chrome !== 'undefined' && chrome.storage) {
+                     chrome.storage.local.set({ customModels: models });
+                     chrome.storage.local.get(['customModel'], (r) => {
+                       const saved = r.customModel || customModel;
+                       if (saved) {
+                         setCustomModel(saved);
+                       } else if (models.length > 0) {
+                         setCustomModel(models[0]);
+                       }
+                     });
+                   } else if (models.length > 0 && !customModel) {
+                     setCustomModel(models[0]);
+                   }
+                 } else showToast('error', (res.error as string) || 'Failed to fetch custom models');
+               }}
+               docCount={docCount}
               globalDocCount={globalDocuments.length}
               onCleanupOrphans={async () => {
                 const res = await msg('CLEANUP_ORPHANS');

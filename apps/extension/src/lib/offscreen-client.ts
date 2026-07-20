@@ -7,12 +7,22 @@
 let offscreenFailureCount = 0;
 const OFFSCREEN_MAX_FAILURES = 3;
 let ensureOffscreenFn: (() => Promise<void>) | null = null;
+let recreateOffscreenFn: (() => Promise<void>) | null = null;
 
 /**
  * Set the ensureOffscreen function (called from service worker to avoid circular deps)
  */
 export function setEnsureOffscreen(fn: () => Promise<void>) {
   ensureOffscreenFn = fn;
+}
+
+/**
+ * Set the recreateOffscreen function (close + fresh create). Used after repeated
+ * failures: re-ENSURING a wedged document no-ops (it exists), so the retry would
+ * go to the same broken doc and time out again.
+ */
+export function setRecreateOffscreen(fn: () => Promise<void>) {
+  recreateOffscreenFn = fn;
 }
 
 /** Default deadline for one offscreen round-trip. Generous — model download
@@ -98,10 +108,13 @@ async function sendToOffscreenUnqueued<T>(message: Record<string, unknown>, time
     offscreenFailureCount++;
     console.warn(`[OffscreenClient] Send failed (${offscreenFailureCount}/${OFFSCREEN_MAX_FAILURES}):`, err?.message || err);
     
-    // If too many failures, force recreation
+    // If too many failures, force recreation — actually CLOSE the wedged doc
+    // (ensureOffscreen no-ops while it exists, which is why the old code retried
+    // the same broken document and timed out again).
     if (offscreenFailureCount >= OFFSCREEN_MAX_FAILURES) {
       console.warn('[OffscreenClient] Too many offscreen failures, forcing recreation');
       offscreenFailureCount = 0;
+      if (recreateOffscreenFn) await recreateOffscreenFn().catch(() => {});
       await ensureOffscreenFn();
       // Retry once after recreation — still under a deadline
       return await withTimeout(chrome.runtime.sendMessage(message) as Promise<T>, timeoutMs, `${label} (retry)`);

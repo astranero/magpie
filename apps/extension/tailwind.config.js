@@ -51,6 +51,19 @@ module.exports = {
           DEFAULT: "hsl(var(--card))",
           foreground: "hsl(var(--card-foreground))",
         },
+        // Theme extras — registered so bg-/text-/border-{highlight,rule,ink-panel}
+        // actually generate (bg-highlight/15 etc. were silently dead CSS).
+        highlight: "hsl(var(--highlight))",
+        rule: "hsl(var(--rule))",
+        "ink-panel": {
+          DEFAULT: "hsl(var(--ink-panel))",
+          foreground: "hsl(var(--ink-panel-fg))",
+        },
+      },
+      fontFamily: {
+        // Geist Variable is imported in index.css but was never wired — html
+        // fell back to Tailwind's default sans stack.
+        sans: ['"Geist Variable"', 'ui-sans-serif', 'system-ui', 'sans-serif'],
       },
       borderRadius: {
         lg: "var(--radius)",

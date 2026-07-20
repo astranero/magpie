@@ -198,9 +198,9 @@ const heapMB = (): number | undefined => {
   catch { return undefined; }
 };
 
-const generateEmbeddings = (texts: string[]): Promise<number[][]> => {
+const generateEmbeddings = (texts: string[], kind?: 'query' | 'passage'): Promise<number[][]> => {
   crumb('offscreen', 'embed start', { n: texts.length, chars: texts.reduce((a, t) => a + t.length, 0), heapMB: heapMB() });
-  return callWorker<{ embeddings: number[][] }>({ type: 'embed', texts }).then(r => r.embeddings);
+  return callWorker<{ embeddings: number[][] }>({ type: 'embed', texts, kind }).then(r => r.embeddings);
 };
 
 const rerank = (query: string, passages: string[]): Promise<number[]> => {
@@ -226,12 +226,105 @@ function base64ToUint8Array(b64: string): Uint8Array {
   return bytes;
 }
 
+// ── Embedded PDF image extraction ──
+// Figures are extracted AS IMAGES (not OCR'd, not dropped): the vision model
+// stays an opt-in fallback for genuinely scanned pages. Images travel back as
+// PNG data URLs (bounded: ≤40/doc, ≤1.5 MB each, ≥64×64 px, hash-deduped) and
+// are stored as IDB blobs by the caller; the markdown references them via
+// `magpie-img://p{page}.{n}` refs the viewer resolves.
+export interface EmbeddedImage {
+  imgId: string;     // doc-relative id, e.g. "p3.1"
+  page: number;
+  dataUrl: string;
+  width: number;
+  height: number;
+}
+
+const MAX_DOC_IMAGES = 40;
+const MAX_IMAGE_DATAURL = 1_500_000;   // ~1.1 MB binary
+const MIN_IMAGE_DIM = 64;
+
+function imageToPngDataUrl(img: any): { dataUrl: string; width: number; height: number } | null {
+  try {
+    let width = 0, height = 0;
+    const canvas = document.createElement('canvas');
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return null;
+    if (typeof ImageBitmap !== 'undefined' && img instanceof ImageBitmap) {
+      width = img.width; height = img.height;
+      canvas.width = width; canvas.height = height;
+      ctx.drawImage(img, 0, 0);
+    } else if (img && typeof img.width === 'number' && typeof img.height === 'number' && img.data) {
+      width = img.width; height = img.height;
+      canvas.width = width; canvas.height = height;
+      // pdf.js raw images: kind 1=GRAYSCALE_1BPP, 2=RGB_24BPP, 3=RGBA_32BPP
+      if (img.kind === 3 || !img.kind) {
+        ctx.putImageData(new ImageData(new Uint8ClampedArray(img.data.buffer ? img.data : img.data.slice(0)), width, height), 0, 0);
+      } else if (img.kind === 2) {
+        const rgba = new Uint8ClampedArray(width * height * 4);
+        for (let s = 0, d = 0; s < img.data.length; s += 3, d += 4) {
+          rgba[d] = img.data[s]; rgba[d + 1] = img.data[s + 1]; rgba[d + 2] = img.data[s + 2]; rgba[d + 3] = 255;
+        }
+        ctx.putImageData(new ImageData(rgba, width, height), 0, 0);
+      } else {
+        return null; // 1bpp grayscale — rare, skip
+      }
+    } else {
+      return null;
+    }
+    if (width < MIN_IMAGE_DIM || height < MIN_IMAGE_DIM) return null; // icons/rules/bullets
+    const dataUrl = canvas.toDataURL('image/png');
+    if (dataUrl.length > MAX_IMAGE_DATAURL) return null; // huge figure — skip rather than blow the message cap
+    return { dataUrl, width, height };
+  } catch {
+    return null;
+  }
+}
+
+async function extractEmbeddedImages(page: any, pageNum: number, budget: number, seenHashes: Set<string>): Promise<EmbeddedImage[]> {
+  const out: EmbeddedImage[] = [];
+  if (budget <= 0) return out;
+  try {
+    const ops = await page.getOperatorList();
+    const OPS = (pdfjsLib as any).OPS;
+    let n = 0;
+    for (let i = 0; i < ops.fnArray.length && out.length < budget; i++) {
+      const fn = ops.fnArray[i];
+      if (fn !== OPS.paintImageXObject && fn !== OPS.paintInlineImageXObject && fn !== OPS.paintImageXObjectRepeat) continue;
+      const arg = ops.argsArray[i]?.[0];
+      try {
+        let img: any = null;
+        if (fn === OPS.paintInlineImageXObject) {
+          img = arg; // inline images carry their data in the arg itself
+        } else if (typeof arg === 'string') {
+          img = await new Promise<any>(res => {
+            try { page.objs.get(arg, res); } catch { res(null); }
+            setTimeout(() => res(null), 3000);
+          });
+        }
+        if (!img) continue;
+        // paintImageXObjectRepeat paints the same image at several positions —
+        // store it once (dedupe below also catches repeats across pages).
+        const conv = imageToPngDataUrl(img);
+        if (!conv) continue;
+        // Cheap dedupe hash: size + sampled bytes (logos repeat across pages).
+        const s = conv.dataUrl;
+        const hash = `${s.length}:${s.slice(100, 140)}${s.slice(-60)}`;
+        if (seenHashes.has(hash)) continue;
+        seenHashes.add(hash);
+        out.push({ imgId: `p${pageNum}.${++n}`, page: pageNum, ...conv });
+      } catch { /* one bad image never fails the page */ }
+    }
+  } catch { /* operator list unavailable — text-only page */ }
+  return out;
+}
+
 /**
  * Extract text from a PDF using code (pdf.js). For pages that yield little or
  * no text (scanned pages), render the page to a PNG data URL so the caller can
  * OCR it with a vision model — vision is only a fallback.
  */
-async function parsePdf(base64: string, silent?: boolean): Promise<{ pages: string[]; imagePages: { index: number; dataUrl: string }[] }> {
+async function parsePdf(base64: string, silent?: boolean): Promise<{ pages: string[]; imagePages: { index: number; dataUrl: string }[]; images: EmbeddedImage[] }> {
   return parsePdfData(base64ToUint8Array(base64), silent);
 }
 
@@ -241,7 +334,7 @@ async function parsePdf(base64: string, silent?: boolean): Promise<{ pages: stri
  * boundary, which is what let large books crash the renderer. Deletes the
  * OPFS temp file when done (success or failure).
  */
-async function parsePdfOpfs(opfsName: string, silent?: boolean): Promise<{ pages: string[]; imagePages: { index: number; dataUrl: string }[] }> {
+async function parsePdfOpfs(opfsName: string, silent?: boolean): Promise<{ pages: string[]; imagePages: { index: number; dataUrl: string }[]; images: EmbeddedImage[] }> {
   const root = await navigator.storage.getDirectory();
   try {
     const fh = await root.getFileHandle(opfsName);
@@ -265,7 +358,7 @@ async function parsePdfOpfs(opfsName: string, silent?: boolean): Promise<{ pages
 // (the run continues with its other sources) rather than risk the whole process.
 const MAX_PDF_URL_MB = 50;
 
-async function parsePdfUrl(url: string, silent?: boolean): Promise<{ pages: string[]; imagePages: { index: number; dataUrl: string }[]; bytes: number }> {
+async function parsePdfUrl(url: string, silent?: boolean): Promise<{ pages: string[]; imagePages: { index: number; dataUrl: string }[]; images: EmbeddedImage[]; bytes: number }> {
   let sizeMb = 0;
   try {
     const head = await fetch(url, { method: 'HEAD', redirect: 'follow' });
@@ -289,10 +382,11 @@ async function parsePdfUrl(url: string, silent?: boolean): Promise<{ pages: stri
 
 const MAX_PDF_PAGES = 800;
 
-async function parsePdfData(data: Uint8Array, silent?: boolean): Promise<{ pages: string[]; imagePages: { index: number; dataUrl: string }[] }> {
+async function parsePdfData(data: Uint8Array, silent?: boolean): Promise<{ pages: string[]; imagePages: { index: number; dataUrl: string }[]; images: EmbeddedImage[] }> {
   // Per-page progress so a long parse is observably alive (not a dead
   // "parsing…"), and so a stall pinpoints where it hangs.
   const postProgress = (pg: number, totalPages: number) => {
+    lastActivity = Date.now(); // a long parse is ACTIVITY — keep the idle watchdog off
     if (silent) return;
     try {
       const ch = new BroadcastChannel('ai_research_assistant_import');
@@ -303,6 +397,8 @@ async function parsePdfData(data: Uint8Array, silent?: boolean): Promise<{ pages
   const pdf = await pdfjsLib.getDocument({ data, isEvalSupported: false }).promise;
   const pages: string[] = [];
   const imagePages: { index: number; dataUrl: string }[] = [];
+  const images: EmbeddedImage[] = [];
+  const seenImageHashes = new Set<string>();
 
   const pageLimit = Math.min(pdf.numPages, MAX_PDF_PAGES);
   // Rendering scanned pages for OCR only makes sense for small PDFs — a big
@@ -332,6 +428,13 @@ async function parsePdfData(data: Uint8Array, silent?: boolean): Promise<{ pages
           });
 
         const rawText = items.map(it => it.text).join(' ').replace(/\s+/g, ' ').trim();
+
+        // Embedded figures: extract as-is on EVERY text page (scanned-page
+        // rasterization below is the separate, OCR-only path).
+        if (images.length < MAX_DOC_IMAGES) {
+          const found = await extractEmbeddedImages(page, p, MAX_DOC_IMAGES - images.length, seenImageHashes);
+          images.push(...found);
+        }
 
         // A page with almost no extractable text is likely scanned/image →
         // render it to a canvas for the vision model. But this is EXPENSIVE
@@ -383,7 +486,7 @@ async function parsePdfData(data: Uint8Array, silent?: boolean): Promise<{ pages
         if (p % 10 === 0 || p === pageLimit) { postProgress(p, pageLimit); await new Promise(r => setTimeout(r, 0)); }
       }
     }
-    return { pages, imagePages };
+    return { pages, imagePages, images };
   } finally {
     // Document-level cleanup (frees @font-face / shared resources pdf.js caches
     // across pages) BEFORE destroy — page.cleanup() alone leaves these behind.
@@ -400,17 +503,30 @@ async function parsePdfData(data: Uint8Array, silent?: boolean): Promise<{ pages
 // rebuilds it fresh (ensureOffscreen re-checks hasDocument; model reloads from
 // cache in a few seconds). 90 s so a genuine mid-run lull — e.g. a long LLM
 // synthesis with no offscreen traffic — doesn't trip it.
+//
+// BUSY GUARD: a long PDF parse (8–25 min) holds the SW-side offscreen mutex,
+// so no message arrives during it and `lastActivity` goes stale — closing the
+// doc mid-parse kills the import the caller budgeted 25 min for. Never close
+// while a handler is in flight; parse progress also refreshes `lastActivity`.
 let lastActivity = Date.now();
+let inFlight = 0;
 const IDLE_CLOSE_MS = 90_000;
 setInterval(() => {
+  if (inFlight > 0) return; // busy — closing now would kill in-flight work
   if (Date.now() - lastActivity >= IDLE_CLOSE_MS) {
     try { crumb('offscreen', 'idle close — freeing renderer', {}); } catch { /* ignore */ }
     try { window.close(); } catch { /* ignore */ }
   }
 }, 30_000);
 
-chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
+chrome.runtime.onMessage.addListener((request, _sender, rawSendResponse) => {
   lastActivity = Date.now();
+  inFlight++;
+  let responded = false;
+  const sendResponse = (v?: any) => {
+    if (!responded) { responded = true; inFlight--; }
+    rawSendResponse(v);
+  };
   if (request?.action === 'OFFSCREEN_PARSE_PDF') {
     crumb('offscreen', 'pdf parse (base64) start', { base64Mb: Math.round((request.base64 as string || '').length / 1.33 / 1024 / 1024) });
     parsePdf(request.base64 as string, !!request.silent)
@@ -460,7 +576,7 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
   }
 
   if (request?.action === 'OFFSCREEN_GET_EMBEDDINGS') {
-    generateEmbeddings(request.texts as string[])
+    generateEmbeddings(request.texts as string[], request.kind as 'query' | 'passage' | undefined)
       .then(embeddings => sendResponse({ ok: true, embeddings }))
       .catch(err => sendResponse({ ok: false, error: err instanceof Error ? err.message : String(err) }));
     return true;
@@ -516,6 +632,7 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
     return true;
   }
 
+  inFlight--; // unknown action — no response will be sent
   return false;
 });
 

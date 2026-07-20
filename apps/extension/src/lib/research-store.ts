@@ -59,6 +59,18 @@ export interface CachedPage {
 }
 
 // ── Job state (chrome.storage.local) ──
+//
+// SINGLE-WRITER CHAIN: every read-modify-write below is get→set. Two concurrent
+// mutations (a progress log append racing a stage checkpoint update) each read
+// the pre-other-write state and the second set clobbers the first's field. The
+// service worker is single-threaded but the awaits interleave — so all mutators
+// serialize through this promise chain. Reads (getJob) stay unsynchronized.
+let mutationChain: Promise<unknown> = Promise.resolve();
+function serialized<T>(fn: () => Promise<T>): Promise<T> {
+  const p = mutationChain.then(fn, fn); // run even if the previous mutation failed
+  mutationChain = p.catch(() => {});
+  return p;
+}
 
 export async function getJob(): Promise<ResearchJob | null> {
   const s = await chrome.storage.local.get([JOB_KEY]);
@@ -67,70 +79,84 @@ export async function getJob(): Promise<ResearchJob | null> {
 
 /** Start (or replace) the current research job. */
 export async function startJob(seed: Omit<ResearchJob, 'startedAt' | 'phase' | 'logs'>): Promise<void> {
-  const full: ResearchJob = {
-    ...seed,
-    startedAt: new Date().toISOString(),
-    phase: 'planning',
-    logs: [],
-    resumeAttempts: 0,
-    active: false
-  };
-  await chrome.storage.local.set({ [JOB_KEY]: full });
-  // A NEW job invalidates the scraped-page cache: it exists so a RESUMED run
-  // (which never passes through startJob) can replay its own pages — not so
-  // pages from a previous topic leak into an unrelated one. Without this,
-  // the academic agent's cache-restore imported stale papers into every run.
-  await clearPages().catch(() => {});
+  return serialized(async () => {
+    const full: ResearchJob = {
+      ...seed,
+      startedAt: new Date().toISOString(),
+      phase: 'planning',
+      logs: [],
+      resumeAttempts: 0,
+      active: false
+    };
+    await chrome.storage.local.set({ [JOB_KEY]: full });
+    // A NEW job invalidates the scraped-page cache: it exists so a RESUMED run
+    // (which never passes through startJob) can replay its own pages — not so
+    // pages from a previous topic leak into an unrelated one. Without this,
+    // the academic agent's cache-restore imported stale papers into every run.
+    await clearPages().catch(() => {});
+  });
 }
 
 /** Merge-patch the current job. No-op if there is no job. */
 export async function updateJob(patch: Partial<ResearchJob>): Promise<void> {
-  const job = await getJob();
-  if (!job) return;
-  await chrome.storage.local.set({ [JOB_KEY]: { ...job, ...patch } });
+  return serialized(async () => {
+    const job = await getJob();
+    if (!job) return;
+    await chrome.storage.local.set({ [JOB_KEY]: { ...job, ...patch } });
+  });
 }
 
 /** Append a log line (bounded to MAX_LOGS most-recent entries). */
 export async function appendJobLog(line: string): Promise<void> {
-  const job = await getJob();
-  if (!job) return;
-  const logs = [...(job.logs ?? []), line].slice(-MAX_LOGS);
-  await chrome.storage.local.set({ [JOB_KEY]: { ...job, logs } });
+  return serialized(async () => {
+    const job = await getJob();
+    if (!job) return;
+    const logs = [...(job.logs ?? []), line].slice(-MAX_LOGS);
+    await chrome.storage.local.set({ [JOB_KEY]: { ...job, logs } });
+  });
 }
 
 /** Clear the current job entirely. */
 export async function clearJob(): Promise<void> {
-  await chrome.storage.local.remove(JOB_KEY);
+  return serialized(() => chrome.storage.local.remove(JOB_KEY));
 }
 
 /** Mark the job as actively running and refresh heartbeat. */
 export async function markJobActive(): Promise<void> {
-  const job = await getJob();
-  if (!job) return;
-  await chrome.storage.local.set({ [JOB_KEY]: { ...job, active: true, lastHeartbeatAt: Date.now() } });
+  return serialized(async () => {
+    const job = await getJob();
+    if (!job) return;
+    await chrome.storage.local.set({ [JOB_KEY]: { ...job, active: true, lastHeartbeatAt: Date.now() } });
+  });
 }
 
 /** Explicit finished marker — clearJob races can otherwise resurrect a done job. */
 export async function markJobFinished(): Promise<void> {
-  const job = await getJob();
-  if (!job) return;
-  await chrome.storage.local.set({ [JOB_KEY]: { ...job, active: false } });
+  return serialized(async () => {
+    const job = await getJob();
+    if (!job) return;
+    await chrome.storage.local.set({ [JOB_KEY]: { ...job, active: false } });
+  });
 }
 
 /** Refresh heartbeat timestamp. Called periodically during execution. */
 export async function updateHeartbeat(): Promise<void> {
-  const job = await getJob();
-  if (!job) return;
-  await chrome.storage.local.set({ [JOB_KEY]: { ...job, lastHeartbeatAt: Date.now(), active: true } });
+  return serialized(async () => {
+    const job = await getJob();
+    if (!job) return;
+    await chrome.storage.local.set({ [JOB_KEY]: { ...job, lastHeartbeatAt: Date.now(), active: true } });
+  });
 }
 
 /** Increment resume attempt counter; returns the new count. */
 export async function incrementResumeAttempts(): Promise<number> {
-  const job = await getJob();
-  if (!job) return 0;
-  const newCount = (job.resumeAttempts ?? 0) + 1;
-  await chrome.storage.local.set({ [JOB_KEY]: { ...job, resumeAttempts: newCount } });
-  return newCount;
+  return serialized(async () => {
+    const job = await getJob();
+    if (!job) return 0;
+    const newCount = (job.resumeAttempts ?? 0) + 1;
+    await chrome.storage.local.set({ [JOB_KEY]: { ...job, resumeAttempts: newCount } });
+    return newCount;
+  });
 }
 
 /** True when a running job's heartbeat has gone stale (worker died mid-run). */

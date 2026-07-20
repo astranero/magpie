@@ -11,6 +11,8 @@
 // The outline is checkpointed in the research job (research-store.ts) exactly
 // like stage briefs — any function that mutates it returns a new object.
 
+import { unicodeTokens } from './unicode-text';
+
 export interface OutlineSection {
   /** Stable id ("s1".."s10") — the reflect prompt pins ids across stages. */
   id: string;
@@ -102,7 +104,7 @@ export function parseReflect(raw: string): ReflectResult | null {
       // would then wrongly unify distinct sections).
       id: typeof s.id === 'string' && s.id.trim()
         ? s.id.trim().slice(0, 12)
-        : `s${i + 1}-${heading.toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 6)}`,
+        : `s${i + 1}-${heading.toLowerCase().replace(/[^\p{L}\p{N}]/gu, '').slice(0, 6)}`,
       heading: heading.slice(0, 160),
       goal: typeof s.goal === 'string' ? s.goal.trim().slice(0, 400) : '',
       keyTerms: asStringArray(s.keyTerms, MAX_KEY_TERMS, 60),
@@ -125,7 +127,10 @@ export function parseReflect(raw: string): ReflectResult | null {
   return { outline: { sections, version: 0 }, handoff, queries };
 }
 
-const fuzzyKey = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, '');
+// Unicode-aware: the ASCII-only version stripped non-Latin headings to '' —
+// every Japanese/German heading then hashed to the SAME key and mergeOutlines
+// treated distinct sections as one.
+const fuzzyKey = (s: string) => s.toLowerCase().replace(/[^\p{L}\p{N}]/gu, '');
 
 /**
  * Defend against the model dropping sections between stages: any prior section
@@ -202,8 +207,8 @@ export function formatHandoff(h: StageHandoff): string {
  */
 export function selectBriefExcerpts(briefs: string[], section: OutlineSection, budgetChars = 6000): string {
   const targetTokens = new Set(
-    `${section.heading} ${section.goal} ${section.keyTerms.join(' ')}`
-      .toLowerCase().split(/[^a-z0-9]+/).filter(t => t.length > 3)
+    unicodeTokens(`${section.heading} ${section.goal} ${section.keyTerms.join(' ')}`)
+      .filter(t => t.length > 3 || /[぀-ヿ㐀-䶿一-鿿]/.test(t))
   );
   if (targetTokens.size === 0) return '';
 
@@ -213,7 +218,7 @@ export function selectBriefExcerpts(briefs: string[], section: OutlineSection, b
       const p = para.trim();
       if (p.length < 80) continue;
       let score = 0;
-      for (const tok of new Set(p.toLowerCase().split(/[^a-z0-9]+/))) {
+      for (const tok of new Set(unicodeTokens(p))) {
         if (targetTokens.has(tok)) score++;
       }
       if (score > 0) scored.push({ text: p, score, stage: bi + 1 });

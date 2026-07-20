@@ -7,6 +7,7 @@
 import { BRAND } from './brand';
 import { sendToOffscreen } from './offscreen-client';
 import { contentHasTag } from './frontmatter';
+import { makeDocShortId } from './chunker';
 
 // Embed chunk texts in SMALL calls, not one giant one. A big source doc (an
 // 800-page PDF → thousands of chunks) previously sent every chunk in a single
@@ -32,7 +33,7 @@ async function embedTextsBatched(texts: string[]): Promise<(number[] | null)[]> 
 }
 
 const DB_NAME = BRAND.dbNameMain;
-const DB_VERSION = 3;
+const DB_VERSION = 4;
 
 // ── Types ──
 
@@ -174,6 +175,14 @@ function openDB(): Promise<IDBDatabase> {
       // Settings store
       if (!db.objectStoreNames.contains('settings')) {
         db.createObjectStore('settings', { keyPath: 'key' });
+      }
+
+      // Document images store (V4): extracted PDF figures / inlined import
+      // images as Blobs. Markdown references them via `magpie-img://{imgId}`
+      // refs; the viewer resolves them through GET_DOC_IMAGE.
+      if (!db.objectStoreNames.contains('docImages')) {
+        const imgStore = db.createObjectStore('docImages', { keyPath: 'id' });
+        imgStore.createIndex('docId', 'docId', { unique: false });
       }
 
       // Migrate chatHistory to use chatId
@@ -543,7 +552,20 @@ export async function saveDocument(
   const db = await openDB();
   const id = generateId();
 
-  const finalChunks: Chunk[] = chunks.map(chunk => ({ ...chunk, id: generateId(), docId: id }));
+  // Citation anchors are chunked BEFORE the doc id exists (callers use a
+  // random tempId), but every resolver — linkifyReportCitations, re-index,
+  // anchor→doc mapping — derives the short id from the REAL doc id. Rewrite
+  // the anchor prefix here so capture-time anchors are deterministic:
+  // makeDocShortId(doc.id) at save == at re-index == at citation resolution.
+  // (Previously a "Re-index library" pass changed every anchor and orphaned
+  // all citations stored in saved chats/reports.)
+  const anchorPrefix = makeDocShortId(id) + '.';
+  const finalChunks: Chunk[] = chunks.map(chunk => ({
+    ...chunk,
+    id: generateId(),
+    docId: id,
+    anchorId: chunk.anchorId.replace(/^[^.]+\./, anchorPrefix),
+  }));
 
   // Generate embeddings BEFORE opening the IDB transaction — in small batches so
   // a big document can't spike memory and crash the offscreen renderer.
@@ -573,7 +595,14 @@ export async function saveDocument(
  */
 export async function replaceChunksForDoc(docId: string, chunks: Omit<Chunk, 'id' | 'docId'>[]): Promise<Chunk[]> {
   const db = await openDB();
-  const finalChunks: Chunk[] = chunks.map(c => ({ ...c, id: generateId(), docId }));
+  // Same anchor-prefix determinism as saveDocument (see there).
+  const anchorPrefix = makeDocShortId(docId) + '.';
+  const finalChunks: Chunk[] = chunks.map(c => ({
+    ...c,
+    id: generateId(),
+    docId,
+    anchorId: c.anchorId.replace(/^[^.]+\./, anchorPrefix),
+  }));
   const transaction = tx(db, 'chunks', 'readwrite');
   const store = transaction.objectStore('chunks');
   const index = store.index('docId');
@@ -629,9 +658,10 @@ export async function getDocument(id: string): Promise<StoredDocument | undefine
 
 export async function deleteDocument(id: string): Promise<void> {
   const db = await openDB();
-  const transaction = tx(db, ['documents', 'chunks'], 'readwrite');
+  const transaction = tx(db, ['documents', 'chunks', 'docImages'], 'readwrite');
   const docStore = transaction.objectStore('documents');
   const chunkStore = transaction.objectStore('chunks');
+  const imgStore = transaction.objectStore('docImages');
 
   // Delete document
   docStore.delete(id);
@@ -643,8 +673,49 @@ export async function deleteDocument(id: string): Promise<void> {
     chunkStore.delete(key);
   }
 
+  // Delete all extracted images for this document
+  const imgKeys = await reqToPromise<IDBValidKey[]>(imgStore.index('docId').getAllKeys(id));
+  for (const key of imgKeys) {
+    imgStore.delete(key);
+  }
+
   await txComplete(transaction);
   notifySync();
+}
+
+// ── Document Images (extracted PDF figures / inlined import images) ──
+
+export interface DocImage {
+  /** `${docId}/${imgId}` — imgId is doc-relative ("p3.1", "md.2"). */
+  id: string;
+  docId: string;
+  imgId: string;
+  blob: Blob;
+  width?: number;
+  height?: number;
+}
+
+export async function saveDocImages(docId: string, images: Array<{ imgId: string; blob: Blob; width?: number; height?: number }>): Promise<void> {
+  if (images.length === 0) return;
+  const db = await openDB();
+  const transaction = tx(db, 'docImages', 'readwrite');
+  const store = transaction.objectStore('docImages');
+  for (const img of images) {
+    store.put({ id: `${docId}/${img.imgId}`, docId, imgId: img.imgId, blob: img.blob, width: img.width, height: img.height } satisfies DocImage);
+  }
+  await txComplete(transaction);
+}
+
+export async function getDocImage(docId: string, imgId: string): Promise<DocImage | undefined> {
+  const db = await openDB();
+  const transaction = tx(db, 'docImages');
+  return reqToPromise<DocImage | undefined>(transaction.objectStore('docImages').get(`${docId}/${imgId}`));
+}
+
+export async function listDocImages(docId: string): Promise<DocImage[]> {
+  const db = await openDB();
+  const transaction = tx(db, 'docImages');
+  return reqToPromise<DocImage[]>(transaction.objectStore('docImages').index('docId').getAll(IDBKeyRange.only(docId)));
 }
 
 export async function updateDocumentSync(
