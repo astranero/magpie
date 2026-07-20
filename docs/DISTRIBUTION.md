@@ -17,12 +17,15 @@ Three claims, each demoable and each structurally impossible for cloud rivals:
 1. **Local-first** — your corpus is markdown + IndexedDB on your disk.
 2. **Verified citations** — a reranker checks every claim against its source
    passage before the report ships. Show a citation being *rejected*.
-3. **Your model** — Ollama / built-in Gemini / any OpenAI-compatible key.
+3. **Your model** — any OpenAI-compatible key, a local endpoint (e.g. Ollama)
+   by base URL, or GitHub Copilot SSO.
 
 ## Phase 0 — Launch readiness (gate before any announcement)
 
-- [x] Zero-config onboarding: Ollama + built-in Gemini auto-detected; BYOK
-      preferred when set (shipped 2026-07).
+- [x] Onboarding: BYOK (OpenAI-compatible endpoint) or GitHub Copilot SSO.
+      NOTE: the earlier Ollama / built-in-Gemini auto-detection was removed
+      (see the "remove local models" change) — the r/LocalLLaMA "autodetect"
+      hook below now needs re-messaging or the feature restored.
 - [ ] README rewrite around the three claims + 60-second GIF (capture → ask →
       click citation → highlighted passage).
 - [ ] Demo video (≤2 min): run `/deepresearch`, watch the outline evolve, open

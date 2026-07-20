@@ -32,7 +32,7 @@ While a job runs, the service worker updates a `lastHeartbeatAt` timestamp on th
 
 ### 4. Resume Gates to Prevent Duplicate Work
 
-Before resuming a job at startup, require ALL of: job marked `active`, job age under 12 h, and fewer than 12 prior resume attempts (then fail loudly into the chat instead of looping). Note: the fresh-heartbeat gating was deliberately removed — an `active` job always triggers resume regardless of heartbeat freshness.
+Before resuming a job at startup, require ALL of: job marked `active`, job age under 12 h, and fewer than 12 prior resume attempts (then fail loudly into the chat instead of looping). Note: the fresh-heartbeat gating was deliberately removed **from the resume decision** — an `active` job always triggers resume regardless of heartbeat freshness (Chrome kills long runs while the heartbeat is still fresh, so gating on it threw live runs away). The staleness threshold itself still lives, but its job moved to the run **queue**: `isResearchActive` reclaims an `active` job whose heartbeat has gone stale so the queue can't wedge behind a dead worker, and `GET_RESEARCH_STATUS` uses it to report whether a run is genuinely live.
 
 ### 5. Worker Startup as the Waker
 
@@ -49,8 +49,8 @@ A critical bug occurs if the heartbeat check is absent or mismanaged: the servic
 We fixed this by adding:
 
 - An explicit `lastHeartbeatAt` timestamp updated every 20 seconds while the run executes
-- A staleness threshold `HEARTBEAT_STALE_MS = 3 * 60 * 1000` (3 minutes)
-- An explicit `active: false` state written upon job completion (before the checkpoint is cleared, so losing the clear-write race can't cause a spurious resume)
+- A staleness threshold `HEARTBEAT_STALE_MS = 3 * 60 * 1000` (3 minutes) — now used to reclaim a dead `active` job for the run queue and to report live status, **not** to gate resume (see §4)
+- An explicit `active: false` state written upon job completion (before the checkpoint is cleared, so losing the clear-write race can't cause a spurious resume) — this ordering, plus the resume-attempt cap, is what now prevents the resume loop
 - A resume-attempt counter capped at 12, after which the job fails loudly into the chat
 - Service worker checks these signals before launching or resuming jobs
 

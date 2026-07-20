@@ -8,7 +8,9 @@ server themselves and registers its HTTP endpoint.
 ## Configuration (Config → MCP Servers)
 
 `McpServerConfig { id, name, url, enabled, authToken? }`, persisted under
-`mcpServers` in `chrome.storage.local`. Optional token is sent as
+`mcpServers` in `chrome.storage.local`. The `url` is validated by
+`isAllowedMcpUrl` — `https://` to any host, `http://` only to loopback
+(`localhost`/`127.0.0.1`/`[::1]`). Optional token is sent as
 `Authorization: Bearer …` on every request including the initialize
 handshake. **Enabling a server is the permission grant** — research may then
 call its tools. A "Test" button connects and lists the server's tools.

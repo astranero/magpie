@@ -58,8 +58,14 @@ receives the user's own words with full history.
 
 ## Retrieval gates that protect citation quality
 
-Rerank (ms-marco cross-encoder logits): absolute gate at −4 (junk floor −8,
-at most 2 borderline results when nothing clears the gate — an
-irrelevant-padding-free contract) plus a relative **score cliff** (drop >7
-logits below a confident top hit). Fewer-but-relevant chunks are the main
-defense against "cited but irrelevant".
+Rerank (cross-encoder logits — `bge-reranker-v2-m3` primary, `ms-marco-MiniLM`
+fallback): absolute gate at −4 (junk floor −8, at most 2 borderline results
+when nothing clears the gate — an irrelevant-padding-free contract) plus a
+relative **score cliff** (drop >7 logits below a confident top hit). Fewer-but-
+relevant chunks are the main defense against "cited but irrelevant".
+
+> ⚠️ The −4 / −8 thresholds (`RERANK_MIN_SCORE` / `RERANK_JUNK_SCORE` in
+> `lib/vector-store.ts`) are calibrated to **ms-marco-MiniLM** logit space, as
+> the code comments still state. They have not been re-tuned for
+> `bge-reranker-v2-m3`, whose logits sit on a different scale — revalidate the
+> gate against the primary model.
