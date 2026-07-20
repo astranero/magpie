@@ -29,7 +29,11 @@ interface Section {
 }
 
 const MIN_CHUNK_CHARS = 50;
-const MAX_CHUNK_CHARS = 2000;
+// Aligned to the embedding model's context window: multilingual-e5-small
+// truncates at 512 tokens ≈ 1500 chars for English, less for CJK. Keeping
+// chunks under MAX ensures the embedder sees the FULL text — the old 2000-char
+// cap meant the tail 500 chars were silently dropped from the embedding.
+const MAX_CHUNK_CHARS = 1400;
 // A paragraph up to 15% over MAX stays whole — splitting it would strand a
 // small fragment whose meaning "slips" away from its context.
 const MAX_CHUNK_SLACK = 1.15;
@@ -289,6 +293,21 @@ function splitAtSentences(text: string, maxChars: number): string[] {
   if (result.length > 1 && result[result.length - 1].length < MIN_CHUNK_CHARS * 2) {
     const tail = result.pop()!;
     result[result.length - 1] += ' ' + tail;
+  }
+
+  // 10–15% sentence-level overlap: prepend the last sentence of chunk N into
+  // chunk N+1 so boundary context is never lost. Only when there are ≥2 chunks
+  // and the overlap fits (skip if the sentence is itself most of the chunk).
+  if (result.length >= 2) {
+    for (let i = 1; i < result.length; i++) {
+      const prevSentences = result[i - 1].match(/[^.!?\n。！？]+[.!?\n。！？]+[\s]*/g);
+      if (prevSentences && prevSentences.length >= 2) {
+        const lastSent = prevSentences[prevSentences.length - 1].trim();
+        if (lastSent.length > 20 && lastSent.length < maxChars * 0.2) {
+          result[i] = lastSent + ' ' + result[i];
+        }
+      }
+    }
   }
 
   return result.length > 0 ? result : [text];

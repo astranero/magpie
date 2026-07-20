@@ -179,35 +179,11 @@ chrome.runtime.onConnect.addListener((port) => {
 chrome.tabs?.onRemoved?.addListener((tabId) => { sidePanelOpen.delete(tabId); });
 
 // ─────────────────────────────────────────────
-// Declarative Net Request — Strip Origin for Ollama
+// Declarative Net Request — Strip bot-detection headers for extension fetches
 // ─────────────────────────────────────────────
 chrome.runtime.onInstalled.addListener(async () => {
   if (chrome.declarativeNetRequest) {
     const rules = [
-      {
-        id: 1,
-        priority: 1,
-        action: {
-          type: 'modifyHeaders',
-          requestHeaders: [{ header: 'Origin', operation: 'remove' }]
-        },
-        condition: {
-          urlFilter: '|http://localhost:11434/*',
-          resourceTypes: ['xmlhttprequest']
-        }
-      },
-      {
-        id: 2,
-        priority: 1,
-        action: {
-          type: 'modifyHeaders',
-          requestHeaders: [{ header: 'Origin', operation: 'remove' }]
-        },
-        condition: {
-          urlFilter: '|http://127.0.0.1:11434/*',
-          resourceTypes: ['xmlhttprequest']
-        }
-      },
       {
         id: 3,
         priority: 1,
@@ -444,9 +420,28 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   return false;
 });
 
+import { startCopilotDeviceFlow, pollForAccessToken, saveCopilotAuth, isCopilotConfigured, signOutCopilot } from '../lib/copilot-auth';
+
 type MessageHandler = (request: Record<string, unknown>, sender: chrome.runtime.MessageSender) => Promise<Record<string, unknown>>;
 
 const messageHandlers: Record<string, MessageHandler> = {
+  // ── GitHub Copilot SSO ──
+  COPILOT_START_DEVICE_FLOW: async () => {
+    const codes = await startCopilotDeviceFlow();
+    return codes as any;
+  },
+  COPILOT_POLL_TOKEN: async (request) => {
+    const token = await pollForAccessToken(
+      request.deviceCode as string,
+      request.interval as number,
+      request.expiresIn as number
+    );
+    await saveCopilotAuth(token);
+    return { success: true };
+  },
+  COPILOT_STATUS: async () => ({ configured: await isCopilotConfigured() }),
+  COPILOT_SIGN_OUT: async () => { await signOutCopilot(); return {}; },
+
   ENSURE_OFFSCREEN: async () => {
     await ensureOffscreen();
     return {};
@@ -2618,12 +2613,13 @@ chrome.runtime.onConnect.addListener((port) => {
       }
 
       if (full.trim()) {
+        const { model: usedModel } = await getProviderSettings();
         await saveChatMessage({
           chatId,
           role: 'assistant',
           text: full,
           timestamp: new Date().toISOString(),
-          provider: 'custom'
+          provider: usedModel || 'custom'
         });
       }
       safePost({ type: 'DONE', fullText: full });
@@ -3527,8 +3523,12 @@ async function uploadMarkdown(
   return data.id;
 }
 
-async function handleSyncToDrive(): Promise<Record<string, unknown>> {
-  const token = await getToken(false);
+async function handleSyncToDrive(request?: Record<string, unknown>): Promise<Record<string, unknown>> {
+  // interactive=true when user clicks "Force Sync" in settings — triggers
+  // the Google sign-in popup if the token expired. Background auto-syncs use
+  // interactive=false (silent, no popup).
+  const interactive = !!(request?.interactive);
+  const token = await getToken(interactive);
   const folderId = await ensureFolder(token);
   const unsynced = await getUnsyncedDocuments();
 

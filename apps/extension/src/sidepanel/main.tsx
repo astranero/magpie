@@ -3,6 +3,7 @@ import ReactDOM from 'react-dom/client';
 import App from './App.tsx';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { installCrashHandlers, crumb } from '../lib/crash-log';
+import '../i18n'; // Initialize i18n before rendering
 
 // The sidepanel shares a renderer process with the offscreen doc and can crash on
 // its own (OOM while rendering a huge report, or an uncaught error). It had NO

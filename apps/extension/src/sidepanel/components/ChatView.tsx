@@ -1075,11 +1075,17 @@ export const ChatView: React.FC<ChatViewProps> = ({
                 <>
                   <Sparkles size={10} className="text-primary shrink-0" />
                   <span>Magpie Assistant</span>
-                  {customModel && (
+                  {/* Show the model that GENERATED this message (stored in provider field),
+                      not the currently-selected model which changes all labels retroactively */}
+                  {(m.provider && m.provider !== 'custom') ? (
+                    <span className="font-mono text-[9px] px-1.5 py-0.5 rounded bg-muted border border-border text-muted-foreground">
+                      {m.provider}
+                    </span>
+                  ) : customModel && m.streaming ? (
                     <span className="font-mono text-[9px] px-1.5 py-0.5 rounded bg-muted border border-border text-muted-foreground">
                       {customModel}
                     </span>
-                  )}
+                  ) : null}
                 </>
               )}
             </div>

@@ -1,4 +1,3 @@
-import { detectProviders, pickOllamaModel, OLLAMA_OPENAI_URL, BUILTIN_GEMINI_SENTINEL, type DetectedProviders } from '../../lib/provider-detect';
 import React, { useEffect, useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -8,6 +7,91 @@ import { CustomSkill, sanitizeCustomSkill } from '../../lib/commands';
 import { McpServerConfig, McpConnection, getMcpServers, saveMcpServers, isAllowedMcpUrl } from '../../lib/mcp-client';
 import { SearchApiKeys, getSearchApiKeys, saveSearchApiKeys } from '../../lib/search-providers';
 import { getCrashLog, clearCrashLog, formatCrashLog } from '../../lib/crash-log';
+
+// ── GitHub Copilot SSO section ────────────────────────────────────────────
+function CopilotSSOSection() {
+  const [status, setStatus] = useState<'idle' | 'polling' | 'done' | 'error'>('idle');
+  const [configured, setConfigured] = useState(false);
+  const [userCode, setUserCode] = useState('');
+  const [verifyUrl, setVerifyUrl] = useState('');
+  const [error, setError] = useState('');
+  const msg = (action: string, data?: any) =>
+    new Promise<any>((res) => chrome.runtime.sendMessage({ action, ...data }, res));
+
+  useEffect(() => {
+    msg('COPILOT_STATUS').then(r => { if (r?.configured) setConfigured(true); });
+  }, []);
+
+  const startSignIn = async () => {
+    setStatus('polling'); setError('');
+    try {
+      const codes = await msg('COPILOT_START_DEVICE_FLOW');
+      if (!codes?.user_code) throw new Error('No device code returned');
+      setUserCode(codes.user_code);
+      setVerifyUrl(codes.verification_uri);
+      // Open the verification URL in a new tab for the user
+      chrome.tabs.create({ url: `${codes.verification_uri}?user_code=${codes.user_code}` });
+      // Poll in the background
+      const result = await msg('COPILOT_POLL_TOKEN', {
+        deviceCode: codes.device_code,
+        interval: codes.interval,
+        expiresIn: codes.expires_in,
+      });
+      if (result?.success) { setStatus('done'); setConfigured(true); }
+      else throw new Error(result?.error || 'Sign-in failed');
+    } catch (e: any) {
+      setError(e.message || 'Sign-in failed');
+      setStatus('error');
+    }
+  };
+
+  const signOut = async () => {
+    await msg('COPILOT_SIGN_OUT');
+    setConfigured(false); setStatus('idle');
+  };
+
+  if (configured) {
+    return (
+      <div className="space-y-2">
+        <div className="flex items-center gap-2">
+          <span className="w-2 h-2 rounded-full bg-green-500" />
+          <span className="text-xs font-medium text-foreground">Connected to GitHub Copilot</span>
+        </div>
+        <p className="text-[10px] text-muted-foreground">
+          Chat uses your organization's Copilot API. Model selection is handled by Copilot.
+        </p>
+        <Button variant="secondary" size="sm" className="rounded-lg text-xs" onClick={signOut}>Sign out</Button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-3">
+      <p className="text-[10px] text-muted-foreground leading-normal">
+        Sign in with GitHub to use your enterprise Copilot as the AI backend — no API key needed.
+      </p>
+      {status === 'idle' || status === 'error' ? (
+        <>
+          <Button variant="default" size="sm" className="rounded-lg text-xs w-full" onClick={startSignIn}>
+            Sign in with GitHub
+          </Button>
+          {error && <p className="text-[10px] text-destructive">{error}</p>}
+        </>
+      ) : status === 'polling' ? (
+        <div className="space-y-2 rounded-lg border border-border bg-muted/30 p-3">
+          <p className="text-xs font-medium">Enter this code on GitHub:</p>
+          <code className="block text-center text-lg font-bold font-mono tracking-widest text-primary select-all">{userCode}</code>
+          <p className="text-[10px] text-muted-foreground">
+            A tab has opened at {verifyUrl}. Paste the code and authorize.
+          </p>
+          <p className="text-[10px] text-muted-foreground animate-pulse">Waiting for authorization…</p>
+        </div>
+      ) : (
+        <p className="text-xs text-green-600 font-medium">Connected successfully. Reload the panel to start chatting.</p>
+      )}
+    </div>
+  );
+}
 
 interface SettingsViewProps {
   customUrl: string;
@@ -106,8 +190,6 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   // Chat web-search fallback — default ON; only an explicit false disables it.
   const [webFallback, setWebFallback] = useState(true);
   const [jinaEnabled, setJinaEnabled] = useState(true);
-  const [detected, setDetected] = useState<DetectedProviders | null>(null);
-  useEffect(() => { detectProviders().then(setDetected).catch(() => {}); }, []);
   // How chat gathers extra detail from the open page (repo files / links).
   const [pageCtxStrategy, setPageCtxStrategy] = useState<'semantic' | 'router' | 'agentic'>('semantic');
   const [inferenceDevice, setInferenceDevice] = useState<'wasm' | 'webgpu'>('wasm');
@@ -272,40 +354,16 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           </p>
       </Section>
 
+      {/* ── GitHub Copilot SSO ── */}
+      <Section id="copilot" title="GitHub Copilot" subtitle="Sign in with your enterprise GitHub account." defaultOpen={true}>
+        <CopilotSSOSection />
+      </Section>
+
       {/* ── Custom Provider ── */}
-      <Section id="provider" title="AI Provider Configuration" subtitle="Configure your AI backend.">
-          {(((detected && (detected.ollama.available || detected.builtinGemini.available)) || availableClis.length > 0)) && (
+      <Section id="provider" title="AI Provider Configuration" subtitle="Configure your AI backend (or use Copilot above).">
+          {availableClis.length > 0 && (
             <div className="rounded-lg border border-primary/20 bg-primary/5 px-3 py-2.5 space-y-2">
               <div className="text-[10px] font-semibold text-primary uppercase tracking-wider">Detected Local Options</div>
-              {detected && detected.ollama.available && (
-                <button
-                  type="button"
-                  className="w-full text-left rounded-md border border-border bg-card px-2.5 py-1.5 text-xs hover:border-primary transition-colors flex flex-col"
-                  onClick={() => {
-                    const model = pickOllamaModel(detected.ollama.models);
-                    setCustomUrl(OLLAMA_OPENAI_URL); setCustomModel(model); setCustomKey('');
-                    setRouteChatThroughCli('disabled');
-                    setTimeout(saveSettings, 0);
-                  }}
-                >
-                  <span className="font-semibold">Use Ollama</span>
-                  <span className="text-[10px] text-muted-foreground">Local model {detected.ollama.models.length ? `(${pickOllamaModel(detected.ollama.models)})` : ''} — fully offline.</span>
-                </button>
-              )}
-              {detected && detected.builtinGemini.available && (
-                <button
-                  type="button"
-                  className="w-full text-left rounded-md border border-border bg-card px-2.5 py-1.5 text-xs hover:border-primary transition-colors flex flex-col"
-                  onClick={() => {
-                    setCustomUrl(BUILTIN_GEMINI_SENTINEL); setCustomModel('gemini-nano'); setCustomKey('');
-                    setRouteChatThroughCli('disabled');
-                    setTimeout(saveSettings, 0);
-                  }}
-                >
-                  <span className="font-semibold">Use Built-in Gemini</span>
-                  <span className="text-[10px] text-muted-foreground">On-device nano model — zero key setup.</span>
-                </button>
-              )}
               {availableClis.map(cli => {
                 const label = cli === 'claude' ? 'Claude' : cli === 'agy' ? 'Antigravity' : 'GitHub Copilot';
                 const template = cli === 'claude' ? 'claude "{prompt}"' : cli === 'agy' ? 'agy chat "{prompt}"' : 'copilot explain "{prompt}"';

@@ -386,7 +386,7 @@ export async function deleteProject(id: string): Promise<void> {
   );
   const docIdsToDelete = Array.from(new Set([...linkedDocIds, ...(legacyDocIds as string[])]));
 
-  const transaction = tx(db, ['projects', 'chats', 'documents', 'chunks', 'chatHistory'], 'readwrite');
+  const transaction = tx(db, ['projects', 'chats', 'documents', 'chunks', 'chatHistory', 'docImages'], 'readwrite');
 
   // 1. Delete project record
   transaction.objectStore('projects').delete(id);
@@ -404,15 +404,19 @@ export async function deleteProject(id: string): Promise<void> {
     for (const hKey of histKeys) chatHistoryStore.delete(hKey);
   }
 
-  // 3. Delete documents and their chunks (V3: use documentIds array)
+  // 3. Delete documents, their chunks, AND their extracted images
   const docStore = transaction.objectStore('documents');
   const chunkStore = transaction.objectStore('chunks');
   const chunkDocIdIndex = chunkStore.index('docId');
+  const imgStore = transaction.objectStore('docImages');
+  const imgDocIdIndex = imgStore.index('docId');
 
   for (const dId of docIdsToDelete) {
     docStore.delete(dId);
     const cKeys = await reqToPromise<IDBValidKey[]>(chunkDocIdIndex.getAllKeys(dId));
     for (const cKey of cKeys) chunkStore.delete(cKey);
+    const iKeys = await reqToPromise<IDBValidKey[]>(imgDocIdIndex.getAllKeys(dId));
+    for (const iKey of iKeys) imgStore.delete(iKey);
   }
 
   await txComplete(transaction);

@@ -93,7 +93,11 @@ describe('chunk offsets — charStart/charEnd index the cleaned content exactly'
       expect(chunks.length).toBeGreaterThan(0);
       const cleaned = cleanContent(splitFrontmatter(raw).body);
       for (const c of chunks) {
-        expect(cleaned.slice(c.charStart, c.charEnd)).toBe(c.text);
+        const span = cleaned.slice(c.charStart, c.charEnd);
+        // Sentence-split sub-chunks may have an overlap prefix (last sentence
+        // of the prior chunk prepended for context). The original span from the
+        // document is always a suffix of chunk.text.
+        expect(c.text.endsWith(span) || c.text === span).toBe(true);
       }
     });
   }

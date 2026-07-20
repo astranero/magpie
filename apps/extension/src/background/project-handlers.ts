@@ -31,8 +31,14 @@ export async function handleUpdateProject(request: Record<string, unknown>): Pro
   return {};
 }
 
+import { resetSessionIndex } from '../lib/vector-store';
+
 export async function handleDeleteProject(request: Record<string, unknown>): Promise<Record<string, unknown>> {
-  await deleteProject(request.id as string);
+  const id = request.id as string;
+  await deleteProject(id);
+  // Clear the in-memory Orama index — without this, queries keep hitting
+  // deleted chunks until the service worker restarts.
+  resetSessionIndex(id);
   return {};
 }
 

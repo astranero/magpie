@@ -1,6 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { get, set } from 'idb-keyval';
-import { autoConfigureProvider } from '../lib/provider-detect';
 
 // Collision-free message ids. `Date.now()` and `Date.now()+1` for a paired
 // user+assistant bubble collide whenever the clock ticks between the two reads,
@@ -479,16 +478,6 @@ export default function App() {
   useEffect(() => {
     loadProjects();
     loadSettings();
-    // Zero-config first run: nothing configured → adopt a detected local
-    // provider (Ollama, else Chrome built-in Gemini). Never touches an
-    // existing BYOK setup — a user-set endpoint/key always wins.
-    autoConfigureProvider().then(adopted => {
-      if (!adopted) return;
-      loadSettings(); // pull the just-written config into the form state
-      showToast('success', adopted === 'ollama'
-        ? 'Connected to your local Ollama — chat is ready. Set your own API key in Config anytime.'
-        : "Using Chrome's built-in Gemini (on-device) — set your own API key in Config for full-strength research.");
-    }).catch(() => {});
     trySilentAuth();
 
     const messageListener = (m: any) => {
@@ -1341,25 +1330,30 @@ export default function App() {
 
   const syncToDrive = async () => {
     setSyncing(true);
-    const res = await msg('SYNC_TO_DRIVE');
+    const res = await msg('SYNC_TO_DRIVE', { interactive: true });
     setSyncing(false);
     if (res.success) {
       showToast('success', `✓ Synced ${res.synced}/${res.total} documents to Drive`);
       loadDocuments(activeProjectId);
     } else {
-      showToast('error', (res.error as string) || 'Sync failed');
+      showToast('error', (res.error as string) || 'Sync failed — sign in to Google in Settings');
     }
   };
 
   const forceResync = async () => {
     setSyncing(true);
+    // Clear cached folder ID so ensureFolder re-checks/creates the folder
+    // (fixes the case where the cached ID points at a trashed/deleted folder)
+    if (typeof chrome !== 'undefined' && chrome.storage) {
+      await chrome.storage.local.remove('driveFolderId');
+    }
     const resetRes = await msg('RESET_SYNC_STATUS');
     if (!resetRes.success) {
       setSyncing(false);
       showToast('error', (resetRes.error as string) || 'Reset failed');
       return;
     }
-    const res = await msg('SYNC_TO_DRIVE');
+    const res = await msg('SYNC_TO_DRIVE', { interactive: true });
     setSyncing(false);
     if (res.success) {
       showToast('success', `✓ Resynced ${res.synced}/${res.total} documents to Drive`);
@@ -1383,13 +1377,6 @@ export default function App() {
 
   const saveSettings = () => {
     if (typeof chrome !== 'undefined' && chrome.storage) {
-      // Clearing an auto-adopted provider (Ollama / built-in Gemini) must STICK:
-      // otherwise the next panel open re-runs autoConfigureProvider (it sees an
-      // empty customUrl = "nothing configured") and resurrects the provider the
-      // user just removed. Mark the clear as a deliberate decline.
-      chrome.storage.local.get(['providerAutoConfigured'], (cur) => {
-        const wasAuto = cur.providerAutoConfigured === 'ollama' || cur.providerAutoConfigured === 'builtin-gemini';
-        const declined = !customUrl.trim() && wasAuto ? { providerAutoConfigured: 'declined' } : {};
         chrome.storage.local.set({
           driveFolderName: folderName,
           customUrl,
@@ -1403,11 +1390,9 @@ export default function App() {
           routeChatThroughCli,
           cliCommandTemplate,
           localMcpCompanionUrl,
-          ...declined
         }, () => {
           // Silently save settings without toast
         });
-      });
     }
   };
 
