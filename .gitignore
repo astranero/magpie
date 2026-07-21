@@ -1,31 +1,35 @@
 # Dependencies
 node_modules/
-**/node_modules/
+.pnp
+.pnp.js
 
-# Build output
-dist/
-**/dist/
-*.tsbuildinfo
-
-# Logs
-*.log
-npm-debug.log*
-
-# Editor / OS
-.DS_Store
-.vscode/
-.idea/
-.opencode/
-
-# Env / secrets
-.env
-.env.local
-*.local
-
-# Test artifacts
+# Testing
 coverage/
-playwright-report/
+.nyc_output/
 test-results/
 
-# Live-test API keys — never commit
-*.openrouter-key
+# Production
+build/
+dist/
+
+# Misc
+.DS_Store
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+.openrouter-key
+
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Vite
+.vite/
+
+# TypeScript
+*.tsbuildinfo
+
+# Opencode
+.opencode/
