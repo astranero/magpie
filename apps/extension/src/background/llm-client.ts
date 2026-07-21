@@ -58,8 +58,9 @@ export function formatProviderError(status: number, body: string): string {
   return `${label}: ${detail}${retry}`;
 }
 
-export async function chatWithCustom(systemPrompt: string, history: any[], userPrompt: string, signal?: AbortSignal): Promise<string> {
-  const { apiKey, endpoint, model } = await getProviderSettings();
+export async function chatWithCustom(systemPrompt: string, history: any[], userPrompt: string, signal?: AbortSignal, modelOverride?: string): Promise<string> {
+  const { apiKey, endpoint, model: defaultModel } = await getProviderSettings();
+  const model = modelOverride || defaultModel;
   if (!endpoint) throw new Error('Custom endpoint missing.');
 
   const headers: Record<string, string> = {
@@ -103,7 +104,8 @@ export async function chatWithCustomStream(
   history: any[],
   userPrompt: string,
   signal: AbortSignal,
-  onDeltaRaw: (delta: string) => void
+  onDeltaRaw: (delta: string) => void,
+  modelOverride?: string
 ): Promise<void> {
   // F1: coalesce SSE tokens to reduce IPC/render pressure.
   const FLUSH_MS = 40;
@@ -130,7 +132,8 @@ export async function chatWithCustomStream(
     if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; }
   }, { once: true });
 
-  const { apiKey, endpoint, model } = await getProviderSettings();
+  const { apiKey, endpoint, model: defaultModel } = await getProviderSettings();
+  const model = modelOverride || defaultModel;
   if (!endpoint) throw new Error('Custom endpoint missing.');
 
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
@@ -223,9 +226,10 @@ function safeParseArgs(raw: unknown): any {
  * without tool support simply return no tool_calls, so the caller stops.
  */
 export async function chatWithTools(
-  messages: any[], tools: ToolDef[], signal?: AbortSignal,
+  messages: any[], tools: ToolDef[], signal?: AbortSignal, modelOverride?: string
 ): Promise<{ toolCalls: ToolCall[]; content: string; assistantMessage: any }> {
-  const { apiKey, endpoint, model } = await getProviderSettings();
+  const { apiKey, endpoint, model: defaultModel } = await getProviderSettings();
+  const model = modelOverride || defaultModel;
   if (!endpoint) throw new Error('Custom endpoint missing.');
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
   if (apiKey) headers['Authorization'] = `Bearer ${apiKey}`;

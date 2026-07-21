@@ -14,6 +14,7 @@ import { generateBibtex } from '../lib/bibtex';
 import { harvestReferences, partitionRefs, HarvestedRef } from '../lib/reference-harvest';
 import { getMcpServers, McpConnection, isSearchLikeTool, argsForQuery } from '../lib/mcp-client';
 import { searchWithProviders, jinaWebSearch, getSearchApiKeys, SearchHit } from '../lib/search-providers';
+import { searchFreeAPIs } from '../lib/free-apis';
 import { rankPapers, webDomainAuthority } from '../lib/paper-rank';
 import { semaphore } from '../lib/semaphore';
 import { crumb } from '../lib/crash-log';
@@ -432,7 +433,20 @@ async function performWebSearch(query: string, signal?: AbortSignal): Promise<Se
       }
     }
   } catch (e) {
-    console.warn('Jina search failed, falling back to DDG scrape chain', e);
+    console.warn('Jina search failed, falling back to free APIs + DDG chain', e);
+  }
+
+  // Free, keyless APIs filtered to medium+ quality for research (Wikipedia,
+  // Wikidata, StackExchange, Reddit, HN, OpenLibrary, OSM). Low-tier sources
+  // (Trustpilot, YouTube) are excluded from research — reserved for chat.
+  try {
+    const hits = await searchFreeAPIs(query, signal, 'medium');
+    if (hits.length > 0) {
+      const sorted = hits.sort((a, b) => (HIGH_QUALITY_DOMAINS.test(a.url) ? 0 : 1) - (HIGH_QUALITY_DOMAINS.test(b.url) ? 0 : 1));
+      return sorted.slice(0, activeLimits.urlsPerQuery);
+    }
+  } catch (e) {
+    console.warn('Free API search failed, falling back to DDG scrape chain', e);
   }
 
   const ddgUrl = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`;
@@ -1027,7 +1041,7 @@ async function scrapeUrlList(
   const docIds: string[] = [];
   let i = 1;
   for (const url of urlList) {
-    if (signal?.aborted) throw new Error('AbortError');
+    if (signal?.aborted) throwIfAborted(signal);
     try {
       // Crash-safe resume: pages scraped before a worker/browser death are
       // served from the persistent job cache instead of the network.
@@ -1091,7 +1105,7 @@ async function runWebAgent(
 ): Promise<AgentOutcome> {
   const allUrls = new Set<string>();
   for (const q of queries) {
-    if (signal?.aborted) throw new Error('AbortError');
+    if (signal?.aborted) throwIfAborted(signal);
     onProgress(`[${label}] Searching: "${q}"`);
     const found = await performWebSearch(q, signal);
     found.forEach(h => allUrls.add(h.url));
@@ -1153,7 +1167,7 @@ async function s2Fetch(url: string, signal?: AbortSignal): Promise<any> {
   let res: Response | null = null;
   for (let attempt = 0; attempt < delays.length; attempt++) {
     if (delays[attempt] > 0) await new Promise(r => setTimeout(r, delays[attempt]));
-    if (signal?.aborted) throw new Error('AbortError');
+    if (signal?.aborted) throwIfAborted(signal);
     res = await fetch(url, { signal: apiSignal(signal), headers });
     if (res.status !== 429) break;
   }
@@ -1206,7 +1220,7 @@ async function resolvePaperViaDoi(doi: string, signal?: AbortSignal): Promise<Ac
 // fetch, even a real browser) only ever returns a bot-check "security verification"
 // page — verified live for dl.acm.org. But these carry a DOI, and the DOI resolves
 // to an OPEN-ACCESS full-text PDF elsewhere (arXiv / PMC / repo). Recover via that.
-const CLOUDFLARE_GATED = /\/\/([^/]*\.)?(dl\.acm\.org|ieeexplore\.ieee\.org|link\.springer\.com|onlinelibrary\.wiley\.com|(www\.)?sciencedirect\.com)\//i;
+const CLOUDFLARE_GATED = /\/\/([^/]*\.)?(dl\.acm\.org|ieeexplore\.ieee\.org|link\.springer\.com|onlinelibrary\.wiley\.com|journals\.sagepub\.com|(www\.)?sciencedirect\.com)\//i;
 
 /**
  * DOI → open-access full-text PDF URL on a READABLE host (arXiv/PMC/repository),
@@ -1356,7 +1370,7 @@ async function fetchArxivFullText(
 ): Promise<string | null> {
   const pdfUrl = `https://arxiv.org/pdf/${arxivId}`;
   try {
-    if (signal?.aborted) throw new Error('AbortError');
+    if (signal?.aborted) throwIfAborted(signal);
     const body = await pdfUrlToBody(pdfUrl, undefined, true);
     const textOnly = body.replace(/## Page \d+\n\n\*\(no extractable text\)\*/g, '').trim();
     if (textOnly.length < 100) return null;
@@ -1419,7 +1433,7 @@ async function runAcademicAgent(
     let alreadyLinked = 0;
 
     for (const page of cachedPages.slice(0, cacheRestoreCap)) {
-      if (signal?.aborted) throw new Error('AbortError');
+      if (signal?.aborted) throwIfAborted(signal);
 
       const existingDocId = urlToDocId.get(page.url);
       let cachedDocId: string;
@@ -1453,7 +1467,7 @@ async function runAcademicAgent(
   const searchQueries = (opts?.queries?.length ? opts.queries : [topic]).slice(0, 3);
   for (const q of searchQueries) {
     const qLabel = searchQueries.length > 1 ? `: "${q.slice(0, 70)}"` : '…';
-    if (signal?.aborted) throw new Error('AbortError');
+    if (signal?.aborted) throwIfAborted(signal);
     onProgress(`[ACADEMIC] Searching Semantic Scholar${qLabel}`);
     try {
       papers.push(...await searchSemanticScholar(q, signal));
@@ -1461,7 +1475,7 @@ async function runAcademicAgent(
       onProgress(`[ACADEMIC] Semantic Scholar unavailable (${e.message}) — continuing`);
     }
 
-    if (signal?.aborted) throw new Error('AbortError');
+    if (signal?.aborted) throwIfAborted(signal);
     onProgress(`[ACADEMIC] Searching HuggingFace papers${qLabel}`);
     try {
       papers.push(...await searchHuggingFacePapers(q, signal));
@@ -1470,7 +1484,7 @@ async function runAcademicAgent(
     }
 
     if (activeLimits.crossrefRows > 0) {
-      if (signal?.aborted) throw new Error('AbortError');
+      if (signal?.aborted) throwIfAborted(signal);
       onProgress(`[ACADEMIC] Searching CrossRef${qLabel}`);
       try {
         papers.push(...await searchCrossRef(q, activeLimits.crossrefRows, signal));
@@ -1540,7 +1554,7 @@ async function runAcademicAgent(
   // Parallel batches (old BATCH=4) caused ONNX WASM integer-overflow crashes
   // on long papers because 4 × 25 chunks hit peak memory simultaneously.
   for (const p of deduped) {
-    if (signal?.aborted) throw new Error('AbortError');
+    if (signal?.aborted) throwIfAborted(signal);
     await yieldToEventLoop();
     const key = p.title.toLowerCase().trim();
     const headerLine = `# ${p.title}\n\n**Authors:** ${p.authors || 'Unknown'}${p.year ? ` (${p.year})` : ''}${typeof p.citations === 'number' ? `\n**Citations:** ${p.citations}` : ''}${p.venue ? `\n**Venue:** ${p.venue}` : ''}`;
@@ -1590,7 +1604,7 @@ async function runMcpAgent(
   if (servers.length === 0) return { label: 'MCP', sources, docIds };
 
   for (const server of servers) {
-    if (signal?.aborted) throw new Error('AbortError');
+    if (signal?.aborted) throwIfAborted(signal);
     try {
       const conn = new McpConnection(server);
       const tools = (await conn.listTools()).filter(isSearchLikeTool).slice(0, 2);
@@ -1599,7 +1613,7 @@ async function runMcpAgent(
         continue;
       }
       for (const tool of tools) {
-        if (signal?.aborted) throw new Error('AbortError');
+        if (signal?.aborted) throwIfAborted(signal);
         const args = argsForQuery(tool, topic);
         if (!args) { onProgress(`[MCP] ${server.name}/${tool.name}: no fillable query param — skipping`); continue; }
         onProgress(`[MCP] ${server.name}: calling ${tool.name}…`);
@@ -1796,9 +1810,9 @@ export async function runDeepResearch(
   const runsDeep = mode === 'deep' || sourceMode === 'academic';
   if (runsDeep && depth === 'standard') {
     activeLimits = RESEARCH_LIMITS.deep;
-    onProgress('[PLANNING] Deep run — using deep source limits (10 URLs/query, 7 queries, 6 rounds)');
+    onProgress(`[PLANNING] Deep run — deep limits (${RESEARCH_LIMITS.deep.urlsPerQuery} URLs/query, ${RESEARCH_LIMITS.deep.webQueries} queries, up to ${RESEARCH_LIMITS.deep.rounds} adaptive stages — stops early when coverage is complete)`);
   } else if (depth !== 'standard') {
-    onProgress(`[PLANNING] Research depth: ${depth}`);
+    onProgress(`[PLANNING] Research depth: ${depth} (up to ${activeLimits.rounds} adaptive stages)`);
   }
   if (sourceMode === 'academic') {
     onProgress('[PLANNING] Academic mode: papers only (Semantic Scholar · CrossRef · arXiv · HuggingFace) — no web or news agents');
@@ -1884,7 +1898,12 @@ ${REPORT_VOICE}
 ${EPISTEMIC_RULES}
 ${RESEARCH_CITATION_RULES}`;
 
-  const rawSynthesis = await (synthesisFn ?? llmChatFn)(sysPrompt, `SOURCE EXCERPTS:\n\n${contextText}${DATA_TRAILER}`);
+  const rawSynthesis = await withKeepAlive(
+    '[SYNTHESIZING] Drafting comprehensive report',
+    (synthesisFn ?? llmChatFn)(sysPrompt, `SOURCE EXCERPTS:\n\n${contextText}${DATA_TRAILER}`),
+    onProgress,
+    30_000
+  );
 
   // Evaluator gate: audit, revise once if flagged, append collapsed audit
   const synthesis = await evaluateAndRefine(
@@ -1943,33 +1962,49 @@ async function followReferences(
   if (chosen.length === 0) return { label: outcomeLabel, sources, docIds };
 
   onProgress(`[REFS] Following ${chosen.length} reference(s) from sources (${citations.length} arXiv/DOI, ${scoredWeb.length} web)`);
-  for (const ref of chosen) {
-    if (signal?.aborted) throw new Error('AbortError');
-    try {
-      const arxivId = extractArxivId(ref.url);
-      if (arxivId) {
-        const fullText = await fetchArxivFullText(arxivId, signal);
-        if (fullText) {
-          const url = `https://arxiv.org/abs/${arxivId}`;
-          const refDocId = await indexResearchDoc(projectId, `arXiv:${arxivId}`, url, fullText, 'ACADEMIC');
-          docIds.push(refDocId);
-          sources.push({ url, title: `arXiv:${arxivId}`, label: 'ACADEMIC', docId: refDocId, tier: 'high' });
-          onProgress(`[REFS] ✓ ${url}`);
-          continue;
+
+  // Parallel fetch refs with bounded concurrency — the sequential loop was
+  // too slow for large reference sets (each URL scrape takes ~10-20s).
+  const CONCURRENCY = 4;
+  const results: Array<{ docId?: string; source?: SourceRecord; ref: HarvestedRef; ok: boolean }> = [];
+  let idx = 0;
+  const worker = async (): Promise<void> => {
+    while (idx < chosen.length) {
+      const ref = chosen[idx++];
+      if (signal?.aborted) throwIfAborted(signal);
+      try {
+        const arxivId = extractArxivId(ref.url);
+        if (arxivId) {
+          const fullText = await fetchArxivFullText(arxivId, signal);
+          if (fullText) {
+            const url = `https://arxiv.org/abs/${arxivId}`;
+            const refDocId = await indexResearchDoc(projectId, `arXiv:${arxivId}`, url, fullText, 'ACADEMIC');
+            results.push({ docId: refDocId, source: { url, title: `arXiv:${arxivId}`, label: 'ACADEMIC', docId: refDocId, tier: 'high' }, ref, ok: true });
+            continue;
+          }
         }
+        const scraped = await scrapeUrl(ref.url, signal);
+        if (scraped?.markdown) {
+          const refDocId = await indexResearchDoc(projectId, scraped.title || ref.url, ref.url, scraped.markdown, outcomeLabel);
+          results.push({ docId: refDocId, source: { url: ref.url, title: scraped.title || ref.url, label: outcomeLabel, docId: refDocId, tier: sourceTier(ref.url) }, ref, ok: true });
+        } else {
+          results.push({ ref, ok: false });
+        }
+      } catch {
+        results.push({ ref, ok: false });
       }
-      // DOI or web: scrape it (scrapeUrl handles the DOI→S2 fallback). In
-      // academic-only mode everything that reaches here is a DOI — a paper —
-      // so it's labeled ACADEMIC, not WEB.
-      const scraped = await scrapeUrl(ref.url, signal);
-      if (scraped?.markdown) {
-        const refDocId = await indexResearchDoc(projectId, scraped.title || ref.url, ref.url, scraped.markdown, outcomeLabel);
-        docIds.push(refDocId);
-        sources.push({ url: ref.url, title: scraped.title || ref.url, label: outcomeLabel, docId: refDocId, tier: sourceTier(ref.url) });
-        onProgress(`[REFS] ✓ ${ref.url}`);
-      }
-    } catch {
-      onProgress(`[REFS] ✗ ${ref.url}`);
+    }
+  };
+  const workers = Array.from({ length: Math.min(CONCURRENCY, chosen.length) }, () => worker());
+  await Promise.allSettled(workers);
+
+  for (const r of results) {
+    if (r.ok && r.docId) {
+      docIds.push(r.docId);
+      if (r.source) sources.push(r.source);
+      onProgress(`[REFS] ✓ ${r.ref.url}`);
+    } else {
+      onProgress(`[REFS] ✗ ${r.ref.url}`);
     }
   }
   return { label: outcomeLabel, sources, docIds };
@@ -2041,6 +2076,7 @@ async function evaluateReport(
   topic: string,
   report: string,
   llmChatFn: (sys: string, user: string) => Promise<string>,
+  onProgress: ((status: string) => void) | undefined,
   corpusHint?: string
 ): Promise<EvaluationResult | null> {
   const sys =
@@ -2095,7 +2131,12 @@ Return ONLY the JSON. No explanation outside it.`;
       if (cut > 8_000) reportSlice = reportSlice.slice(0, cut);
       reportSlice += '\n\n[… review excerpt ends here — the report continues; do NOT flag truncation or an abrupt ending.]';
     }
-    const res = await llmChatFn(sys, `REPORT TO EVALUATE:\n\n${reportSlice}`);
+    const res = await withKeepAlive(
+      '[EVALUATING] Quality audit',
+      llmChatFn(sys, `REPORT TO EVALUATE:\n\n${reportSlice}`),
+      onProgress,
+      30_000
+    );
     const start = res.indexOf('{');
     const end = res.lastIndexOf('}');
     if (start === -1 || end === -1) return null;
@@ -2178,7 +2219,8 @@ async function reviseSynthesis(
   synthesis: string,
   evaluation: EvaluationResult,
   sourceContext: string,
-  llmChatFn: LlmChatFn
+  llmChatFn: LlmChatFn,
+  onProgress: (status: string) => void
 ): Promise<string> {
   const sys =
     `You are revising a research report on: "${topic}" after a quality audit flagged problems.
@@ -2194,7 +2236,12 @@ Rewrite the report to FULLY address these findings using the source excerpts pro
 ${PRESCRIPTIVE_GUIDANCE}
 ${RESEARCH_CITATION_RULES}`;
   const user = `ORIGINAL REPORT:\n\n${synthesis.slice(0, 24_000)}\n\nSOURCE EXCERPTS:\n\n${sourceContext.slice(0, 60_000)}${DATA_TRAILER}`;
-  const revised = await llmChatFn(sys, user);
+  const revised = await withKeepAlive(
+    '[EVALUATING] Revising report',
+    llmChatFn(sys, user),
+    onProgress,
+    30_000
+  );
   return revised.trim().length > 200 ? revised : synthesis;
 }
 
@@ -2304,27 +2351,30 @@ async function evaluateAndRefine(
   let current = stripModelBibliography(synthesis);
   crumb('eval', 'evaluate start', {});
   onProgress(`[EVALUATING] Running quality evaluation on report…`);
-  let ev = await evaluateReport(topic, current, evaluatorFn, corpusHint).catch(() => null);
+  let ev = await evaluateReport(topic, current, evaluatorFn, onProgress, corpusHint).catch(() => null);
   if (!ev) return current;
   onProgress(`[EVALUATING] Verdict: ${label(ev)} (${ev.score}/10) — ${ev.recommendation}`);
 
-  let revisedAny = false;
   for (let pass = 1; pass <= MAX_REVISIONS; pass++) {
     if (ev.verdict === 'PASS' || ev.score >= PASS_SCORE) break;
     onProgress(`[EVALUATING] Revising report to reach ${PASS_SCORE}/10 (pass ${pass}/${MAX_REVISIONS})…`);
     const revised = stripModelBibliography(
-      await reviseSynthesis(topic, current, ev, sourceContext, llmChatFn).catch(() => current)
+      await reviseSynthesis(topic, current, ev, sourceContext, llmChatFn, onProgress).catch(() => current)
     );
     if (revised === current) break;           // revision made no change — stop
     current = revised;
-    revisedAny = true;
-    const next = await evaluateReport(topic, current, evaluatorFn, corpusHint).catch(() => null);
+    const next = await evaluateReport(topic, current, evaluatorFn, onProgress, corpusHint).catch(() => null);
     if (!next) break;                          // can't re-audit — keep the revision
     ev = next;
     onProgress(`[EVALUATING] Post-revision verdict: ${label(ev)} (${ev.score}/10)`);
   }
 
-  return current + formatEvaluationBlock(ev, revisedAny);
+  // Audit is internal quality signal — do not append the report card to the
+  // user-facing report. Still log a one-line summary when the judge is unhappy.
+  if (ev && (ev.verdict !== 'PASS' || ev.score < 8)) {
+    onProgress(`[AUDIT] ${ev.verdict} (${ev.score}/10) — ${ev.recommendation}`);
+  }
+  return current;
 }
 
 /**
@@ -2344,7 +2394,8 @@ export async function reflectOnStage(
   subQuestions: string[],
   stageBrief: string,
   priorOutline: ResearchOutline | null,
-  llmChatFn: (sys: string, user: string) => Promise<string>
+  llmChatFn: (sys: string, user: string) => Promise<string>,
+  onProgress?: (status: string) => void
 ): Promise<ReflectResult | null> {
   const isFinal = stage >= rounds;
   const outlineBlock = priorOutline
@@ -2376,7 +2427,12 @@ Return ONLY this JSON object:
 }`;
 
   try {
-    const res = await llmChatFn(sys, `STAGE ${stage} BRIEF:\n\n${stageBrief.slice(0, 8000)}`);
+    const res = await withKeepAlive(
+      `[STAGE ${stage}/${rounds}] Reflecting`,
+      llmChatFn(sys, `STAGE ${stage} BRIEF:\n\n${stageBrief.slice(0, 8000)}`),
+      onProgress,
+      30_000
+    );
     const parsed = parseReflect(res);
     if (!parsed) return null;
     const merged = trimOutline(mergeOutlines(priorOutline, parsed.outline));
@@ -2403,7 +2459,8 @@ Return ONLY this JSON object:
 async function generateResearchSpec(
   topic: string,
   subQuestions: string[],
-  llmChatFn: (sys: string, user: string) => Promise<string>
+  llmChatFn: (sys: string, user: string) => Promise<string>,
+  onProgress?: (status: string) => void
 ): Promise<string> {
   const sys =
     `You are a research strategist. Before any gathering begins, produce a RESEARCH SPECIFICATION for:
@@ -2423,8 +2480,13 @@ Produce STRICT JSON:
 Return ONLY the JSON.`;
 
   try {
-    const res = await llmChatFn(sys,
-      `Topic: ${topic}\nSub-questions:\n${subQuestions.map((q, i) => `${i + 1}. ${q}`).join('\n')}`
+    const res = await withKeepAlive(
+      '[PLANNING] Generating research specification',
+      llmChatFn(sys,
+        `Topic: ${topic}\nSub-questions:\n${subQuestions.map((q, i) => `${i + 1}. ${q}`).join('\n')}`
+      ),
+      onProgress,
+      30_000
     );
     const start = res.indexOf('{');
     const end = res.lastIndexOf('}');
@@ -2543,6 +2605,37 @@ export function buildCleanedPdfDoc(cleanText: string, rawText: string): string {
 
 type LlmChatFn = (sys: string, user: string) => Promise<string>;
 
+/** Mirrors AbortSignal.throwIfAborted() — propagate the real abort reason. */
+function throwIfAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) throw ((signal as any).reason || new Error('AbortError'));
+}
+
+/**
+ * Long LLM calls can sit silently for minutes while the model thinks or the
+ * provider dribbles bytes. The run-level watchdog kills the whole job if no
+ * progress line appears for 8 min, so emit a quiet "still running" heartbeat
+ * every `intervalMs` while the promise is in flight. This is NOT a timeout —
+ * it just resets the watchdog so slow-but-healthy calls survive.
+ */
+async function withKeepAlive<T>(
+  label: string,
+  promise: Promise<T>,
+  onProgress: ((status: string) => void) | undefined,
+  intervalMs = 30_000
+): Promise<T> {
+  if (!onProgress) return promise;
+  let ticks = 0;
+  const timer = setInterval(() => {
+    ticks++;
+    onProgress(`${label} (still running${ticks > 1 ? ` — ${ticks * (intervalMs / 1000)}s` : ''}…)`);
+  }, intervalMs);
+  try {
+    return await promise;
+  } finally {
+    clearInterval(timer);
+  }
+}
+
 /**
  * Synthesize a ~1500-word brief from the chunks collected in one stage.
  * Uses all chunks from stageDocIds that fit within the model context budget,
@@ -2559,7 +2652,9 @@ async function synthesizeStageBrief(
   llmChatFn: LlmChatFn,
   specPreamble = '',
   handoffContext = '',
-  qualityBoost: (docId: string) => number = () => 0
+  qualityBoost: (docId: string) => number = () => 0,
+  synthesisFn?: SynthesisStreamFn,
+  onProgress?: (status: string) => void
 ): Promise<string> {
   if (stageDocIds.length === 0) { crumb('brief', 'empty: no stage docs', { stage }); return ''; }
 
@@ -2567,12 +2662,13 @@ async function synthesizeStageBrief(
   // leans on the stage's highest-tier / most-cited sources among the relevant ones.
   // stageDocIds is passed as priority so these freshly-scraped docs are indexed even
   // when the session cap is already full of earlier stages (which starved late-stage
-  // briefs → "No brief generated").
-  const rawChunks = await searchSessionChunks(projectId, topic, 30, stageDocIds, { qualityBoost, priorityDocIds: stageDocIds });
+  // briefs → "No brief generated"). Briefs are intermediate compression steps, so we
+  // deliberately fetch fewer chunks than the final synthesis to keep latency low.
+  const rawChunks = await searchSessionChunks(projectId, topic, 20, stageDocIds, { qualityBoost, priorityDocIds: stageDocIds });
   // Also fetch chunks for each sub-question to get better coverage
   const extra: any[] = [];
   for (const q of subQuestions) {
-    const hits = await searchSessionChunks(projectId, q, 15, stageDocIds, { qualityBoost, priorityDocIds: stageDocIds });
+    const hits = await searchSessionChunks(projectId, q, 8, stageDocIds, { qualityBoost, priorityDocIds: stageDocIds });
     hits.forEach(c => extra.push(c));
   }
   // Merge + deduplicate by chunk id
@@ -2580,7 +2676,7 @@ async function synthesizeStageBrief(
   [...rawChunks, ...extra].forEach(c => chunkMap.set(c.id, c));
   crumb('brief', 'retrieved', { stage, docs: stageDocIds.length, raw: rawChunks.length, extra: extra.length, unique: chunkMap.size });
 
-  // Balance across source types and pack up to context budget
+  // Balance across source types and pack up to a brief-sized context budget
   const byLabel = new Map<string, any[]>();
   for (const c of chunkMap.values()) {
     const l = labelByDoc.get(c.docId) || 'WEB';
@@ -2588,7 +2684,9 @@ async function synthesizeStageBrief(
     byLabel.get(l)!.push(c);
   }
 
-  const charBudget = await getSynthesisCharBudget();
+  // Briefs compress evidence into ~1500 words; feeding the full final-report
+  // budget makes the call slow and the output no better. Cap excerpts at 65%.
+  const charBudget = Math.floor((await getSynthesisCharBudget()) * 0.65);
   const selected: any[] = [];
   let usedChars = 0;
   const labelOrder = [...byLabel.keys()];
@@ -2638,7 +2736,13 @@ Requirements:
 ${EPISTEMIC_RULES}
 ${RESEARCH_CITATION_RULES}`;
 
-  const brief = await llmChatFn(sys, `SOURCE EXCERPTS — STAGE ${stage}:\n\n${contextText}${DATA_TRAILER}`);
+  const userMsg = `SOURCE EXCERPTS — STAGE ${stage}:\n\n${contextText}${DATA_TRAILER}`;
+  const brief = await withKeepAlive(
+    `[STAGE ${stage}/${totalStages}] Synthesizing brief`,
+    (synthesisFn ?? llmChatFn)(sys, userMsg),
+    onProgress,
+    30_000
+  );
   crumb('brief', 'synth done', { stage, words: brief.trim().split(/\s+/).filter(Boolean).length });
   return brief;
 }
@@ -2653,7 +2757,8 @@ async function synthesizeFinalPaper(
   subQuestions: string[],
   stageBriefs: string[],
   llmChatFn: LlmChatFn,
-  synthesisFn?: SynthesisStreamFn
+  synthesisFn?: SynthesisStreamFn,
+  onProgress?: (status: string) => void
 ): Promise<string> {
   const briefsBlock = stageBriefs
     .map((b, i) => `## Stage ${i + 1} Research Brief\n\n${b}`)
@@ -2699,7 +2804,12 @@ ${RESEARCH_CITATION_RULES}`;
 
   const userMsg = `RESEARCH BRIEFS:\n\n${briefsBlock}`;
   crumb('synth', 'final merge start', { briefs: stageBriefs.length, chars: briefsBlock.length });
-  const out = await (synthesisFn ?? llmChatFn)(sys, userMsg);
+  const out = await withKeepAlive(
+    `[SYNTHESIZING] Merging ${stageBriefs.length} stage brief(s)`,
+    (synthesisFn ?? llmChatFn)(sys, userMsg),
+    onProgress,
+    30_000
+  );
   crumb('synth', 'final merge done', { words: out.split(/\s+/).length });
   return out;
 }
@@ -2764,7 +2874,7 @@ async function synthesizeSectionedPaper(
 
   for (let i = 0; i < sections.length; i++) {
     const s = sections[i];
-    if (signal?.aborted) throw new Error('AbortError');
+    if (signal?.aborted) throwIfAborted(signal);
 
     // Resume: a SW death mid-synthesis left finished sections in the checkpoint.
     if (sectionDrafts[s.id] && sectionDrafts[s.id].length > 150) {
@@ -2818,11 +2928,21 @@ ${RESEARCH_CITATION_RULES}`;
 
     let text: string | null = null;
     try {
-      text = normalizeSection(await (synthesisFn ?? llmChatFn)(sys, user), s.heading);
+      text = normalizeSection(await withKeepAlive(
+        `[SYNTHESIZING] Section ${i + 1}/${sections.length}: "${s.heading}"`,
+        (synthesisFn ?? llmChatFn)(sys, user),
+        onProgress,
+        30_000
+      ), s.heading);
     } catch { /* fall through to retry */ }
     if (!text && retryBudget > 0) {
       retryBudget--;
-      try { text = normalizeSection(await llmChatFn(sys, user), s.heading); } catch { /* skip */ }
+      try { text = normalizeSection(await withKeepAlive(
+        `[SYNTHESIZING] Section ${i + 1}/${sections.length}: "${s.heading}" (retry)`,
+        llmChatFn(sys, user),
+        onProgress,
+        30_000
+      ), s.heading); } catch { /* skip */ }
     }
 
     if (text) {
@@ -2858,7 +2978,12 @@ Use ONLY [anchor_id] citations that appear in the provided material — never in
 ${REPORT_VOICE}
 ${EPISTEMIC_RULES}`;
     const capUser = `REPORT OUTLINE:\n${formatOutlineSkeleton(outline)}\n\nFINAL STAGE HANDOFF (known gaps/contradictions):\n${handoffContext.slice(0, 3000)}\n\nREPORT BODY:\n\n${body.slice(0, 20000)}`;
-    const cap = await (synthesisFn ?? llmChatFn)(capSys, capUser);
+    const cap = await withKeepAlive(
+      '[SYNTHESIZING] Capstone: overview, contradictions & verdict',
+      (synthesisFn ?? llmChatFn)(capSys, capUser),
+      onProgress,
+      30_000
+    );
 
     let exec = '', contradictions = '', verdict = '';
     if (cap.includes('---CONTRADICTIONS---')) {
@@ -2944,7 +3069,7 @@ async function runDeeperResearch(
   let researchSpec = priorJob?.researchSpec ?? '';
   if (!researchSpec) {
     onProgress(`[PLANNING] Generating research specification…`);
-    researchSpec = await generateResearchSpec(topic, subQuestions, llmChatFn).catch(() => '');
+    researchSpec = await generateResearchSpec(topic, subQuestions, llmChatFn, onProgress).catch(() => '');
     if (researchSpec) {
       onProgress(`[PLANNING] ✓ Research spec locked in — scope and success criteria defined`);
     }
@@ -3000,7 +3125,7 @@ async function runDeeperResearch(
   const gatheredDocIds = new Set<string>(priorJob?.gatheredDocIds ?? []);
 
   for (let stage = 1; stage <= rounds; stage++) {
-    if (signal?.aborted) throw new Error('AbortError');
+    if (signal?.aborted) throwIfAborted(signal);
 
     // ── Resume: skip stages already completed before a crash ──────────────
     if (stage < resumeFromStage) {
@@ -3042,8 +3167,13 @@ async function runDeeperResearch(
       onProgress('[ACADEMIC] Skipped — topic is practical, not scholarly (web/news only)');
     }
 
-    const outcomes = await Promise.allSettled(stageJobs);
-    if (signal?.aborted) throw new Error('AbortError');
+    const outcomes = await withKeepAlive(
+      `[STAGE ${stage}/${rounds}] Gathering`,
+      Promise.allSettled(stageJobs),
+      onProgress,
+      30_000
+    );
+    if (signal?.aborted) throwIfAborted(signal);
 
     const stageDocIds: string[] = [];   // NEW docs from THIS stage only
     for (const o of outcomes) {
@@ -3072,14 +3202,24 @@ async function runDeeperResearch(
 
     // Link-following: chase references found inside the stage's sources
     if (stageDocIds.length > 0) {
-      const evidenceChunks = await searchSessionChunks(projectId, topic, 20, stageDocIds);
+      const evidenceChunks = await withKeepAlive(
+        `[STAGE ${stage}/${rounds}] Harvesting references`,
+        searchSessionChunks(projectId, topic, 20, stageDocIds),
+        onProgress,
+        30_000
+      );
       const seenUrls = new Set((await listPages().catch(() => [])).map(p => p.url));
       const refs = harvestReferences(evidenceChunks.map(c => c.text), { seenUrls, isJunk: isJunkUrl });
       if (refs.length > 0) {
         const refBudget = Math.max(2, Math.floor(activeLimits.urlsPerQuery / 3));
-        const refOutcome = await followReferences(
-          projectId, topic, refs, refBudget, onProgress, signal,
-          activeSourceMode === 'academic' // papers-only: arXiv/DOI refs, no web links
+        const refOutcome = await withKeepAlive(
+          `[STAGE ${stage}/${rounds}] Following references`,
+          followReferences(
+            projectId, topic, refs, refBudget, onProgress, signal,
+            activeSourceMode === 'academic' // papers-only: arXiv/DOI refs, no web links
+          ),
+          onProgress,
+          30_000
         );
         if (refOutcome.docIds.length > 0) {
           agents.push(refOutcome);
@@ -3090,7 +3230,7 @@ async function runDeeperResearch(
       }
     }
 
-    if (signal?.aborted) throw new Error('AbortError');
+    if (signal?.aborted) throwIfAborted(signal);
 
     // ── Per-stage synthesis → checkpoint ─────────────────────────────────
     const uniqueStageDocIds = Array.from(new Set(stageDocIds));
@@ -3108,7 +3248,9 @@ async function runDeeperResearch(
         uniqueStageDocIds, projectId, labelByDoc, llmChatFn,
         specPreamble,       // Improvement 3: spec-driven
         handoffWithOutline, // Improvement 2: context reset handoff (+ outline)
-        qualityBoost        // favor high-tier / well-cited sources in the brief
+        qualityBoost,       // favor high-tier / well-cited sources in the brief
+        synthesisFn,        // streamed when available; keeps watchdog alive
+        onProgress
       ).catch(err => {
         onProgress(`[STAGE ${stage}/${rounds}] Brief synthesis failed: ${err?.message || err}`);
         return '';
@@ -3123,7 +3265,7 @@ async function runDeeperResearch(
         // runs on the FINAL stage too — that last outline drives the
         // section-scoped synthesis.)
         onProgress(`[STAGE ${stage}/${rounds}] Reflecting: updating outline & planning next queries…`);
-        const r = await reflectOnStage(stage, rounds, topic, subQuestions, brief, outline, llmChatFn).catch(() => null);
+        const r = await reflectOnStage(stage, rounds, topic, subQuestions, brief, outline, llmChatFn, onProgress).catch(() => null);
         if (r) {
           outline = r.outline;
           handoffContext = formatHandoff(r.handoff);
@@ -3266,7 +3408,7 @@ async function runDeeperResearch(
     // Degraded/no-outline path: the original single merge over the briefs.
     onProgress(`[SYNTHESIZING] Merging ${completedBriefs.length} stage brief(s) into final paper…`);
     synthesis = await synthesizeFinalPaper(
-      topic, subQuestions, completedBriefs, llmChatFn, synthesisFn
+      topic, subQuestions, completedBriefs, llmChatFn, synthesisFn, onProgress
     );
   } else {
     // Fallback: no briefs produced (all syntheses failed) — do classic single-pass
@@ -3274,7 +3416,7 @@ async function runDeeperResearch(
     const chunkSet = new Map<string, any>();
     const uniqueDocIds = allDocIdsForSynthesis;
     for (const q of [topic, ...subQuestions]) {
-      if (signal?.aborted) throw new Error('AbortError');
+      if (signal?.aborted) throwIfAborted(signal);
       const chunks = await searchSessionChunks(projectId, q, activeLimits.chunksPerAngle, uniqueDocIds, { qualityBoost, hyde: true, llmChatFn });
       chunks.forEach(c => chunkSet.set(c.id, c));
     }
@@ -3322,7 +3464,12 @@ async function runDeeperResearch(
       `- End with a decisive **Verdict** (or **Recommendation**): a clear position, the strongest case, and the top 2–3 risks. Do not hedge.\n\n` +
       `${PRESCRIPTIVE_GUIDANCE}\n` +
       `${RESEARCH_CITATION_RULES}`;
-    synthesis = await (synthesisFn ?? llmChatFn)(fallbackSys, `SOURCE EXCERPTS:\n\n${contextText}${DATA_TRAILER}`);
+    synthesis = await withKeepAlive(
+      '[SYNTHESIZING] Drafting direct synthesis',
+      (synthesisFn ?? llmChatFn)(fallbackSys, `SOURCE EXCERPTS:\n\n${contextText}${DATA_TRAILER}`),
+      onProgress,
+      30_000
+    );
     revisionContext = contextText;
   }
 

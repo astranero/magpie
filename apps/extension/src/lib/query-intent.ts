@@ -149,13 +149,28 @@ export function isImplementationQuestion(q: string): boolean {
  *  co-signal. Bare weak words hijacked real questions — "what do the bars in
  *  this chart mean?" and "brew temperature for coffee?" were force-routed off
  *  the attached page / workspace as if they were local-search asks. */
-const LOCATION_STRONG_RE = /\b(weather|forecast|climate|humidity|rain(?:ing|y)?|snow(?:ing|y)?|sunny|near\s?me|nearby|around\s+here|local(?:ly)?|closest|nearest|things\s+to\s+do|open\s+now|gas\s+prices?|my\s+area)\b/i;
+const LOCATION_STRONG_RE = /\b(weather|wheather|weathre|weathe|wetther|weater|wether|forecast|climate|humidity|rain(?:ing|y)?|snow(?:ing|y)?|sunny|near\s?me|nearby|around\s+here|local(?:ly)?|closest|nearest|things\s+to\s+do|open\s+now|gas\s+prices?|my\s+area)\b/i;
 const LOCATION_WEAK_RE = /\b(temperature|cold|hot|warm|chilly|freezing|restaurants?|cafes?|coffee|bars?|hotels?|traffic|directions)\b/i;
 const LOCATION_COSIGNAL_RE = /\b(near|nearby|around\s+here|today|tomorrow|tonight|this\s+weekend|right\s+now|now\b|my\s+(?:area|city|town|neighbou?rhood)|outside)\b/i;
 export function isLocationDependent(q: string): boolean {
   const s = q || '';
   if (LOCATION_STRONG_RE.test(s)) return true;
   return LOCATION_WEAK_RE.test(s) && LOCATION_COSIGNAL_RE.test(s);
+}
+
+/**
+ * Questions that should skip workspace source search entirely — they need live
+ * data (weather, time, prices), are trivia/facts, math, or general knowledge
+ * that no saved document can answer. Goes straight to web or general knowledge.
+ */
+const GENERAL_KNOWLEDGE_RE = /\b(weather|wheather|weathre|weathe|wetther|weater|wether|forecast|temperature|how\s+(hot|cold|warm)|is\s+it\s+(raining|snowing)|what\s+time\s+is\s+it|what\s+day\s+is|current\s+(time|date|day)|what('?s| is) today('?s| is) date|what\s+(is|are)\s+\d+\s*[\+\-\*\/]\s*\d+|calculate|celsius.*fahrenheit|fahrenheit.*celsius|convert\s+\d+|math\s+problem|who\s+(is|was|are|were)\s+(the|a)\s+(president|king|queen|prime\s+minister|ceo|leader)|capital\s+of|what\s+country\s+is|how\s+(tall|far|big|long|old)\s+is|population\s+of|what\s+is\s+the\s+(meaning|definition)\s+of|translate\s+("|'|\w)|how\s+(do|to)\s+(say|spell|pronounce)|rhyme|synonym|riddle|joke|fun\s+fact|did\s+you\s+know|trivia|who\s+(won|scored)|what\s+(team|player)|sports\s+score)\b/i;
+
+export function isGeneralKnowledgeQuestion(q: string): boolean {
+  const s = (q || '').trim();
+  if (s.length > 120) return false; // long questions are likely research, not trivia
+  if (isLocationDependent(s)) return true;
+  if (GENERAL_KNOWLEDGE_RE.test(s)) return true;
+  return false;
 }
 
 /** Best-effort place name from an IANA timezone: "Europe/Helsinki" → "Helsinki",

@@ -14,6 +14,20 @@ export interface SearchApiKeys {
   /** Jina AI key — optional. Jina search works keyless (rate-limited); a free
    *  key (jina.ai) just raises the limit. */
   jina?: string;
+  /** Trustpilot API key — free from developers.trustpilot.com. Searches
+   *  product/service reviews. */
+  trustpilot?: string;
+  /** YouTube Data API v3 key — free from Google Cloud Console. Searches
+   *  video comments and discussions. */
+  youtube?: string;
+  /** Reddit OAuth2 client ID — free, register script app at
+   *  reddit.com/prefs/apps */
+  redditId?: string;
+  /** Reddit OAuth2 client secret (same app). */
+  redditSecret?: string;
+  /** GitHub personal access token (classic or fine-grained) — for
+   *  authenticated repo access and higher API rate limits. */
+  github?: string;
 }
 
 /** A search result. `snippet` is the provider's own summary — rich enough for

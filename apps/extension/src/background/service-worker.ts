@@ -7,7 +7,7 @@
 import {
   saveDocument, listDocuments, updateDocumentSync,
   getUnsyncedDocuments, getChatHistory, clearChatHistory, saveChatMessage,
-  linkDocumentToProject, getProject,
+  linkDocumentToProject, getProject, listProjects,
   getChunkByAnchor, deleteOrphanDocuments, resetSyncStatus,
   saveDocImages, getDocImage, listDocImages
 } from '../lib/db';
@@ -18,9 +18,9 @@ import { buildFrontmatter, hasFrontmatter } from '../lib/frontmatter';
 import { get as idbGet } from 'idb-keyval';
 import { runDeepResearch, generateSubQuestions, scrapeUrl, isJunkUrl, gatherWebSnippets } from './deep-researcher';
 import { harvestReferences } from '../lib/reference-harvest';
-import { needsIntentResolution, formatHistoryForIntent, parseRepoUrl, selectTreePaths, formatTreeBlock, isChitchat, isRefusalAnswer, isStructureQuestion, isImplementationQuestion, findRepoUrlInText, isPageMetaQuestion, questionKeywords, mentionsPageDeixis, overlapsPage, isLocationDependent, timezoneToPlace, isEnumerationQuestion, isAssistantMetaQuestion, RepoRef } from '../lib/query-intent';
+import { needsIntentResolution, formatHistoryForIntent, parseRepoUrl, selectTreePaths, formatTreeBlock, isChitchat, isRefusalAnswer, isStructureQuestion, isImplementationQuestion, findRepoUrlInText, isPageMetaQuestion, questionKeywords, mentionsPageDeixis, overlapsPage, isLocationDependent, isGeneralKnowledgeQuestion, timezoneToPlace, isEnumerationQuestion, isAssistantMetaQuestion, RepoRef } from '../lib/query-intent';
 import { sanitizeCliOutput, isCliErrorOutput, composeCliPrompt } from '../lib/cli-output';
-import { stripSourcesFooter } from '../lib/format';
+import { stripSourcesFooter, stripAnySourcesFooter } from '../lib/format';
 import { selectSemantic, fetchWithinBudget, parseRouterSelection, TOTAL_CTX_BUDGET, RerankFn, LinkRef, Selection } from '../lib/context-retrieval';
 import { getResearchLimits } from '../lib/research-limits';
 import { DEFAULT_COMPANION_MCP_URL, CLI_TEMPLATE_AUTO } from '../lib/settings';
@@ -40,6 +40,7 @@ import {
   markJobActive, markJobFinished, updateHeartbeat, JOB_MAX_AGE_MS, HEARTBEAT_STALE_MS
 } from '../lib/research-store';
 import { enqueueResearch, dequeueResearch, getResearchQueue, clearResearchQueue } from '../lib/research-queue';
+import { wikipediaSearch, wikipediaPageSummary } from '../lib/free-apis';
 
 // ─────────────────────────────────────────────
 // Robust error handling & offscreen management
@@ -48,7 +49,15 @@ import { enqueueResearch, dequeueResearch, getResearchQueue, clearResearchQueue 
 // Global unhandled rejection handler - catches silent failures
 self.addEventListener('unhandledrejection', (event) => {
   const err = event.reason;
-  console.error('[SW] Unhandled rejection:', err?.message || err);
+  const msg = String(err?.message || err || '');
+  // During extension reload/offscreen teardown Chrome can reject in-flight
+  // runtime messages with "No SW". It is lifecycle noise, not a bug in the
+  // current worker instance; logging it as an SW crash scared users.
+  if (msg === 'No SW') {
+    event.preventDefault();
+    return;
+  }
+  console.error('[SW] Unhandled rejection:', msg);
   // Prevent default browser behavior (which might kill the worker)
   event.preventDefault();
 });
@@ -209,19 +218,22 @@ chrome.runtime.onInstalled.addListener(async () => {
     });
   }
 
-  // Create context menu for capturing selected text
+  // Context-menu creation is not idempotent across extension reload/update.
+  // Remove stale entries first so Chrome doesn't emit noisy
+  // "Cannot create item with duplicate id …" runtime.lastError warnings.
+  await new Promise<void>((resolve) => chrome.contextMenus.removeAll(() => resolve()));
+
   chrome.contextMenus.create({
     id: 'capture-selection',
     title: 'Capture selection to Workspace',
     contexts: ['selection']
-  });
+  }, () => void chrome.runtime.lastError);
 
-  // Full-page capture from the right-click menu
   chrome.contextMenus.create({
     id: 'capture-page',
     title: 'Capture page to Library',
     contexts: ['page']
-  });
+  }, () => void chrome.runtime.lastError);
 
   // Create workspace two-way sync alarm (every 5 minutes)
   chrome.alarms.create('sync-workspace', { periodInMinutes: 5 });
@@ -719,7 +731,7 @@ interface PageContext { title: string; url: string; markdown: string; }
 
 interface PageChunkEmb { text: string; position: number; embedding: number[] | null }
 const pageContextCache = new Map<string, { ctx: PageContext; ts: number; chunks?: PageChunkEmb[] }>();
-const PAGE_CONTEXT_TTL_MS = 5 * 60 * 1000;
+const PAGE_CONTEXT_TTL_MS = 2 * 60 * 1000;
 
 // Depth counter set while an interactive chat turn is assembling context.
 // The embedder is one serialized WASM context (see offscreen-client mutex);
@@ -812,7 +824,14 @@ async function getPageContext(): Promise<PageContext | null> {
   if (!tab?.id || !tab.url || !/^https?:/.test(tab.url)) return null;
 
   const cached = pageContextCache.get(tab.url);
-  if (cached && Date.now() - cached.ts < PAGE_CONTEXT_TTL_MS) return cached.ctx;
+  // Freshness: a short TTL, AND the tab's live title must still match the cached
+  // scrape. SPA sites (HF, hosted report viewers) swap content while keeping the
+  // same URL — a stale 5-min cache then made the model describe the PREVIOUS
+  // page ("not what I described before"). A title change is a cheap re-scrape signal.
+  if (cached && Date.now() - cached.ts < PAGE_CONTEXT_TTL_MS
+      && (!tab.title || tab.title === cached.ctx.title)) {
+    return cached.ctx;
+  }
 
   let ctx: PageContext | null = null;
   const looksPdf = /\.pdf($|\?)/i.test(tab.url);
@@ -1358,7 +1377,11 @@ async function resolveQuestionIntent(
   try {
     const sys = `Rewrite the user's latest message as ONE standalone, search-friendly question. Resolve pronouns and references ("it", "this page", "the skill") using the conversation${pageTitle ? ' and the page they are viewing' : ''}. Keep the user's intent exactly — do not answer, broaden, or narrow it. Keep the SAME language as the user's message. Return ONLY the rewritten question.`;
     const user = `${pageTitle ? `Page being viewed: ${pageTitle}\n\n` : ''}Conversation:\n${formatHistoryForIntent(formattedHistory)}\n\nLatest message: ${prompt}`;
-    const rewritten = (await chatWithCustom(sys, [], user, signal)).trim().replace(/^["']|["']$/g, '').split('\n')[0].trim();
+    const rewritten = (await withTimeout(
+      chatWithCustom(sys, [], user, signal, await classificationModel()),
+      INTENT_LLM_TIMEOUT_MS,
+      'intent resolution'
+    )).trim().replace(/^["']|["']$/g, '').split('\n')[0].trim();
     if (rewritten.length > 5 && rewritten.length < 300) {
       console.log(`[INTENT] "${prompt.slice(0, 60)}" → "${rewritten.slice(0, 80)}"`);
       return rewritten;
@@ -1378,6 +1401,46 @@ async function isChatWebFallbackEnabled(): Promise<boolean> {
     return s.chatWebFallback !== false;
   } catch {
     return true;
+  }
+}
+
+/**
+ * Optional fast model for classification/intent calls (routing, question
+ * rewriting, page-relevance). Falls back to the main chat model when unset.
+ * Users configure it once in Settings — "gpt-4o-mini" / "claude-haiku" / etc.
+ */
+async function getClassificationModel(): Promise<string | undefined> {
+  try {
+    const s = await chrome.storage.local.get(['classificationModel']);
+    return (s.classificationModel as string)?.trim() || undefined;
+  } catch { return undefined; }
+}
+
+// Module-level cache — only invalidates when user changes settings.
+let _cachedClassModel: string | undefined | null = null;
+async function classificationModel(): Promise<string | undefined> {
+  if (_cachedClassModel !== null) return _cachedClassModel;
+  _cachedClassModel = await getClassificationModel();
+  // Watch for settings changes so the cache stays fresh.
+  chrome.storage.onChanged.addListener((changes) => {
+    if ('classificationModel' in changes) _cachedClassModel = null;
+  });
+  return _cachedClassModel;
+}
+
+/**
+ * Should the answer show a "Sources:" footer for WEB pages (web-search results,
+ * auto-followed page links)? Default OFF: users asked for the Sources footer to
+ * mean "from my saved library", not weather sites / followed webpages. The
+ * library citation footer (clickable [1] chips → open the stored doc) is
+ * unaffected — this only governs the web/page-URL trail.
+ */
+async function isWebSourcesFooterEnabled(): Promise<boolean> {
+  try {
+    const s = await chrome.storage.local.get(['showWebSources']);
+    return s.showWebSources === true;
+  } catch {
+    return false;
   }
 }
 
@@ -1417,7 +1480,11 @@ async function isQuestionAboutPage(q: string, page: PageContext, signal: AbortSi
       `You are an intent router. The user is viewing a web page titled "${page.title}". ` +
       `Decide whether their question is about THIS page (its subject, site, or content) or is an unrelated general question ` +
       `— weather, math, world facts, another website, personal chit-chat. Reply with exactly one word: PAGE or OTHER.`;
-    const ans = await chatWithCustom(sys, [], q, signal);
+    const ans = await withTimeout(
+      chatWithCustom(sys, [], q, signal, await classificationModel()),
+      INTENT_LLM_TIMEOUT_MS,
+      'page relevance check'
+    );
     // Only an explicit PAGE verdict routes to the page. An unparseable answer
     // (refusal, prose, empty string) is AMBIGUOUS — the old fail-open treated
     // garbage as PAGE and forced unrelated questions through the page path.
@@ -1447,17 +1514,22 @@ const LANGUAGE_RULE =
   `even when the sources, page, or these instructions are in another language. Never claim you cannot chat in a language you can write.`;
 
 async function buildChatRequest(chatId: string, projectId: string, prompt: string, signal: AbortSignal, pageContext?: PageContext | null, onStatus?: (s: string) => void): Promise<{ systemPrompt: string; formattedHistory: Array<{ role: string; content: string }>; linkedPages: Array<{ title: string; url: string }>; grounded: boolean; place?: string; branch: ChatBranch }> {
-  // Get all documents for this project
-  const allDocs = await listDocuments(projectId);
-  const enabledDocs = allDocs.filter(d => d.enabled !== false);
-  const docIds = enabledDocs.map(d => d.id);
-  const docTitles = new Map(enabledDocs.map(d => [d.id, d.title]));
-
+  // BATCH: workspace docs, project rules, locale, history, web-fallback — five
+  // separate async sources that previously ran as five sequential awaits. Run
+  // them concurrently where possible. History must land first (formattedHistory
+  // is built from it), but it can fetch in parallel with the others.
+  const [allDocs, project, locStore, history, chatWebFallback] = await Promise.all([
+    listDocuments(projectId),
+    getProject(projectId).catch(() => null),
+    chrome.storage.local.get(['userLocation', 'araTimezone']),
+    getChatHistory(chatId),
+    isChatWebFallbackEnabled(),
+  ]);
+  const enabledDocs = allDocs.filter((d: any) => d.enabled !== false);
+  const docIds = enabledDocs.map((d: any) => d.id);
+  const docTitles = new Map(enabledDocs.map((d: any) => [d.id, d.title]));
   console.log(`[RAG] Project ${projectId}: ${enabledDocs.length} enabled docs, ${docIds.length} IDs`);
 
-  // Persistent per-workspace instructions — prepended to EVERY prompt for this
-  // workspace so the user never re-explains their stack/conventions/tone.
-  const project = await getProject(projectId).catch(() => null);
   const rulesBlock = project?.rules?.trim()
     ? `--- WORKSPACE INSTRUCTIONS (always follow these for this workspace) ---\n${project.rules.trim()}\n--- END WORKSPACE INSTRUCTIONS ---\n\n`
     : '';
@@ -1466,7 +1538,8 @@ async function buildChatRequest(chatId: string, projectId: string, prompt: strin
   // from the system timezone) + timezone, so location/time-dependent questions
   // ("weather today", "near me") use the user's own region instead of the search
   // provider's IP geolocation. Coarse by design (city/region, never precise).
-  const { userLocation, araTimezone } = await chrome.storage.local.get(['userLocation', 'araTimezone']);
+  const userLocation = (locStore as any).userLocation;
+  const araTimezone = (locStore as any).araTimezone;
   // Prefer the timezone captured by the sidepanel (a real document): MV3 service
   // workers can report Intl timeZone as "UTC", which would blank out the place
   // and make the model ask "what's your city?". Fall back to the worker's own.
@@ -1475,20 +1548,22 @@ async function buildChatRequest(chatId: string, projectId: string, prompt: strin
   const place = String(userLocation || '').trim() || timezoneToPlace(tz);
   const localeBlock = place
     ? `--- USER CONTEXT (use for location/time-dependent questions; don't ask the user where they are) ---\n` +
+      `Today's date: ${new Date().toISOString().slice(0, 10)}.\n` +
       `Approximate location: ${place}${userLocation ? '' : ' (inferred from the system timezone — flag the assumption if relevant)'}.` +
       `${tz ? ` Timezone: ${tz}.` : ''}\n--- END USER CONTEXT ---\n\n`
     : '';
 
-  // History first: intent resolution needs it (retrieved BEFORE the new user
-  // message is saved, so it holds only prior turns).
-  const history = await getChatHistory(chatId);
+  // Build formatted history from the already-fetched history (batched above).
   const formattedHistory = history
     .filter((msg: any) => msg.role === 'user' || msg.role === 'assistant')
     // Strip the deterministic "*Sources:*" footer from saved assistant turns.
     // Fed back verbatim, the model learns the pattern and appends its own copy
     // — which then doubles with the footer the stream layer adds (observed:
     // two identical "Sources:" lines on one answer).
-    .map((msg: any) => ({ role: msg.role, content: stripSourcesFooter(msg.text) }));
+    .map((msg: any) => ({ role: msg.role, content: stripSourcesFooter(msg.text) }))
+    // Sliding window: keep only the most recent turns so long chats don't
+    // balloon prompt size → slow TTFT.
+    .slice(-MAX_HISTORY_TURNS);
 
   // Greetings / small talk must NOT run retrieval: it returns weak top-k
   // chunks that trip the strict "I cannot answer from the sources" refusal
@@ -1496,16 +1571,19 @@ async function buildChatRequest(chatId: string, projectId: string, prompt: strin
   // active research run at the offscreen embedder. Answer conversationally.
   // A greeting stays a greeting even with a web page open — an open tab
   // doesn't turn "hi" into a question, so don't gate this on pageContext.
-  // HISTORY GUARD: only at conversation start. Mid-conversation "ok"/"thanks"
-  // used to hijack the turn into the ONBOARDING greeting — nonsense at turn 12.
-  // With history present, an acknowledgement falls through to the normal
-  // pipeline (the confidence gate + refusal net handle it).
-  if (isChitchat(prompt) && formattedHistory.length < 2) {
+  //
+  // Only use the onboarding-style invite at conversation START. Mid-conversation
+  // "ok"/"thanks"/"hi" gets a brief conversational reply instead.
+  if (isChitchat(prompt)) {
     onStatus?.('Writing the answer…');
+    const isFresh = formattedHistory.length < 2;
     const systemPrompt = rulesBlock +
-      `You are Magpie, a warm, concise research assistant. The user sent a greeting or small talk — NOT a research question. ` +
-      `Reply in ONE friendly sentence, then briefly invite them to ask about their captured sources or to run /research <topic>. ` +
-      `Do NOT mention "sources" as though they asked a question, and do NOT say you can't answer.` +
+      (isFresh
+        ? `You are Magpie, a warm, concise research assistant. The user sent a greeting or small talk — NOT a research question. ` +
+          `Reply in ONE friendly sentence, then briefly invite them to ask about their captured sources or to run /research <topic>. ` +
+          `Do NOT mention "sources" as though they asked a question, and do NOT say you can't answer. Never add a "Sources:" line.`
+        : `You are Magpie, a research assistant. The user sent small talk — keep your reply to ONE short, friendly sentence. ` +
+          `Do not invite them to do anything, do not mention sources, and do not ask follow-up questions. Never add a "Sources:" line.`) +
       LANGUAGE_RULE;
     return { systemPrompt, formattedHistory, linkedPages: [], grounded: false, branch: 'chitchat' };
   }
@@ -1526,6 +1604,64 @@ async function buildChatRequest(chatId: string, projectId: string, prompt: strin
     return { systemPrompt, formattedHistory, linkedPages: [], grounded: false, branch: 'meta' };
   }
 
+  // Weather, time, math, trivia, facts — questions that need live data or
+  // general knowledge, NOT the user's saved sources. Skip ALL retrieval
+  // (source search, page analysis, agentic routing) and go straight to web
+  // or general knowledge. Avoids wasted embeddings + reranking (+ offscreen
+  // queue wait) for "what's the weather like today?".
+  if (isGeneralKnowledgeQuestion(prompt)) {
+    onStatus?.('Looking it up…');
+    const q = prompt;
+    const branch: ChatBranch = 'general';
+    // Probe web immediately with localized query — no source search first.
+    if (chatWebFallback) {
+      onStatus?.('Searching the web…');
+      try {
+        const webQuery = place && isLocationDependent(q) ? `${q} ${place}` : q;
+        const web = await gatherWebSnippets(webQuery, { signal, onStatus }).catch(() => null);
+        if (web?.context) {
+          const systemPrompt = rulesBlock +
+            `You are a helpful assistant. The excerpts below were pulled from a live web search just now — treat them as your facts. ` +
+            `Answer concisely in natural language. Do not fabricate citations.` + LANGUAGE_RULE +
+            `\n--- WEB RESULTS ---\n${web.context}\n--- END WEB RESULTS ---`;
+          return { systemPrompt, formattedHistory, linkedPages: web.sources || [], grounded: false, place, branch: 'web' };
+        }
+      } catch (e) {
+        if (signal.aborted) throw e;
+      }
+    }
+    // Web failed — try Wikipedia for structured general knowledge (free, no key,
+    // high quality for facts, definitions, history, people, places).
+    try {
+      const wikiHits = await wikipediaSearch(q, signal);
+      if (wikiHits.length > 0) {
+        // Try to get the full first summary for richer context.
+        const firstTitle = wikiHits[0].title;
+        let wikiContext = wikiHits.map((h, i) => `[W${i+1}] ${h.title}\n${h.snippet}`).join('\n\n');
+        if (firstTitle) {
+          const summary = await wikipediaPageSummary(firstTitle, signal);
+          if (summary) wikiContext = `**${firstTitle}**\n\n${summary}`;
+        }
+        const systemPrompt = rulesBlock + localeBlock +
+          `You are a helpful assistant. The following information was retrieved from Wikipedia — treat it as factual. ` +
+          `If Wikipedia covers the general concept but the user asked about current conditions (weather, time, news), ` +
+      `still provide the best answer using your general knowledge — do not refuse. ` +
+          `you may supplement from your own knowledge. Answer concisely.` + LANGUAGE_RULE +
+          `\n--- WIKIPEDIA ---\n${wikiContext}\n--- END WIKIPEDIA ---`;
+        return { systemPrompt, formattedHistory, linkedPages: wikiHits.map(h => ({ title: h.title || '', url: h.url })), grounded: false, place, branch: 'web' };
+      }
+    } catch (e) {
+      if (signal.aborted) throw e;
+    }
+    // Web + Wikipedia both failed — fall back to general knowledge.
+    const systemPrompt = rulesBlock + localeBlock +
+      `You are a helpful AI assistant. Answer using your general knowledge. ` +
+      `If asked about current weather, time, date, or news, provide the best answer you can from what you know. ` +
+      `Never say you don't have access to current data or real-time information — just answer based on your training. ` +
+      `Be concise — the user wants a quick fact, not an essay.` + LANGUAGE_RULE;
+    return { systemPrompt, formattedHistory, linkedPages: [], grounded: false, place, branch };
+  }
+
   // Follow-up questions get rewritten into standalone ones so retrieval,
   // page-section selection, and link scoring all see real signal.
   if (needsIntentResolution(prompt, formattedHistory.length)) onStatus?.('Understanding the question…');
@@ -1535,7 +1671,37 @@ async function buildChatRequest(chatId: string, projectId: string, prompt: strin
   // about it. "is it cold today?" with a docs page open must NOT be forced
   // through the page path (→ "the page doesn't cover weather"); route it to the
   // normal workspace/web/general pipeline instead.
-  const usePage = !!pageContext && await isQuestionAboutPage(effectiveQuery, pageContext, signal);
+  //
+  // Optional AGENTIC mode: let the model pick the route (page/workspace/web/
+  // general) in one tool-calling turn. The deterministic guards above still run
+  // first; if the model can't tool-call it returns null and we fall back to the
+  // heuristic `isQuestionAboutPage`.
+  let forcedRoute: ChatRoute | null = null;
+  // Probe the saved library BEFORE deciding, so the router can prefer the user's
+  // own sources when they're genuinely relevant (their explicit ask: "use my
+  // sources when the content is related to something I have"). Reused as the
+  // retrieval result below so this costs at most one extra embed on this path.
+  let probeChunks: any[] = [];
+  if (await getChatRoutingMode() === 'agentic') {
+    if (docIds.length > 0) {
+      probeChunks = await searchSessionChunks(projectId, effectiveQuery, 12, docIds, embedOpts()).catch(() => []);
+    }
+    const hasRelevantSources = isConfidentMatch(probeChunks as Array<{ rerankScore?: number }>);
+    onStatus?.('Deciding how to answer…');
+    forcedRoute = await decideRouteAgentic(effectiveQuery, {
+      hasPage: !!pageContext,
+      pageTitle: pageContext?.title || '',
+      pageDeictic: mentionsPageDeixis(effectiveQuery),
+      hasDocs: docIds.length > 0,
+      hasRelevantSources,
+      webAllowed: chatWebFallback,
+    }, signal).catch((e) => { console.warn('[ROUTER] agentic decision failed, using heuristic:', e); return null; });
+    if (forcedRoute) console.log('[ROUTER] agentic route =', forcedRoute, '(relevant saved sources:', hasRelevantSources, ')');
+  }
+
+  const usePage = !!pageContext && (forcedRoute
+    ? forcedRoute === 'page'
+    : await isQuestionAboutPage(effectiveQuery, pageContext, signal));
   if (pageContext && !usePage) console.log('[ROUTER] question is not about the open page — routing to workspace/web/general');
   if (!usePage) onStatus?.('Searching your sources…');
 
@@ -1547,8 +1713,8 @@ async function buildChatRequest(chatId: string, projectId: string, prompt: strin
   // is then wasted work — and a wasted query embed on the hot path. When the
   // router sent an off-page question here (usePage false), we DO want retrieval.
   // Chit-chat already returned above.
-  let relevantChunks: any[] = [];
-  if (!usePage && docIds.length > 0) {
+  let relevantChunks: any[] = isConfidentMatch(probeChunks as Array<{ rerankScore?: number }>) ? probeChunks : [];
+  if (!usePage && forcedRoute !== 'web' && forcedRoute !== 'general' && docIds.length > 0 && relevantChunks.length === 0) {
     relevantChunks = await searchSessionChunks(projectId, effectiveQuery, 40, docIds, embedOpts());
     console.log(`[RAG] Initial search for "${effectiveQuery.slice(0, 50)}..." returned ${relevantChunks.length} chunks`);
 
@@ -1600,15 +1766,15 @@ async function buildChatRequest(chatId: string, projectId: string, prompt: strin
   // Answers render in a ~400px side panel; a 500-word tutorial for a
   // definition question is scroll punishment. Calibrate length to the ask.
   const RESPONSE_STYLE =
-    `\nRESPONSE STYLE — write like an expert collaborator, not a chatbot:\n` +
-    `• Lead with the answer or artifact. NO preamble, no "Certainly!/Great question!", no sycophancy, no closing summary.\n` +
-    `• Sound human and plain-spoken: state facts directly ("it's 23°C in Helsinki, feels like 18°"), not stiff nominalizations ("is considered cold", "is described as pleasant"). No robotic hedging.\n` +
-    `• Match length to the question: a definition gets 2-4 sentences, a how-to gets a compact step list. Don't pre-answer things not asked.\n` +
-    `• Calibrate to the user's demonstrated expertise — use precise terms, don't over-explain standard basics.\n` +
-    `• Prefer scannable structure — bold key terms, short lists, a comparison table — over dense paragraphs. Section headings only when several distinct things were asked.\n` +
-    `• FAIL FAST: if the sources/page/inputs don't contain what's needed, or the request is ambiguous, SAY SO in one line — never guess persuasively to sound helpful.\n` +
-    `• If a complex request is underspecified, state the key assumptions you're making in one line, then proceed.\n` +
-    `• When fixing an error, name the ROOT CAUSE (why it failed) before the corrected version.\n` +
+    `\nRESPONSE STYLE — write for a busy reader in a narrow side panel. Prioritise SCANNABILITY:\n` +
+    `• Lead with the answer. NO preamble, no "Certainly!/Great question!", no sycophancy, no closing summary or "if you want, I can…" offers.\n` +
+    `• Use REAL Markdown, always: '## ' for section headings (not bold-as-heading, not plain lines), '- ' for bullet lists, '1. ' for ordered steps, '**bold**' for the key term at the start of a bullet, and Markdown tables for comparisons. Put a blank line between every heading, paragraph and list.\n` +
+    `• Keep paragraphs to 1-3 short sentences. Break anything longer into bullets. Never write a wall of text.\n` +
+    `• Plain, concrete language — "it's 19°C, feels like 13°", not "the temperature is considered cold". Define a term in a half-sentence the first time; don't assume nor over-explain.\n` +
+    `• Match length to the ask: a definition = 2-4 sentences; a list question = a tight bulleted list; a comparison = a table. Answer only what was asked.\n` +
+    `• FAIL FAST: if the sources/page don't contain what's needed, say so in ONE line — never guess persuasively.\n` +
+    `• When fixing an error, name the ROOT CAUSE before the fix.\n` +
+    `• Do NOT end with a "Sources:" line or a list of URLs — the app shows sources separately.\n` +
     `•${LANGUAGE_RULE}`;
 
   // Web-search fallback sources (below) surface as clickable footer links.
@@ -1632,7 +1798,14 @@ async function buildChatRequest(chatId: string, projectId: string, prompt: strin
   // Location/live questions ("weather today") must not ground on the workspace —
   // a stray chunk that clears the confidence bar sends them to the citation
   // refusal ("cannot answer from sources") instead of a localized web answer.
-  if (!usePage && !isLocationDependent(effectiveQuery) && isConfidentMatch(relevantChunks as Array<{ rerankScore?: number }>)) {
+  // When the agentic router explicitly chose the workspace, honor it: ground on
+  // the library even if the confidence gate is borderline (the model judged the
+  // saved sources relevant). Otherwise fall back to the confidence heuristic.
+  const groundOnWorkspace = !usePage && forcedRoute !== 'web' && forcedRoute !== 'general' &&
+    (forcedRoute === 'workspace'
+      ? relevantChunks.length > 0
+      : !isLocationDependent(effectiveQuery) && isConfidentMatch(relevantChunks as Array<{ rerankScore?: number }>));
+  if (groundOnWorkspace) {
     grounded = true;
     // Build citation-anchored context (generous — favor fuller grounding over
     // "I couldn't find it" cutoffs; only fires for library-source questions).
@@ -1659,7 +1832,8 @@ async function buildChatRequest(chatId: string, projectId: string, prompt: strin
     systemPrompt =
       `You are a helpful research assistant. Answer using the CURRENT PAGE the user is viewing (provided below); ` +
       `use your general knowledge only to fill small, obvious gaps. Do NOT invent citations. ` +
-      `If the page doesn't cover the question, say so in one line rather than guessing or padding with unrelated facts.` +
+      `If the page doesn't cover the question, say so in one line rather than guessing or padding with unrelated facts. ` +
+      `Do NOT end your reply with a "Sources:" line or list of URLs — sources are shown separately by the app.` +
       RESPONSE_STYLE;
   } else if (!pageContext && mentionsPageDeixis(effectiveQuery)) {
     // "What does this page say?" with NO page attached: a web search for that
@@ -1677,7 +1851,9 @@ async function buildChatRequest(chatId: string, projectId: string, prompt: strin
     // knowledge", escalate to a quick live web search (+ any enabled search
     // MCPs) unless the user turned it off.
     let web: { context: string; sources: Array<{ title: string; url: string }> } = { context: '', sources: [] };
-    if (await isChatWebFallbackEnabled()) {
+    // Agentic 'general' route deliberately skips the web probe; agentic 'web'
+    // forces it even if the global fallback toggle is off (the model chose it).
+    if (forcedRoute !== 'general' && (forcedRoute === 'web' || chatWebFallback)) {
       onStatus?.('Searching the web…');
       try {
         // Localize the query so "weather today" resolves to the user's region,
@@ -1697,7 +1873,8 @@ async function buildChatRequest(chatId: string, projectId: string, prompt: strin
         `You are a friendly, knowledgeable assistant. The excerpts below were pulled from a live web search just now — treat them as your facts. ` +
         `Answer the way a sharp, helpful friend would: lead with the direct answer in natural, plain language, then just enough detail — no more. ` +
         `Do NOT clutter the prose with [W#] tags or "per [W2]" — the sources are already shown as links below; reference one inline only if it genuinely adds clarity. ` +
-        `Use only what the excerpts support; if they don't actually answer the question, say so plainly rather than padding.` +
+        `Use only what the excerpts support; if they don't actually answer the question, say so plainly rather than padding. ` +
+        `Do NOT end your reply with a "Sources:" line or a list of URLs — the app shows sources separately.` +
         RESPONSE_STYLE +
         `\n--- WEB RESULTS ---\n${web.context}\n--- END WEB RESULTS ---`;
     } else {
@@ -1838,7 +2015,7 @@ async function buildChatRequest(chatId: string, projectId: string, prompt: strin
     if (
       !enrich.sources.length && !repoRef && host && !isLocalHost &&
       questionKeywords(effectiveQuery).length && !isPageMetaQuestion(effectiveQuery) &&
-      await isChatWebFallbackEnabled()
+chatWebFallback
     ) {
       onStatus?.(`Checking the rest of ${host}…`);
       try {
@@ -1877,6 +2054,7 @@ function linkedPagesFooter(pages: Array<{ title: string; url: string }>): string
   // Finland Hourly Weather | AccuWeather") — collapse those to the site name;
   // short anchor titles from followed on-page links (e.g. "Pricing") stay as-is.
   const seen = new Set<string>();
+  const seenLabels = new Set<string>();
   const items: string[] = [];
   for (const p of pages) {
     if (seen.has(p.url)) continue;
@@ -1885,9 +2063,12 @@ function linkedPagesFooter(pages: Array<{ title: string; url: string }>): string
     try { host = new URL(p.url).hostname.replace(/^www\./, ''); } catch { /* keep title */ }
     const t = (p.title || '').trim();
     const label = (t && t.length <= 40 ? t : (host || t || p.url)).replace(/[\[\]]/g, '');
+    if (seenLabels.has(label.toLowerCase())) continue; // collapse duplicate labels (e.g. two preuve.ai URLs)
+    seenLabels.add(label.toLowerCase());
     items.push(`[${label}](${p.url.replace(/\(/g, '%28').replace(/\)/g, '%29')})`);
     if (items.length >= 3) break;
   }
+  if (!items.length) return '';
   return `\n\n---\n*Sources:* ${items.join(' · ')}`;
 }
 
@@ -2055,7 +2236,76 @@ async function getPageContextStrategy(): Promise<PageCtxStrategy> {
   try {
     const s = await chrome.storage.local.get(['pageContextStrategy']);
     return s.pageContextStrategy === 'router' || s.pageContextStrategy === 'agentic' ? s.pageContextStrategy : 'semantic';
-  } catch { return 'semantic'; }
+  } catch { return 'semantic'; }}
+
+// ─────────────────────────────────────────────
+// Chat routing mode — heuristic (default) or agentic
+// ─────────────────────────────────────────────
+type ChatRoute = 'page' | 'workspace' | 'web' | 'general';
+async function getChatRoutingMode(): Promise<'heuristic' | 'agentic'> {
+  try {
+    const s = await chrome.storage.local.get(['chatRoutingMode']);
+    return s.chatRoutingMode === 'agentic' ? 'agentic' : 'heuristic';
+  } catch { return 'heuristic'; }
+}
+
+/**
+ * Agentic route picker: ONE tool-calling turn where the model chooses the single
+ * best source for the answer. It replaces only the ambiguous middle of the
+ * router — the deterministic guards (chit-chat, assistant-meta, page deixis) run
+ * BEFORE this and still win. Returns null when the model can't tool-call (small
+ * / CLI / non-tool providers) or errors, so the caller falls back to the
+ * heuristic `isQuestionAboutPage` path. It DECIDES only — never executes or
+ * answers — so the existing branch code stays the single place that builds
+ * context (keeps the documented invariants intact).
+ */
+async function decideRouteAgentic(
+  query: string,
+  ctx: { hasPage: boolean; pageTitle: string; pageDeictic: boolean; hasDocs: boolean; hasRelevantSources: boolean; webAllowed: boolean },
+  signal?: AbortSignal,
+): Promise<ChatRoute | null> {
+  const tools: ToolDef[] = [];
+  const noArgs = { type: 'object' as const, properties: {} };
+  // Offer the page route only when it should be able to win: the user explicitly
+  // referenced the open page ("this page/repo"), OR there's no relevant saved
+  // source to cite. This is what makes topical questions ("state of the art in
+  // X") cite the user's LIBRARY instead of narrating the open tab.
+  const offerPage = ctx.hasPage && (ctx.pageDeictic || !ctx.hasRelevantSources);
+  if (offerPage) tools.push({ type: 'function', function: { name: 'answer_from_page', description: 'Use ONLY when the question is explicitly about the web page the user currently has open (its content, structure, or links).', parameters: noArgs } });
+  if (ctx.hasDocs) tools.push({ type: 'function', function: { name: 'search_workspace', description: 'Answer from the user\'s SAVED research library and cite the stored documents. Strongly preferred whenever relevant saved sources exist.', parameters: noArgs } });
+  if (ctx.webAllowed) tools.push({ type: 'function', function: { name: 'search_web', description: 'Use ONLY for live/current facts not in the library or page (weather, prices, breaking news, "today").', parameters: noArgs } });
+  tools.push({ type: 'function', function: { name: 'answer_from_general_knowledge', description: 'Use for general questions answerable from the model\'s own knowledge, with no page, library, or web needed.', parameters: noArgs } });
+  // Only one route available → no decision to make; let the heuristic handle it.
+  if (tools.length <= 1) return null;
+
+  const sys =
+    `You are a routing controller for a research assistant. Choose the SINGLE best information source ` +
+    `for the user's question by calling EXACTLY ONE tool. Do not answer the question and do not write prose — only call a tool.\n` +
+    `PRIORITY: the user's own SAVED LIBRARY comes first. If relevant saved sources exist, you MUST call search_workspace ` +
+    `unless the user explicitly asked about the currently open page, or the question needs live/current info (weather, prices, news).\n` +
+    `Otherwise: explicit open-page question → answer_from_page; live/current facts → search_web; general knowledge → answer_from_general_knowledge.`;
+  const messages = [
+    { role: 'system', content: sys },
+    { role: 'user', content:
+      `Question: ${query}\n` +
+      `Open page: ${ctx.hasPage ? `attached — "${ctx.pageTitle}"${ctx.pageDeictic ? ' (user referenced "this page")' : ''}` : 'none'}\n` +
+      `Saved library has RELEVANT sources for this question: ${ctx.hasRelevantSources ? 'YES — you MUST prefer search_workspace' : (ctx.hasDocs ? 'no confident match' : 'library empty')}\n` +
+      `Web search: ${ctx.webAllowed ? 'available' : 'disabled'}` },
+  ];
+  const resp = await withTimeout(
+    chatWithTools(messages, tools, signal, await classificationModel()),
+    ROUTE_LLM_TIMEOUT_MS,
+    'agentic route decision'
+  ); // may throw → caller falls back
+  const call = resp.toolCalls[0];
+  if (!call) return null;
+  switch (call.name) {
+    case 'answer_from_page': return 'page';
+    case 'search_workspace': return 'workspace';
+    case 'search_web': return 'web';
+    case 'answer_from_general_knowledge': return 'general';
+    default: return null;
+  }
 }
 
 /** Offscreen cross-encoder as a plain RerankFn for the selector. */
@@ -2300,9 +2550,14 @@ async function callCompanion(companionUrl: string, args: Record<string, unknown>
   // chat turn until the browser's TCP timeout — minutes of apparent freeze.
   // Command execution passes its own timeoutMs; default 30s for health-ish calls.
   const timeoutMs = Math.min(Math.max(Number(args.timeoutMs) || 30_000, 5_000), 300_000) + 5_000;
+  // Shared-secret auth: a hardened companion (v1.2+) requires this Bearer token
+  // before it will run a command. Omitted header = legacy/open companion still works.
+  const { companionToken } = await chrome.storage.local.get(['companionToken']);
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  if (typeof companionToken === 'string' && companionToken) headers['Authorization'] = `Bearer ${companionToken}`;
   const res = await fetch(companionUrl, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers,
     signal: AbortSignal.timeout(timeoutMs),
     body: JSON.stringify({
       jsonrpc: '2.0',
@@ -2311,6 +2566,7 @@ async function callCompanion(companionUrl: string, args: Record<string, unknown>
       params: { name: 'execute_command', arguments: args }
     })
   });
+  if (res.status === 401) throw new Error('Companion rejected the token (401) — check the companion token in Settings matches the one the server was started with.');
   if (!res.ok) throw new Error(`HTTP error ${res.status}`);
   const data = await res.json();
   if (data.error) throw new Error(data.error.message || 'JSON-RPC error');
@@ -2458,11 +2714,32 @@ chrome.runtime.onConnect.addListener((port) => {
     // Emit a token to the initiating port AND broadcast it so other sidepanel
     // instances of the same chat render the answer LIVE (not just spinner → final
     // reload). safePost feeds this port; the broadcast feeds every mirror.
+    // Display a chunk to the initiating port + broadcast to mirrors, WITHOUT
+    // touching `full` (used when we re-render already-accumulated text).
+    let displayedAny = false;
+    const display = (text: string) => {
+      displayedAny = true;
+      safePost({ type: 'DELTA', text });
+      chrome.runtime.sendMessage({ action: 'CHAT_DELTA', chatId, text }).catch(() => {});
+    };
+    const resetDisplay = () => {
+      safePost({ type: 'RESET' });
+      chrome.runtime.sendMessage({ action: 'CHAT_RESET', chatId }).catch(() => {});
+    };
+    // Atomically REPLACE the rendered answer text (no clear-then-refill flicker,
+    // no "empty bubble stuck streaming"). Used for post-stream corrections
+    // (sentinel reconcile, stripping a model "Sources:" line).
+    const replaceDisplay = (text: string) => {
+      displayedAny = true;
+      liveChatStreams.set(chatId, text);
+      safePost({ type: 'REPLACE', text });
+      chrome.runtime.sendMessage({ action: 'CHAT_REPLACE', chatId, text }).catch(() => {});
+    };
+    // Accumulate into `full` AND display.
     const emitDelta = (text: string) => {
       full += text;
       liveChatStreams.set(chatId, full);   // so a late-mounting panel can catch up
-      safePost({ type: 'DELTA', text });
-      chrome.runtime.sendMessage({ action: 'CHAT_DELTA', chatId, text }).catch(() => {});
+      display(text);
     };
 
     // Keep the MV3 worker alive for the whole turn. Context assembly (intent
@@ -2507,7 +2784,25 @@ chrome.runtime.onConnect.addListener((port) => {
       // call meant an immediate provider failure (401/429/…) persisted an
       // orphan assistant bubble containing only the disclosure line.
       let disclosed = branch !== 'general' || !!systemPromptOverride;
+      // Sentinel guard: on a grounded (citation) turn the model may reply with
+      // ONLY `NO_SOURCES_IN_WORKSPACE` to signal "not in the sources". That token
+      // must NEVER reach the UI (users saw it flash before the web-escalation
+      // replaced it). Hold display while the streamed text is still a prefix of
+      // the sentinel; if real content diverges, flush the buffer; if it stays the
+      // sentinel, it's handled after the stream (escalation / hygiene) and never
+      // shown. `full` still accumulates so that logic can see it.
+      const SENTINEL = 'NO_SOURCES_IN_WORKSPACE';
+      let guardHolding = grounded;
       const emitAnswerDelta = (text: string) => {
+        if (guardHolding) {
+          full += text;
+          const trimmed = full.replace(/^\s+/, '');
+          if (trimmed.length === 0 || SENTINEL.startsWith(trimmed)) return; // still could be the sentinel — publish nothing
+          guardHolding = false;
+          liveChatStreams.set(chatId, full);
+          display(full);            // diverged into real content → show what we buffered
+          return;
+        }
         if (!disclosed) {
           disclosed = true;
           emitDelta(`*No matching sources in this workspace — answering from general knowledge.*\n\n`);
@@ -2584,8 +2879,7 @@ chrome.runtime.onConnect.addListener((port) => {
         }).catch(() => ({ context: '', sources: [] as Array<{ title: string; url: string }> }));
 
         if (web.context) {
-          safePost({ type: 'RESET' });   // clear the refusal from the panel
-          chrome.runtime.sendMessage({ action: 'CHAT_RESET', chatId }).catch(() => {}); // and from mirrors
+          resetDisplay();   // clear the refusal from the panel + mirrors
           full = '';
           const webSys =
             (place ? `The user is in ${place}; answer for that location and do NOT ask them which city. ` : '') +
@@ -2605,11 +2899,31 @@ chrome.runtime.onConnect.addListener((port) => {
         full = full.replace(/NO_SOURCES_IN_WORKSPACE/g, 'This information was not found in your sources.').trim();
       }
 
+      // Reconcile the display with the final `full`. Needed when the sentinel
+      // guard held the whole answer (so nothing was shown) and no web escalation
+      // replaced it: render the cleaned text now instead of an empty bubble.
+      if (full.trim() && !displayedAny) {
+        replaceDisplay(full);
+      }
+
       // Deterministic clickable trail of auto-followed links — streamed as a
       // final delta so it renders live AND lands in the saved message.
-      const footer = linkedPagesFooter(linkedPages);
-      if (footer && full.trim()) {
-        emitDelta(footer);
+      // The footer lists WEB pages (web-search results / followed links). It is
+      // OFF by default: users want "Sources" to mean their saved library, not
+      // weather sites. Library-doc citations render separately as [n] chips.
+      const answerDisclaimsSources = /\b(don'?t (?:discuss|cover|mention|contain)|not (?:discussed|covered|mentioned|found|on this page|in (?:your|the) sources|about )|outside (?:their|its|the) scope|general knowledge|not sourced from)\b/i.test(full);
+      const wantWebFooter = (await isWebSourcesFooterEnabled()) && !answerDisclaimsSources;
+      // ALWAYS remove any "Sources:" line the MODEL wrote — our footer (added
+      // below only when enabled) is the single authoritative one. This is what
+      // was still leaking "Sources: lushbinary.com · zylos.ai" into answers.
+      const cleaned = stripAnySourcesFooter(full);
+      if (cleaned !== full && full.trim()) {
+        full = cleaned;
+        replaceDisplay(full);   // atomic swap — no clear-then-refill flicker
+      }
+      if (wantWebFooter && full.trim()) {
+        const footer = linkedPagesFooter(linkedPages);
+        if (footer) emitDelta(footer);
       }
 
       if (full.trim()) {
@@ -3031,6 +3345,15 @@ const LLM_STREAM_IDLE_MS = 3 * 60 * 1000;
 const RESEARCH_STALL_MS = 8 * 60 * 1000;
 // Absolute wall-clock cap per run (incl. resumes within this worker).
 const RESEARCH_MAX_WALL_MS = 60 * 60 * 1000;
+// Hard deadline for intermediate LLM calls (intent resolution, routing, page
+// relevance). Prevents "Understanding the question…" from hanging forever when
+// the provider is unresponsive. Falls back gracefully on timeout.
+const INTENT_LLM_TIMEOUT_MS = 15_000;
+const ROUTE_LLM_TIMEOUT_MS = 20_000;
+// Max conversation turns fed into the context window. Long chats balloon the
+// prompt (each message ~200+ tokens) → slow TTFT. A 16-turn window preserves
+// recent context while keeping prefill under ~3K tokens.
+const MAX_HISTORY_TURNS = 16;
 
 /** Child signal that fires on parent abort OR a deadline. */
 function deadlineSignal(parent: AbortSignal, ms: number): { signal: AbortSignal; done: () => void } {
@@ -3045,22 +3368,46 @@ function deadlineSignal(parent: AbortSignal, ms: number): { signal: AbortSignal;
   };
 }
 
+/**
+ * Race a promise against a hard timeout. If the promise wins, clear the timer;
+ * if the timeout fires first, reject with a descriptive error. The inner promise
+ * keeps running (we don't abort it) — we just stop waiting so the caller can
+ * fall back to its error path. Used on intermediate LLM calls that must not
+ * block the pipeline indefinitely.
+ */
+async function withTimeout<T>(promise: PromiseLike<T>, ms: number, label: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
+  });
+  try {
+    return await Promise.race([promise, timeout]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
 /** Run (or resume) a research job. Job checkpoint must already exist. */
 async function executeResearch({ projectId, chatId, topic, effectiveTopic, mode, sourceMode = 'auto' }: ResearchParams): Promise<Record<string, unknown>> {
   const controller = new AbortController();
   researchControllers.set(projectId, controller);
   const signal = controller.signal;
+  const researchModel = (await getProviderSettings().catch(() => ({ model: '' }))).model || 'custom';
 
   // Workspace instructions apply to research too — prepended to every research
   // LLM call's system prompt so the report follows the workspace's conventions.
   const rp = await getProject(projectId).catch(() => null);
-  const researchRules = (rp?.rules?.trim()
+  const languageBlock =
+    `--- REPORT LANGUAGE ---\n` +
+    `The research topic is: "${effectiveTopic.slice(0, 300)}".\n` +
+    `Write the ENTIRE report — headings, body, tables, and verdict — in the SAME language as that topic.\n` +
+    `If the topic is clearly in English, output strictly in English. Never switch language mid-report.\n` +
+    `--- END REPORT LANGUAGE ---\n\n`;
+  const workspaceBlock = rp?.rules?.trim()
     ? `--- WORKSPACE INSTRUCTIONS (always follow these) ---\n${rp.rules.trim()}\n--- END WORKSPACE INSTRUCTIONS ---\n\n`
-    : '') +
-    // REPORT LANGUAGE: the whole report (briefs, sections, headings, verdicts)
-    // follows the TOPIC's language — otherwise a Finnish/Japanese research
-    // request silently produced an English report.
-    `--- REPORT LANGUAGE ---\nDetect the language of the research topic below and write ALL output (plans are exempt) in that language, including headings. Topic: "${effectiveTopic.slice(0, 300)}"\n--- END REPORT LANGUAGE ---\n\n`;
+    : '';
+  // Language first: it is a higher-level constraint than workspace style rules.
+  const researchRules = languageBlock + workspaceBlock;
 
   // Every planning/analysis LLM call carries its own deadline; timing out
   // fails THAT call (callers all have fallbacks) instead of the whole run.
@@ -3121,6 +3468,14 @@ async function executeResearch({ projectId, chatId, topic, effectiveTopic, mode,
   // genuinely interrupted job (stale heartbeat) from one whose clearJob write
   // lost a race with a worker death (fresh heartbeat → skip resume).
   const runStartedAt = Date.now();
+
+  // Unconditional progress heartbeat — nudges lastProgressAt every 30s so the
+  // watchdog never fires on a healthy-but-slow run. The phase-specific heartbeats
+  // (withKeepAlive wrappers) are the primary defense; this is the safety net.
+  const keepAliveInterval = setInterval(() => {
+    lastProgressAt = Date.now();
+  }, 30_000);
+
   const heartbeatInterval = setInterval(() => {
     chrome.runtime.getPlatformInfo?.().catch(() => {});
     updateHeartbeat().catch(() => {});
@@ -3163,7 +3518,7 @@ async function executeResearch({ projectId, chatId, topic, effectiveTopic, mode,
         role: 'assistant',
         text: `## ${sourceMode === 'academic' ? 'Academic Research' : 'Deep Research'}: ${headingTopic}\n\n${interpretedNote}${result.synthesis}`,
         timestamp: new Date().toISOString(),
-        provider: 'custom'
+        provider: researchModel
       });
     }
 
@@ -3173,13 +3528,28 @@ async function executeResearch({ projectId, chatId, topic, effectiveTopic, mode,
     await clearResearchJob().catch(() => {});
     return { success: true, synthesis: result.synthesis, sources: result.sources };
   } catch (err: any) {
-    const message = err.message === 'AbortError' ? 'Cancelled' : err.message;
+    let message = err.message;
+    if (err.message === 'AbortError') {
+      // Distinguish user stop, watchdog, and other abort reasons so the UI
+      // doesn't label every abort as a user cancellation.
+      const reason = controller.signal.reason as any;
+      if (reason?.message === 'watchdog') {
+        message = 'Research stalled — no progress for 8 minutes.';
+      } else if (reason?.name === 'AbortError' || /aborted/i.test(reason?.message || '')) {
+        message = 'Cancelled';
+      } else {
+        message = reason?.message || 'Cancelled';
+      }
+    }
+    if (message !== 'Cancelled') {
+      console.error('[executeResearch] failure', message, err.stack);
+    }
     doneError = message;
     if (chatId) {
       await saveChatMessage({
         chatId,
         role: 'system',
-        text: `Deep research failed: ${message}`,
+        text: message === 'Cancelled' ? 'Research cancelled.' : `Deep research failed: ${message}`,
         timestamp: new Date().toISOString(),
         provider: 'custom'
       }).catch(() => {});
@@ -3189,6 +3559,7 @@ async function executeResearch({ projectId, chatId, topic, effectiveTopic, mode,
     await clearResearchJob().catch(() => {});
     return { success: false, error: message };
   } finally {
+    clearInterval(keepAliveInterval);
     clearInterval(heartbeatInterval);
     researchControllers.delete(projectId);
     // Evict the in-memory Orama index for this session; persisted documents
@@ -3529,8 +3900,14 @@ async function handleSyncToDrive(request?: Record<string, unknown>): Promise<Rec
   // interactive=false (silent, no popup).
   const interactive = !!(request?.interactive);
   const token = await getToken(interactive);
-  const folderId = await ensureFolder(token);
+  const magpieFolderId = await ensureFolder(token);
   const unsynced = await getUnsyncedDocuments();
+
+  // Fetch all projects so we can sort docs into project subfolders.
+  const projects = await listProjects();
+  const projectMap = new Map(projects.map(p => [p.id, p.title]));
+  // Cache subfolder IDs per project to avoid redundant Drive API calls.
+  const subfolderCache = new Map<string, string>();
 
   let synced = 0;
   const errors: string[] = [];
@@ -3538,7 +3915,23 @@ async function handleSyncToDrive(request?: Record<string, unknown>): Promise<Rec
   for (const doc of unsynced) {
     try {
       const fileName = doc.title.replace(/[/\\?%*:|"<>]+/g, '-').substring(0, 120) + '.md';
-      const driveFileId = await uploadMarkdown(token, folderId, fileName, doc.content);
+
+      // Determine the target folder: project subfolder when the doc belongs
+      // to a named project, otherwise the root Magpie folder.
+      let targetFolderId = magpieFolderId;
+      if (doc.projectId) {
+        const projectName = projectMap.get(doc.projectId);
+        if (projectName && projectName !== 'Default Session') {
+          let subId = subfolderCache.get(doc.projectId);
+          if (!subId) {
+            subId = await ensureSubfolder(token, magpieFolderId, sanitizeSegment(projectName));
+            subfolderCache.set(doc.projectId, subId);
+          }
+          targetFolderId = subId;
+        }
+      }
+
+      const driveFileId = await uploadMarkdown(token, targetFolderId, fileName, doc.content);
       await updateDocumentSync(doc.id, true, driveFileId);
       synced++;
     } catch (err) {
@@ -3549,23 +3942,71 @@ async function handleSyncToDrive(request?: Record<string, unknown>): Promise<Rec
   return { synced, total: unsynced.length, errors };
 }
 
+/**
+ * Ensure a subfolder exists inside a parent folder. Uses the Drive API to
+ * create it if missing. Cached lookup by name within the parent.
+ */
+async function ensureSubfolder(token: string, parentId: string, name: string): Promise<string> {
+  const q = encodeURIComponent(
+    `name='${name}' and mimeType='application/vnd.google-apps.folder' and '${parentId}' in parents and trashed=false`
+  );
+  const searchRes = await driveRequest(`/drive/v3/files?q=${q}&fields=files(id)`, token);
+  const searchData = await searchRes.json();
+  if (searchData.files?.length > 0) return searchData.files[0].id;
+
+  const createRes = await driveRequest('/drive/v3/files', token, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name, mimeType: 'application/vnd.google-apps.folder', parents: [parentId] })
+  });
+  const createData = await createRes.json();
+  return createData.id;
+}
+
+/** Keep one path segment (folder or filename stem) safe across OSes and Drive. */
+function sanitizeSegment(name: string): string {
+  return (name || '')
+    .replace(/[/\\?%*:|"<>]+/g, '-')
+    .replace(/^\.+/, '')
+    .replace(/\.+$/, '')
+    .substring(0, 120)
+    .trim() || 'untitled';
+}
+
 async function handleImportFromDrive(request: Record<string, unknown>): Promise<Record<string, unknown>> {
   const token = await getToken(false);
-  const folderId = await ensureFolder(token);
+  const rootFolderId = await ensureFolder(token);
   const projectId = request.projectId as string;
   if (!projectId) throw new Error('projectId is required for importing');
 
-  const q = encodeURIComponent(`'${folderId}' in parents and trashed=false`);
-  const res = await driveRequest(
-    `/drive/v3/files?q=${q}&fields=files(id,name,mimeType,createdTime)&orderBy=createdTime desc&pageSize=50`,
-    token
-  );
-  const data = await res.json();
-  const files = data.files || [];
+  // Collect files from the root folder and all subfolders recursively.
+  const allFiles: Array<{ id: string; name: string; createdTime: string }> = [];
+  const foldersToScan = [rootFolderId];
+  const seen = new Set<string>();
+
+  while (foldersToScan.length > 0) {
+    const parentId = foldersToScan.pop()!;
+    if (seen.has(parentId)) continue;
+    seen.add(parentId);
+
+    const q = encodeURIComponent(`'${parentId}' in parents and trashed=false`);
+    const res = await driveRequest(
+      `/drive/v3/files?q=${q}&fields=files(id,name,mimeType,createdTime,parents)&orderBy=createdTime desc&pageSize=100`,
+      token
+    );
+    const data = await res.json();
+    for (const f of (data.files || [])) {
+      if (f.mimeType === 'application/vnd.google-apps.folder') {
+        foldersToScan.push(f.id);
+      } else if (f.name?.endsWith('.md')) {
+        allFiles.push({ id: f.id, name: f.name, createdTime: f.createdTime });
+      }
+    }
+  }
 
   let imported = 0;
 
-  for (const file of files) {
+  for (const file of allFiles) {
     try {
       const contentRes = await driveRequest(`/drive/v3/files/${file.id}?alt=media`, token);
       const content = await contentRes.text();
@@ -3594,7 +4035,7 @@ async function handleImportFromDrive(request: Record<string, unknown>): Promise<
     }
   }
 
-  return { imported, total: files.length };
+  return { imported, total: allFiles.length };
 }
 
 async function handleListDriveFiles(): Promise<Record<string, unknown>> {
@@ -3602,12 +4043,34 @@ async function handleListDriveFiles(): Promise<Record<string, unknown>> {
   const storage = await chrome.storage.local.get(['driveFolderId']);
   if (!storage.driveFolderId) return { files: [] };
 
-  const q = encodeURIComponent(`'${storage.driveFolderId}' in parents and trashed=false`);
-  const res = await driveRequest(
-    `/drive/v3/files?q=${q}&fields=files(id,name,mimeType,createdTime)&orderBy=createdTime desc&pageSize=50`,
-    token
-  );
-  const data = await res.json();
-  return { files: data.files || [] };
-}
+  // Recursively list files from the root folder and all subfolders.
+  const allFiles: any[] = [];
+  const foldersToScan = [storage.driveFolderId];
+  const seen = new Set<string>();
 
+  while (foldersToScan.length > 0) {
+    const parentId = foldersToScan.pop()!;
+    if (seen.has(parentId)) continue;
+    seen.add(parentId);
+
+    const q = encodeURIComponent(`'${parentId}' in parents and trashed=false`);
+    const res = await driveRequest(
+      `/drive/v3/files?q=${q}&fields=files(id,name,mimeType,createdTime,parents)&orderBy=createdTime desc&pageSize=100`,
+      token
+    );
+    const data = await res.json();
+    for (const f of (data.files || [])) {
+      if (f.mimeType === 'application/vnd.google-apps.folder') {
+        // Only descend into folders that look like project root folders
+        // (not hidden, not empty name).
+        if (f.name && !f.name.startsWith('.')) {
+          foldersToScan.push(f.id);
+        }
+      } else {
+        allFiles.push(f);
+      }
+    }
+  }
+
+  return { files: allFiles };
+}

@@ -47,8 +47,8 @@ These endpoints ARE contacted:
 | Tavily/Brave/Serper | Only when the user adds a key | Search queries |
 | User-registered MCP servers | Only when the user enables the server | The research topic (and bearer token, if configured) |
 | Google APIs | Only after interactive OAuth | Synced documents (Drive); the signed-in account's email + profile (`oauth2/v2/userinfo`, to display who's connected) |
-| `github.com`, `api.github.com` (Copilot SSO) | Only if the user signs in with GitHub Copilot | Device-code OAuth handshake + access-token→session-token exchange (no user content) |
-| `api.githubcopilot.com` | Only when Copilot SSO is the active LLM provider | Same as any LLM endpoint below: retrieved chunk text, chat history, page content |
+| `github.com` + `api.github.com` — **or the configured GitHub Enterprise host** (`{host}` + `{host}/api/v3`) | Only if the user signs in with GitHub Copilot | Device-code OAuth handshake + access-token→session-token exchange (no user content) |
+| `api.githubcopilot.com` (or the configured Copilot API URL) | Only when Copilot SSO is the active LLM provider | Same as any LLM endpoint below: retrieved chunk text, chat history, page content |
 
 No telemetry, no first-party backend.
 
@@ -79,12 +79,15 @@ contacts `openrouter.ai` with a key read from env or the gitignored
 4. **Imported files.** Local `.md`/PDF/images are parsed on-device
    (pdf.js with `isEvalSupported: false`; images inlined as data URLs).
 5. **Companion server (optional, `companion-mcp.js`).** If the user runs it,
-   it exposes an `execute_command` MCP tool on `localhost:3920` that runs
-   arbitrary shell commands (the CLI-LLM route depends on this). It sets
-   `Access-Control-Allow-Origin: *` and currently enforces no auth token, so
-   while it is running any origin the browser can reach may invoke it. Treat
-   running the companion as granting local shell access. ⚖ (hardening options
-   below).
+   it exposes an `execute_command` tool on `localhost:3920` that runs arbitrary
+   shell commands (the CLI-LLM route depends on this). It is gated by a shared
+   token (v1.2+): the extension generates one (Settings → Terminal CLI Chat
+   Gateway → *Generate*) and sends it as `Authorization: Bearer …`; the user
+   starts the server with the same `MAGPIE_COMPANION_TOKEN`, and mismatches get
+   `401`. CORS is reflected only for `chrome-extension://` origins, so a web
+   page can't read replies. **Running the companion without a token falls back
+   to the legacy open mode** (it prints a warning) — treat that as granting any
+   local caller shell access.
 
 ## Permissions rationale
 
@@ -101,10 +104,8 @@ contacts `openrouter.ai` with a key read from env or the gitignored
 - Prompt-injection hardening for research synthesis (delimiting scraped
   content + explicit "ignore embedded instructions" contract).
 - Jina Reader privacy trade-off: opt-out toggle vs status quo.
-- Companion-server hardening: the local `execute_command` bridge accepts any
-  origin with no auth (`Access-Control-Allow-Origin: *`, no token). Options:
-  restrict the CORS origin to the extension id, require the configured MCP
-  `authToken` (Bearer) before executing, and/or bind to loopback only.
 
 (Resolved: the MCP URL policy is now enforced as https-anywhere /
-loopback-http-only — see `isAllowedMcpUrl`.)
+loopback-http-only — see `isAllowedMcpUrl`. The companion `execute_command`
+bridge is now gated by a shared `MAGPIE_COMPANION_TOKEN` with extension-only
+CORS reflection; leaving the token unset keeps the legacy open mode.)

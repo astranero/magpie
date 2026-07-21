@@ -349,12 +349,15 @@ self.onmessage = async (e: MessageEvent<Req>) => {
     if (env.backends?.onnx?.wasm) env.backends.onnx.wasm.wasmPaths = req.wasmPaths;
     env.allowLocalModels = false;
     if (req.device === 'wasm' || req.device === 'webgpu') embedDevice = req.device;
-    // Warm all models so the first real request doesn't pay init latency.
+    // Warm the embedder + reranker in the background so the FIRST chat doesn't
+    // pay the full model download/init on the hot path (that was the "chat is
+    // slow on first use" regression). Errors are swallowed SILENTLY — offline /
+    // model-unavailable startups must not spam the console before the user acts;
+    // the real request will surface a contextual error if it still fails.
     Promise.all([
-      getEmbedder().catch(err => console.warn('[worker preload] embedder failed:', err)),
-      getReranker().catch(err => console.warn('[worker preload] reranker failed:', err)),
-      getNliModel().catch(err => console.warn('[worker preload] NLI model failed:', err)),
-    ]).then(() => console.log(`[worker preload] models ready (embed device: ${embedDevice})`));
+      getEmbedder().catch(() => {}),
+      getReranker().catch(() => {}),
+    ]).catch(() => {});
     return;
   }
  

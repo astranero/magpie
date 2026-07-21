@@ -3,6 +3,17 @@ const { spawn } = require('child_process');
 
 const PORT = 3920;
 
+// v1.2 — authenticated shell execution:
+//  * A shared token (MAGPIE_COMPANION_TOKEN env, or `--token <t>` arg) gates
+//    every execute call. The extension generates it and sends it as
+//    `Authorization: Bearer <token>`. Without it, ANY web page the browser has
+//    open could POST to localhost:3920 and run shell commands (CORS does not
+//    stop the request from executing). With it, a page that cannot read the
+//    token cannot drive the endpoint. If no token is configured the server
+//    still runs (backward compatible) but prints a loud warning.
+//  * CORS: the browser Origin is reflected ONLY for chrome-extension:// callers
+//    (so a web page cannot read responses); /health stays open for probing.
+//
 // v1.1 — chat-safe command execution:
 //  * stdout and stderr are returned SEPARATELY. The old `stdout + stderr`
 //    concatenation glued CLI warnings ("Warning: no stdin data received in
@@ -13,8 +24,34 @@ const PORT = 3920;
 //    interactive CLIs never sit waiting on the 3-second stdin probe.
 //  * `timeoutMs` argument (default 5 min) + output cap so a hung CLI can't
 //    wedge the server.
-const CAPABILITIES = { stdin: true, version: '1.1.0' };
+
+// Shared secret: env var wins, then `--token <value>`.
+function readToken() {
+  if (process.env.MAGPIE_COMPANION_TOKEN) return process.env.MAGPIE_COMPANION_TOKEN.trim();
+  const i = process.argv.indexOf('--token');
+  if (i !== -1 && process.argv[i + 1]) return process.argv[i + 1].trim();
+  return '';
+}
+const AUTH_TOKEN = readToken();
+
+const CAPABILITIES = { stdin: true, auth: !!AUTH_TOKEN, version: '1.2.0' };
 const MAX_OUTPUT_BYTES = 10 * 1024 * 1024;
+
+/** Constant-time-ish string compare (avoids trivially leaking length via early exit). */
+function tokensMatch(provided) {
+  if (!AUTH_TOKEN) return true; // legacy open mode
+  if (typeof provided !== 'string' || provided.length !== AUTH_TOKEN.length) return false;
+  let diff = 0;
+  for (let i = 0; i < provided.length; i++) diff |= provided.charCodeAt(i) ^ AUTH_TOKEN.charCodeAt(i);
+  return diff === 0;
+}
+
+/** Extract the Bearer token from an Authorization header. */
+function bearerOf(req) {
+  const h = req.headers['authorization'] || '';
+  const m = /^Bearer\s+(.+)$/i.exec(h);
+  return m ? m[1].trim() : '';
+}
 
 function runCommand(command, stdinData, timeoutMs, cb) {
   // A shell parses the command (users configure full command lines with flags),
@@ -45,8 +82,13 @@ function runCommand(command, stdinData, timeoutMs, cb) {
 }
 
 const server = http.createServer((req, res) => {
-  // Allow the browser extension to connect from chrome-extension://
-  res.setHeader('Access-Control-Allow-Origin', '*');
+  // Reflect the browser Origin ONLY for the extension itself — a web page must
+  // not be able to read companion responses. Non-extension origins get no ACAO
+  // header (their reads are blocked); the token still gates execution regardless.
+  const origin = req.headers['origin'] || '';
+  if (/^chrome-extension:\/\//.test(origin) || /^moz-extension:\/\//.test(origin)) {
+    res.setHeader('Access-Control-Allow-Origin', origin);
+  }
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
 
@@ -63,6 +105,14 @@ const server = http.createServer((req, res) => {
   }
 
   if (req.method === 'POST' && (req.url === '/mcp' || req.url === '/')) {
+    // Auth gate: when a token is configured, every RPC must present it. This is
+    // the primary defense — CORS only limits who can READ the reply, not who can
+    // trigger the shell command.
+    if (!tokensMatch(bearerOf(req))) {
+      res.writeHead(401, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ jsonrpc: '2.0', error: { code: -32001, message: 'Unauthorized: missing or invalid companion token' } }));
+      return;
+    }
     let body = '';
     req.on('data', chunk => body += chunk);
     req.on('end', () => {
@@ -150,4 +200,11 @@ const server = http.createServer((req, res) => {
 server.listen(PORT, () => {
   console.log(`🚀 Local Shell MCP Server v${CAPABILITIES.version} running on http://localhost:${PORT}/mcp`);
   console.log(`Add this URL under Config -> MCP Servers inside Magpie!`);
+  if (AUTH_TOKEN) {
+    console.log(`🔒 Auth enabled — paste the SAME token into Magpie's companion token field.`);
+  } else {
+    console.warn(`⚠️  No token set — this server will run ANY shell command any local caller sends.`);
+    console.warn(`   Generate a token in Magpie (Settings → Terminal CLI Chat Gateway) and relaunch:`);
+    console.warn(`   MAGPIE_COMPANION_TOKEN=<token> node companion-mcp.js   (or: node companion-mcp.js --token <token>)`);
+  }
 });

@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef, useCallback, lazy, Suspense } from 'react';
 import { useTranslation } from 'react-i18next';
 import { get, set } from 'idb-keyval';
 
@@ -22,16 +22,18 @@ const sanitizeSegment = (name: string): string =>
     .slice(0, 100);
 import { FileText } from 'lucide-react';
 import { LocalDocument, Project, Chat, ChatMessage, ResearchPlan, ResolvedCitation, TabInfo, View } from './types';
-import { LoreView } from './components/LoreView';
 import { LinkPreview, LinkPreviewState } from './components/LinkPreview';
 import { Header } from './components/layout/Header';
 import { Navbar } from './components/layout/Navbar';
-
-// Brand import moved to top level, removing here due to TS import rule
-import { ChatView } from './components/ChatView';
-import { SettingsView } from './components/SettingsView';
-import { DocumentView } from './components/DocumentView';
 import { Button } from '@/components/ui/button';
+
+// Lazy-load view components — they're heavy (markdown renderer, KaTeX, icons)
+// and only one view is visible at a time. Code-splitting shaves ~600 KB from
+// the initial sidepanel bundle.
+const LoreView = lazy(() => import('./components/LoreView').then(m => ({ default: m.LoreView })));
+const ChatView = lazy(() => import('./components/ChatView').then(m => ({ default: m.ChatView })));
+const SettingsView = lazy(() => import('./components/SettingsView').then(m => ({ default: m.SettingsView })));
+const DocumentView = lazy(() => import('./components/DocumentView').then(m => ({ default: m.DocumentView })));
 
 import { findPromptCommand, buildHelpText, loadCustomSkills, SlashCommand } from '../lib/commands';
 import { contentHasTag } from '../lib/frontmatter';
@@ -143,6 +145,7 @@ export default function App() {
   const [customModel, setCustomModel] = useState('');
   const [visionModel, setVisionModel] = useState('');
   const [customModels, setCustomModels] = useState<string[]>([]);
+  const [classificationModel, setClassificationModel] = useState('');
   const [folderName, setFolderName] = useState('Magpie');
   const [syncResearchSources, setSyncResearchSources] = useState(false);
   const [routeChatThroughCli, setRouteChatThroughCli] = useState<string>('disabled');
@@ -229,7 +232,14 @@ export default function App() {
       // Don't reload a chat we're mid-answer on — it would drop the streaming
       // message / the optimistic question.
       if (activeChatId && !streamingChatsRef.current.has(activeChatId) && !mirrorStreamRef.current[activeChatId]) {
-        loadChatHistory(activeChatId).then(() => resumeMirror(activeChatId));
+loadChatHistory(activeChatId).then(() => {
+        // Clear stale mirror entry: loadChatHistory reset messages from DB (which
+        // has no in-progress assistant message), but CHAT_DELTA broadcasts may have
+        // already set mirrorStreamRef[chatId]. Without clearing it, resumeMirror
+        // sees the stale ref and exits early — the running stream never re-attaches.
+        delete mirrorStreamRef.current[activeChatId];
+        resumeMirror(activeChatId);
+      });
       }
       if (activeProjectId) loadDocuments(activeProjectId);
       msg('GET_RESEARCH_STATUS').then((res: any) => {
@@ -252,6 +262,8 @@ export default function App() {
   // Chat
   const [messages, setMessages] = useState<Record<string, ChatMessage[]>>({});
   const [input, setInput] = useState('');
+  const inputRef = useRef(input);
+  inputRef.current = input;
   const [generating, setGenerating] = useState<Record<string, boolean>>({});
   // Live phase line for the thinking indicator ("Reading the page…")
   const [thinkingStatus, setThinkingStatus] = useState<Record<string, string>>({});
@@ -565,17 +577,18 @@ export default function App() {
         if (now - (doneGuardRef.current[m.projectId] || 0) < 4000) return;
         doneGuardRef.current[m.projectId] = now;
 
-        // On failure, flip the started plan card to a retryable 'failed' state
-        // (the plan — topic + sub-questions — is preserved on the card, so Retry
-        // just re-runs it). On success/cancel the report/history load handles it.
-        if (m.error && !m.cancelled && m.chatId) {
+        // On failure or cancel, flip the started plan card to a retryable 'failed'
+        // state (the plan — topic + sub-questions — is preserved on the card, so
+        // Retry just re-runs it). On success the report/history load handles it.
+        if (m.chatId && (m.error || m.cancelled)) {
+          const errText = m.error || 'Cancelled';
           setMessages(prev => {
             const list = prev[m.chatId] || [];
             const idx = [...list].reverse().findIndex(x => x.plan && x.plan.status === 'started');
             if (idx === -1) return prev;
             const realIdx = list.length - 1 - idx;
             const copy = [...list];
-            copy[realIdx] = { ...copy[realIdx], plan: { ...copy[realIdx].plan!, status: 'failed', error: String(m.error) } };
+            copy[realIdx] = { ...copy[realIdx], plan: { ...copy[realIdx].plan!, status: 'failed', error: String(errText) } };
             return { ...prev, [m.chatId]: copy };
           });
         }
@@ -1386,6 +1399,7 @@ export default function App() {
           customModel,
           customModels,
           visionModel: visionModel.trim(),   // never persist a whitespace sentinel
+          classificationModel: classificationModel.trim(),
           autoLinkCaptures,
           includePageContext,   // was missing — ensure full state is persisted
           syncResearchSources,
@@ -1471,7 +1485,9 @@ export default function App() {
   };
 
   const send = async () => {
-    const text = input.trim();
+    // Reads from inputRef to always get the latest value (avoids stale-closure
+    // issues when the slash palette sets input just before dispatching).
+    const text = inputRef.current.trim();
     // Research running does NOT block chat — only an in-flight generation in
     // THIS chat does. Other chats (and this one) stay usable during research.
     if (!text || generating[activeChatId]) return;
@@ -1997,7 +2013,8 @@ export default function App() {
 
         <div className="flex-1 overflow-hidden flex flex-col relative p-2">
           <div className={`flex-1 min-h-0 flex-col overflow-hidden ${view === 'lore' ? 'flex' : 'hidden'}`}>
-            <LoreView 
+            <Suspense fallback={null}>
+              <LoreView 
               documents={documents}
               globalDocuments={globalDocuments}
               authed={authed}
@@ -2019,9 +2036,11 @@ export default function App() {
               searchQuery={loreSearchQuery}
               setSearchQuery={setLoreSearchQuery}
             />
+            </Suspense>
           </div>
 
           {view === 'document' && (
+            <Suspense fallback={null}>
             <DocumentView 
               document={documents.find(d => d.id === activeDocumentId) || globalDocuments.find(d => d.id === activeDocumentId) || null}
               highlightAnchorId={highlightAnchorId}
@@ -2039,9 +2058,11 @@ export default function App() {
                 setView('lore');
               }}
             />
+            </Suspense>
           )}
 
           <div className={`flex-1 min-h-0 flex-col overflow-hidden ${view === 'chat' ? 'flex' : 'hidden'}`}>
+            <Suspense fallback={<div className="p-4 text-xs text-muted-foreground">Loading…</div>}>
             <ChatView 
               messages={messages[activeChatId] || []}
               input={input}
@@ -2068,45 +2089,26 @@ export default function App() {
               onStartPlan={(msgId, plan) => executeDeepResearch(msgId, plan)}
               onCancelPlan={cancelResearchPlan}
               onOpenExternalLink={openLinkInTab}
-              onOpenDocument={(docId, anchorId) => openDocById(docId, anchorId, 'chat')}
+onOpenDocument={(docId, anchorId) => openDocById(docId, anchorId, 'chat')}
+              // Model selector support
               customModel={customModel}
-              setCustomModel={(val) => {
-                setCustomModel(val);
-                if (typeof chrome !== 'undefined' && chrome.storage) {
-                  chrome.storage.local.set({ customModel: val });
-                }
+              modelEntries={customModels.map(m => ({ provider: 'byok' as const, group: 'Custom Provider', model: m }))}
+              onSelectModel={(entry) => { setCustomModel(entry.model); saveSettings(); }}
+              onRefreshModels={async () => {
+                if (!customUrl) return;
+                const res = await msg('FETCH_CUSTOM_MODELS', { url: customUrl, apiKey: customKey });
+                if (res.success) { setCustomModels(res.models as string[]); }
               }}
-              customModels={customModels}
-               fetchCustomModels={async () => {
-                 const res = await msg('FETCH_CUSTOM_MODELS', { url: customUrl, apiKey: customKey });
-                 if (res.success) {
-                   const models = res.models as string[];
-                   setCustomModels(models);
-                   if (typeof chrome !== 'undefined' && chrome.storage) {
-                     chrome.storage.local.set({ customModels: models });
-                     chrome.storage.local.get(['customModel'], (r) => {
-                       const saved = r.customModel || customModel;
-                       if (saved) {
-                         setCustomModel(saved);
-                       } else if (models.length > 0) {
-                         setCustomModel(models[0]);
-                       }
-                     });
-                   } else if (models.length > 0 && !customModel) {
-                     setCustomModel(models[0]);
-                   }
-                 } else {
-                   showToast('error', (res.error as string) || 'Failed to fetch custom models');
-                 }
-               }}
               customUrl={customUrl}
               toggleDoc={toggleDoc}
               onUploadMarkdown={importMarkdownFiles}
               onUploadPdf={importPdfFiles}
             />
+            </Suspense>
           </div>
 
           {view === 'settings' && (
+            <Suspense fallback={null}>
             <SettingsView 
               customUrl={customUrl}
               setCustomUrl={setCustomUrl}
@@ -2116,6 +2118,8 @@ export default function App() {
               setCustomModel={setCustomModel}
               visionModel={visionModel}
               setVisionModel={setVisionModel}
+              classificationModel={classificationModel}
+              setClassificationModel={setClassificationModel}
               customModels={customModels}
                fetchCustomModels={async () => {
                  const res = await msg('FETCH_CUSTOM_MODELS', { url: customUrl, apiKey: customKey });
@@ -2200,6 +2204,7 @@ export default function App() {
                 showToast('success', 'Workspace instructions saved');
               }}
             />
+            </Suspense>
           )}
         </div>
       </main>
@@ -2211,8 +2216,8 @@ export default function App() {
           onClose={() => setLinkPreview(null)}
           onCapture={captureLinkPreview}
           onFollow={openLinkPreview}
-        />
-      )}
+          />
+          )}
 
       {/* ── Bottom Navigation Bar ── */}
       <Navbar

@@ -54,9 +54,9 @@ interface ChatViewProps {
   onOpenExternalLink?: (url: string) => void;
 
   customModel?: string;
-  setCustomModel?: (val: string) => void;
-  customModels?: string[];
-  fetchCustomModels?: () => Promise<void>;
+  modelEntries?: Array<{ provider: 'byok' | 'copilot'; group: string; model: string }>;
+  onSelectModel?: (entry: { provider: 'byok' | 'copilot'; model: string }) => void;
+  onRefreshModels?: () => Promise<void>;
   customUrl?: string;
   toggleDoc?: (docId: string, enabled: boolean) => void;
   onUploadMarkdown?: () => void;
@@ -157,10 +157,10 @@ const PlanCard: React.FC<PlanCardProps> = ({ msgId, plan, onStart, onCancel }) =
               </ol>
             )}
 
-            {plan.status === 'failed' && (
+            {(plan.status === 'failed' || plan.status === 'cancelled') && (
               <div className="border-t border-border/60 pt-2.5 space-y-2">
                 <div className="text-[11px] text-red-600 dark:text-red-400 leading-snug break-words">
-                  Research failed{plan.error ? `: ${plan.error}` : ''}. Nothing was saved — retry to run the same plan again.
+                  {plan.status === 'cancelled' ? 'Research cancelled.' : `Research failed${plan.error ? `: ${plan.error}` : ''}. Nothing was saved — retry to run the same plan again.`}
                 </div>
                 <div className="flex gap-2">
                   <Button
@@ -325,7 +325,12 @@ function normalizeLatexDelimiters(text: string): string {
     }).replace(/(\\)?\\\(([\s\S]*?)\\\)/g, (full, escape, inner) => {
       if (escape) return full; // It was an escaped parenthesis, so leave it alone
       return `$${inner}$`;
-    });
+    })
+    // Currency guard: LLM answers full of "$20 … $750 … $4,000" made remark-math
+    // pair the dollar signs into (garbled) inline math. A `$` immediately before
+    // a digit is currency, never a TeX opener — escape it so KaTeX ignores it.
+    // Skip when preceded by `\` (already escaped) or `$` (display-math `$$…$$`).
+    .replace(/(?<![\\$])\$(?=\d)/g, '\\$');
   }
   return parts.join('');
 }
@@ -414,7 +419,7 @@ const MessageBody: React.FC<MessageBodyProps> = React.memo(({ text: rawText, com
     <div>
       {/* Announced once when the reply settles (populated by the effect above). */}
       <span className="sr-only" aria-live="polite">{announce}</span>
-      <div className={`prose prose-sm dark:prose-invert max-w-none prose-img:rounded-md prose-headings-display prose-a:text-primary prose-pre:rounded-md prose-pre:border prose-pre:border-border ${compact ? 'text-xs' : ''}`}>
+      <div className={`prose prose-sm dark:prose-invert max-w-none leading-relaxed prose-p:text-foreground prose-li:text-foreground prose-headings:text-foreground prose-strong:text-foreground prose-strong:font-semibold prose-img:rounded-md prose-headings-display prose-a:text-primary prose-a:font-medium prose-code:text-foreground prose-pre:rounded-md prose-pre:border prose-pre:border-border prose-p:my-2 prose-headings:mt-4 prose-headings:mb-1.5 prose-h2:text-[13px] prose-h3:text-xs prose-ul:my-2 prose-ol:my-2 prose-li:my-0.5 prose-ul:pl-4 prose-ol:pl-4 marker:text-muted-foreground prose-hr:my-3 prose-hr:border-border prose-table:my-2 prose-th:px-2 prose-th:py-1 prose-th:text-foreground prose-td:px-2 prose-td:py-1 prose-td:border-border prose-th:border-border first:prose-headings:mt-0 ${compact ? 'text-xs' : ''}`}>
         <ReactMarkdown
           remarkPlugins={[remarkGfm, remarkMath]}
           rehypePlugins={[[rehypeKatex, { strict: false, throwOnError: false }]]}
@@ -585,11 +590,10 @@ function formatModelName(model: string): string {
 // ─────────────────────────────────────────────
 const ModelSelector: React.FC<{
   currentModel: string;
-  models: string[];
-  onSelect: (model: string) => void;
+  entries: Array<{ provider: 'byok' | 'copilot'; group: string; model: string }>;
+  onSelect: (entry: { provider: 'byok' | 'copilot'; model: string }) => void;
   onFetch: () => Promise<void>;
-  isOpenRouter: boolean;
-}> = ({ currentModel, models, onSelect, onFetch, isOpenRouter }) => {
+}> = ({ currentModel, entries, onSelect, onFetch }) => {
   const [isOpen, setIsOpen] = useState(false);
   const [search, setSearch] = useState('');
   const [fetching, setFetching] = useState(false);
@@ -607,30 +611,29 @@ const ModelSelector: React.FC<{
     return () => document.removeEventListener('mousedown', handleOutsideClick);
   }, [isOpen]);
 
-  const filteredModels = useMemo(() => {
+  const filtered = useMemo(() => {
     const s = search.toLowerCase().trim();
-    if (!s) return models;
-    return models.filter(m => m.toLowerCase().includes(s));
-  }, [models, search]);
+    return s ? entries.filter(e => e.model.toLowerCase().includes(s) || e.group.toLowerCase().includes(s)) : entries;
+  }, [entries, search]);
+
+  const grouped = useMemo(() => {
+    const groups = new Map<string, typeof entries>();
+    for (const e of filtered) groups.set(e.group, [...(groups.get(e.group) || []), e]);
+    return Array.from(groups.entries()).sort(([a], [b]) => a.localeCompare(b));
+  }, [filtered]);
 
   const triggerRefresh = async () => {
     setFetching(true);
-    try {
-      await onFetch();
-    } catch (e) {
-      console.error(e);
-    } finally {
-      setFetching(false);
-    }
+    try { await onFetch(); } catch (e) { console.error(e); } finally { setFetching(false); }
   };
 
-  if (!isOpenRouter && models.length === 0) return null;
+  if (entries.length === 0) return null;
 
   return (
     <div ref={containerRef} className="relative inline-block text-left">
       <button
         type="button"
-        onClick={() => setIsOpen(!isOpen)}
+        onClick={() => { setSearch(''); setIsOpen(!isOpen); }}
         className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full border border-border bg-card hover:bg-accent text-xs font-semibold text-foreground shadow-sm transition-colors"
       >
         <Sparkles size={11} className="text-primary shrink-0" />
@@ -640,7 +643,6 @@ const ModelSelector: React.FC<{
 
       {isOpen && (
         <div className="absolute bottom-full left-0 mb-1.5 w-60 rounded-xl border border-border bg-popover text-popover-foreground shadow-card p-1.5 z-[100] flex flex-col gap-1.5 animate-in fade-in slide-in-from-bottom-2">
-          {/* Search Input */}
           <div className="relative flex items-center">
             <Search size={12} className="absolute left-2.5 text-muted-foreground" />
             <input
@@ -653,58 +655,56 @@ const ModelSelector: React.FC<{
             />
           </div>
 
-          {/* Models List */}
-          <div className="max-h-48 overflow-y-auto no-scrollbar flex flex-col gap-0.5">
-            {filteredModels.length === 0 ? (
+          <div className="max-h-52 overflow-y-auto no-scrollbar flex flex-col gap-1">
+            {filtered.length === 0 ? (
               <div className="p-3 text-center text-xs text-muted-foreground font-mono">
                 No models found
               </div>
             ) : (
-              filteredModels.map(m => (
-                <button
-                  key={m}
-                  type="button"
-                  onClick={() => {
-                    onSelect(m);
-                    setIsOpen(false);
-                  }}
-                  className={`w-full text-left px-2.5 py-1.5 rounded-lg transition-colors flex items-center justify-between gap-1.5 ${
-                    m === currentModel
-                      ? 'bg-primary text-primary-foreground font-semibold'
-                      : 'hover:bg-accent text-foreground'
-                  }`}
-                >
-                  <span className="truncate flex flex-col items-start gap-0.5">
-                    <span className="font-sans font-semibold text-xs leading-none">{formatModelName(m)}</span>
-                    <span className={`font-mono text-[9px] truncate max-w-[170px] ${m === currentModel ? 'text-primary-foreground/75' : 'text-muted-foreground/60'}`}>{m}</span>
-                  </span>
-                  {m === currentModel && <span className="text-[9px] uppercase font-sans shrink-0">Active</span>}
-                </button>
+              grouped.map(([group, groupEntries]) => (
+                <div key={group} className="space-y-0.5">
+                  <div className="px-2 py-1 text-[9px] font-mono uppercase tracking-widest text-muted-foreground border-b border-border/60">{group}</div>
+                  {groupEntries.map(entry => (
+                    <button
+                      key={`${entry.provider}:${entry.model}`}
+                      type="button"
+                      onClick={() => { onSelect(entry); setSearch(''); setIsOpen(false); }}
+                      className={`w-full text-left px-2.5 py-1.5 rounded-lg transition-colors flex items-center justify-between gap-1.5 ${
+                        entry.model === currentModel
+                          ? 'bg-primary text-primary-foreground font-semibold'
+                          : 'hover:bg-accent text-foreground'
+                      }`}
+                    >
+                      <span className="truncate flex flex-col items-start gap-0.5">
+                        <span className="font-sans font-semibold text-xs leading-none">{formatModelName(entry.model)}</span>
+                        <span className={`font-mono text-[9px] truncate max-w-[170px] ${entry.model === currentModel ? 'text-primary-foreground/75' : 'text-muted-foreground/60'}`}>{entry.model}</span>
+                      </span>
+                      {entry.model === currentModel && <span className="text-[9px] uppercase font-sans shrink-0">Active</span>}
+                    </button>
+                  ))}
+                </div>
               ))
             )}
           </div>
 
-          {/* Fetch Button for OpenRouter */}
-          {isOpenRouter && (
-            <div className="border-t border-border/60 pt-1.5 mt-0.5">
-              <button
-                type="button"
-                onClick={triggerRefresh}
-                disabled={fetching}
-                className="w-full h-7 text-xs font-medium text-primary hover:bg-primary/5 border border-primary/20 rounded-lg transition-colors flex items-center justify-center gap-1.5"
-              >
-                {fetching ? (
-                  <>
-                    <Loader2 size={11} className="animate-spin" /> Fetching…
-                  </>
-                ) : (
-                  <>
-                    <Sparkles size={11} /> Refresh OpenRouter Models
-                  </>
-                )}
-              </button>
-            </div>
-          )}
+          <div className="border-t border-border/60 pt-1.5 mt-0.5">
+            <button
+              type="button"
+              onClick={triggerRefresh}
+              disabled={fetching}
+              className="w-full h-7 text-xs font-medium text-primary hover:bg-primary/5 border border-primary/20 rounded-lg transition-colors flex items-center justify-center gap-1.5"
+            >
+              {fetching ? (
+                <>
+                  <Loader2 size={11} className="animate-spin" /> Fetching…
+                </>
+              ) : (
+                <>
+                  <Sparkles size={11} /> Refresh Models
+                </>
+              )}
+            </button>
+          </div>
         </div>
       )}
     </div>
@@ -818,9 +818,9 @@ export const ChatView: React.FC<ChatViewProps> = ({
   onCancelPlan,
   onOpenExternalLink,
   customModel = '',
-  setCustomModel,
-  customModels = [],
-  fetchCustomModels,
+  modelEntries = [],
+  onSelectModel,
+  onRefreshModels,
   customUrl = '',
   onUploadMarkdown,
   onUploadPdf
@@ -855,12 +855,10 @@ export const ChatView: React.FC<ChatViewProps> = ({
     }
   }, [isActive]);
 
-  // Automatically fetch custom models on mount or when the endpoint url changes
+  // Auto-refresh provider model lists on mount / when the active endpoint changes.
   useEffect(() => {
-    if (fetchCustomModels) {
-      fetchCustomModels().catch(() => {});
-    }
-  }, [customUrl, fetchCustomModels]);
+    if (onRefreshModels) onRefreshModels().catch(() => {});
+  }, [customUrl, onRefreshModels]);
 
   // Register imperative scrollToBottom so parent can call it on nav clicks
   useEffect(() => {
@@ -1062,11 +1060,11 @@ export const ChatView: React.FC<ChatViewProps> = ({
         ) : (
           <div key={m.id} className={`flex flex-col w-full ${m.role === 'user' ? 'items-end' : 'items-start'} gap-1`}>
             {/* Sender Header */}
-            <div className="flex items-center gap-1.5 px-1 text-[11px] font-semibold text-muted-foreground/80">
+            <div className="flex items-center gap-1.5 px-1 text-[11px] font-semibold text-muted-foreground">
               {m.role === 'user' ? (
                 <>
                   <span>{t('chat.you')}</span>
-                  <User size={10} className="text-muted-foreground/60" />
+                  <User size={10} className="text-muted-foreground/70" />
                 </>
               ) : m.role === 'system' ? (
                 <>
@@ -1083,7 +1081,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
                     <span className="font-mono text-[9px] px-1.5 py-0.5 rounded bg-muted border border-border text-muted-foreground">
                       {m.provider}
                     </span>
-                  ) : customModel && m.streaming ? (
+                  ) : customModel && m.role === 'assistant' ? (
                     <span className="font-mono text-[9px] px-1.5 py-0.5 rounded bg-muted border border-border text-muted-foreground">
                       {customModel}
                     </span>
@@ -1105,10 +1103,10 @@ export const ChatView: React.FC<ChatViewProps> = ({
               // layout pass on every token (documented streaming-chat CLS risk).
               className={`[contain:layout] w-full ${m.role === 'user' ? 'max-w-[85%]' : 'max-w-[92%]'} rounded-2xl border px-4 py-3 text-sm shadow-sm transition-all leading-relaxed ${
                 m.role === 'user'
-                  ? `bg-primary border-primary text-primary-foreground rounded-tr-sm ${m.queued ? 'opacity-70' : ''}`
+                  ? `bg-primary/15 border-primary/30 text-foreground rounded-tr-sm ${m.queued ? 'opacity-70' : ''}`
                   : m.role === 'system'
                   ? 'bg-muted/40 border-border/60 text-muted-foreground w-full rounded-lg'
-                  : 'bg-card border-border/80 text-card-foreground rounded-tl-sm'
+                  : 'bg-muted/25 border-border text-foreground rounded-tl-sm'
               }`}
             >
               {/* One malformed message (broken markdown/KaTeX) must not white-
@@ -1120,7 +1118,9 @@ export const ChatView: React.FC<ChatViewProps> = ({
                   </CollapsibleMessage>
                 ) : (
                   <CollapsibleMessage text={m.text}>
-                    <div className="whitespace-pre-wrap font-sans break-words">{m.text}</div>
+                    {/* Render the user's own message as Markdown too, so typed
+                        lists, **bold**, `code` and tables display properly. */}
+                    <MessageBody text={m.text} compact resolveCitations={resolveCitations} onOpenDocument={onOpenDocument} onOpenExternalLink={onOpenExternalLink} />
                   </CollapsibleMessage>
                 )}
               </ErrorBoundary>
@@ -1158,14 +1158,13 @@ export const ChatView: React.FC<ChatViewProps> = ({
       {/* Input */}
       <div className="p-3 bg-background border-t border-border shrink-0 flex flex-col gap-2">
         {/* Model selection toolbar */}
-        {(customUrl.includes('openrouter.ai') || customModels.length > 0) && (
+        {modelEntries.length > 0 && (
           <div className="flex items-center justify-between px-1">
             <ModelSelector
               currentModel={customModel}
-              models={customModels}
-              onSelect={setCustomModel!}
-              onFetch={fetchCustomModels!}
-              isOpenRouter={customUrl.includes('openrouter.ai')}
+              entries={modelEntries}
+              onSelect={(entry) => onSelectModel?.(entry)}
+              onFetch={onRefreshModels || (async () => {})}
             />
             <span className="text-[10px] text-muted-foreground font-mono">
               {documents.filter(d => d.enabled !== false).length} active source(s)
@@ -1182,22 +1181,33 @@ export const ChatView: React.FC<ChatViewProps> = ({
                 role="listbox"
                 aria-label="Command suggestions"
                 aria-activedescendant={`cmd-opt-${paletteIdx}`}
-                className="absolute bottom-full left-0 mb-2 w-full bg-popover rounded-lg border border-border shadow-card p-1 z-50 animate-in fade-in slide-in-from-bottom-2 max-h-64 overflow-y-auto no-scrollbar"
+                className="absolute bottom-full left-0 mb-2 w-full bg-popover rounded-lg border border-border shadow-card p-1 z-50 animate-in fade-in slide-in-from-bottom-2 max-h-72 overflow-y-auto no-scrollbar"
               >
-                {matches.map((c, i) => (
-                  <div
-                    key={c.cmd}
-                    id={`cmd-opt-${i}`}
-                    role="option"
-                    aria-selected={i === paletteIdx}
-                    className={`flex items-center gap-2 p-2 cursor-pointer text-sm transition-colors rounded-md ${i === paletteIdx ? 'bg-accent' : 'hover:bg-accent'}`}
-                    onClick={() => { setInput(c.cmd + (c.takesArg ? ' ' : '')); setPaletteIdx(0); document.getElementById('chat-input')?.focus(); }}
-                  >
-                    <Sparkles size={14} className="text-primary shrink-0" aria-hidden="true" />
-                    <span className="font-semibold font-mono text-foreground shrink-0">{c.cmd}</span>
-                    <span className="text-muted-foreground text-[11px] truncate">{c.desc}</span>
-                  </div>
-                ))}
+                {matches.map((c, i) => {
+                  const argHint = c.takesArg ? '<topic>' : c.cmd === '/analyze' ? '[focus]' : '';
+                  const kind = c.kind === 'research' ? 'research' : c.kind === 'prompt' ? 'lens' : '';
+                  return (
+                    <div
+                      key={c.cmd}
+                      id={`cmd-opt-${i}`}
+                      role="option"
+                      aria-selected={i === paletteIdx}
+                      className={`flex items-center gap-2.5 px-2.5 py-1.5 cursor-pointer rounded-md transition-colors ${i === paletteIdx ? 'bg-accent' : 'hover:bg-accent/60'}`}
+                      onClick={() => { setInput(c.cmd + (c.takesArg ? ' ' : '')); setPaletteIdx(0); document.getElementById('chat-input')?.focus(); }}
+                    >
+                      <div className="flex items-baseline gap-1.5 shrink-0 min-w-[128px]">
+                        <span className="font-mono font-semibold text-sm text-foreground">{c.cmd}</span>
+                        {argHint && <span className="font-mono text-[10px] text-muted-foreground/70">{argHint}</span>}
+                      </div>
+                      <span className="text-muted-foreground text-[11px] leading-snug truncate flex-1">{c.desc}</span>
+                      {kind && (
+                        <span className={`shrink-0 text-[9px] font-mono uppercase tracking-wider px-1.5 py-0.5 rounded border ${
+                          kind === 'research' ? 'text-primary border-primary/30 bg-primary/10'
+                          : 'text-muted-foreground border-border bg-muted/40'}`}>{kind}</span>
+                      )}
+                    </div>
+                  );
+                })}
               </div>
             );
           })()}
@@ -1235,10 +1245,47 @@ export const ChatView: React.FC<ChatViewProps> = ({
                     e.preventDefault();
                     const sel = matches[paletteIdx];
                     if (sel) { setInput(sel.cmd + (sel.takesArg ? ' ' : '')); setPaletteIdx(0); }
+                    // For no-arg commands (/clear, /help, /analyze, /create-skill),
+                    // dispatch immediately instead of trapping Enter forever.
+                    if (sel && !sel.takesArg) requestAnimationFrame(() => send());
                     return;
                   }
                   if (e.key === 'Escape') { setInput(''); setPaletteIdx(0); return; }
                 }
+              }
+              if (e.key === 'Enter' && e.shiftKey) {
+                // Markdown list auto-continue: Shift+Enter inside a "- "/"* "/"1. "
+                // line starts the next item; an empty item ends the list. Otherwise
+                // fall through to a normal newline.
+                const el = e.currentTarget;
+                const pos = el.selectionStart ?? input.length;
+                const lineStart = input.lastIndexOf('\n', pos - 1) + 1;
+                const line = input.slice(lineStart, pos);
+                const m = line.match(/^(\s*)([-*+]|\d+\.)\s+(.*)$/);
+                if (m) {
+                  e.preventDefault();
+                  const [, indent, marker, content] = m;
+                  let next: string;
+                  if (content.trim() === '') {
+                    // Empty item → end the list (clear the marker, plain newline).
+                    next = input.slice(0, lineStart) + input.slice(pos);
+                    setInput(next);
+                    requestAnimationFrame(() => { el.selectionStart = el.selectionEnd = lineStart; });
+                  } else {
+                    const marker2 = /^\d+\.$/.test(marker) ? `${parseInt(marker, 10) + 1}.` : marker;
+                    const insert = `\n${indent}${marker2} `;
+                    next = input.slice(0, pos) + insert + input.slice(pos);
+                    setInput(next);
+                    const caret = pos + insert.length;
+                    requestAnimationFrame(() => {
+                      el.selectionStart = el.selectionEnd = caret;
+                      el.style.height = 'auto';
+                      el.style.height = `${Math.min(el.scrollHeight, 160)}px`;
+                    });
+                  }
+                  return;
+                }
+                // not a list line → default newline behavior
               }
               if (e.key === 'Enter' && !e.shiftKey) {
                 e.preventDefault();

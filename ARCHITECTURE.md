@@ -16,7 +16,7 @@ lifetime and capability:
 | **Offscreen document** (`src/offscreen/`) | Unbounded (`DOM_PARSER` reason) | Heavy compute: pdf.js parsing, HTML→markdown (Readability), embedding + reranker models (transformers.js) |
 | **Content script** (`src/content/`) | Bound to tab | DOM scraping (Readability + Turndown), YouTube transcripts |
 | **Side panel** (`src/sidepanel/`) | While open | React UI: Lore / Chat / Config views |
-| **Companion server** (`companion-mcp.js`, *optional*) | User-run Node process | Local HTTP MCP bridge on `localhost:3920` that runs CLI LLMs / shell tools (`execute_command`) for the CLI provider route — only present if the user installs and registers it |
+| **Companion server** (`companion-mcp.js`, *optional*) | User-run Node process | Local HTTP MCP bridge on `localhost:3920` that runs CLI LLMs / shell tools (`execute_command`) for the CLI provider route — only present if the user installs and registers it; gated by a shared `MAGPIE_COMPANION_TOKEN` |
 
 Communication: `chrome.runtime.sendMessage` for request/response,
 long-lived ports for chat streaming (`chat-stream`, also acts as SW
@@ -97,4 +97,7 @@ question ──▶ hybrid retrieval (Orama BM25 + vectors, in-memory per project
    sidepanel sync layer.
 6. **Authentication** — GitHub Copilot SSO auth is supported as an alternative
    provider path (token exchange via `lib/copilot-auth.ts`); treat it as a
-   first-class LLM endpoint alongside direct OpenAI-compatible keys.
+   first-class LLM endpoint alongside direct OpenAI-compatible keys. The GitHub
+   host is configurable (`githubBaseUrl`), so the same device-code flow works
+   against a GitHub Enterprise Server instance (`{host}/api/v3`), with the
+   Copilot API URL overridable (`copilotApiUrl`).

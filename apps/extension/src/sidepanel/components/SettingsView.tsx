@@ -102,6 +102,8 @@ interface SettingsViewProps {
   setCustomModel: (val: string) => void;
   visionModel: string;
   setVisionModel: (val: string) => void;
+  classificationModel: string;
+  setClassificationModel: (val: string) => void;
   customModels: string[];
   fetchCustomModels: () => void;
 
@@ -133,11 +135,11 @@ interface SettingsViewProps {
 }
 
 export const SettingsView: React.FC<SettingsViewProps> = ({
-  customUrl, setCustomUrl, customKey, setCustomKey, customModel, setCustomModel, visionModel, setVisionModel, customModels, fetchCustomModels,
+  customUrl, setCustomUrl, customKey, setCustomKey, customModel, setCustomModel, visionModel, setVisionModel, classificationModel, setClassificationModel, customModels, fetchCustomModels,
   docCount, globalDocCount, onCleanupOrphans, authed, profile, login, logout, folderName, setFolderName, exportWorkspace,
   autoLinkCaptures, setAutoLinkCaptures, saveSettings, syncResearchSources, setSyncResearchSources, forceResync,
   routeChatThroughCli, setRouteChatThroughCli, cliCommandTemplate, setCliCommandTemplate,
-  localMcpCompanionUrl, setLocalMcpCompanionUrl,
+  localMcpCompanionUrl,
   workspaceName, workspaceRules, saveWorkspaceRules
 }) => {
   // Local draft of the workspace instructions; persisted on blur.
@@ -260,7 +262,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   };
   const persistSearchKeys = () => {
     const clean: SearchApiKeys = {};
-    (['tavily', 'brave', 'serper', 'jina'] as const).forEach(k => {
+    (['tavily', 'brave', 'serper', 'jina', 'trustpilot', 'youtube', 'redditId', 'redditSecret'] as const).forEach(k => {
       const v = (searchKeys[k] || '').trim();
       if (v) clean[k] = v;
     });
@@ -416,8 +418,21 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
               onBlur={saveSettings}
               className="rounded-lg text-xs"
             />
+</div>
+
+          <div className="space-y-1.5 pt-2 border-t border-border/60">
+            <label className="text-xs font-medium">Fast Model <span className="text-[10px] text-muted-foreground font-normal">(classification)</span></label>
+            <p className="text-[10px] text-muted-foreground font-mono leading-normal">Used for intent rewriting, routing decisions, and page-relevance checks. A smaller model here speeds up chat. Falls back to your main model when empty.</p>
+            <input
+              type="text"
+              value={classificationModel}
+              onChange={e => setClassificationModel(e.target.value)}
+              onBlur={() => chrome.storage.local.set({ classificationModel: classificationModel.trim() })}
+              placeholder="Leave empty to use main model — e.g. gpt-4o-mini"
+              className="w-full rounded-lg border border-border bg-background px-3 py-2 text-xs font-mono"
+            />
           </div>
-          
+
           <div className="space-y-1.5">
             <label className="text-xs font-medium">API Key</label>
             <Input 
@@ -485,6 +500,19 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
               )}
               <Button variant="secondary" size="sm" onClick={fetchCustomModels} className="rounded-lg font-medium text-xs">Fetch</Button>
             </div>
+          </div>
+
+          <div className="space-y-1.5 pt-2 border-t border-border/60">
+            <label className="text-xs font-medium">Fast Model <span className="text-[10px] text-muted-foreground font-normal">(classification)</span></label>
+            <p className="text-[10px] text-muted-foreground font-mono leading-normal">Used for intent rewriting, routing decisions, and page-relevance checks. A smaller model here speeds up chat. Falls back to your main model when empty.</p>
+            <input
+              type="text"
+              value={classificationModel}
+              onChange={e => setClassificationModel(e.target.value)}
+              onBlur={() => chrome.storage.local.set({ classificationModel: classificationModel.trim() })}
+              placeholder="Leave empty to use main model — e.g. gpt-4o-mini"
+              className="w-full rounded-lg border border-border bg-background px-3 py-2 text-xs font-mono"
+            />
           </div>
 
           <div className="space-y-1.5">
@@ -855,7 +883,12 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           ['tavily', 'Tavily', 'tvly-…'],
           ['brave', 'Brave Search', 'BSA…'],
           ['serper', 'Serper (Google)', '40-char key'],
-          ['jina', 'Jina (s.jina.ai)', 'jina_…']
+          ['jina', 'Jina (s.jina.ai)', 'jina_…'],
+          ['trustpilot', 'Trustpilot Reviews', 'free key from developers.trustpilot.com'],
+          ['youtube', 'YouTube Comments', 'free Google Cloud API key'],
+          ['redditId', 'Reddit Client ID', 'from reddit.com/prefs/apps (script)'],
+          ['redditSecret', 'Reddit Secret', 'from same Reddit app'],
+          ['github', 'GitHub PAT', 'ghp_… — classic repo scope or fine-grained'],
         ] as const).map(([id, label, ph]) => (
           <div key={id} className="space-y-1.5">
             <label className="text-xs font-medium">{label}</label>
@@ -1133,66 +1166,6 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
               </Button>
             </div>
           )}
-      </Section>
-
-      {/* ── Terminal CLI Chat Gateway ── */}
-      <Section id="cli-chat-gateway" title="Terminal CLI Chat Gateway" subtitle="Route chat queries directly through a local terminal CLI (e.g. claude, agy, or copilot).">
-        <div className="space-y-1.5">
-          <label className="text-xs font-medium">CLI Chat Routing Mode</label>
-          <Select
-            value={routeChatThroughCli}
-            onValueChange={v => {
-              if (v) setRouteChatThroughCli(v);
-              setTimeout(saveSettings, 50);
-            }}
-          >
-            <SelectTrigger className="rounded-lg text-xs">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="disabled">Disabled (Use Custom Model)</SelectItem>
-              <SelectItem value="enabled">Always Route to Local CLI</SelectItem>
-              <SelectItem value="auto">Auto (CLI if reachable, else Fallback)</SelectItem>
-            </SelectContent>
-          </Select>
-        </div>
-
-        {routeChatThroughCli !== 'disabled' && (
-          <div className="space-y-3 pt-1.5">
-            <div className="space-y-1.5">
-              <label className="text-xs font-medium">Local MCP Companion URL</label>
-              <Input
-                type="text"
-                value={localMcpCompanionUrl}
-                onChange={e => setLocalMcpCompanionUrl(e.target.value)}
-                onBlur={saveSettings}
-                placeholder="http://localhost:3920/mcp"
-                className="rounded-lg text-xs"
-              />
-              <p className="text-[10px] text-muted-foreground leading-normal font-sans">
-                Connection URL to your running companion server (e.g. click <button type="button" className="font-mono text-primary hover:underline cursor-pointer bg-transparent border-0 p-0" onClick={() => { setLocalMcpCompanionUrl('http://localhost:3920/mcp'); setTimeout(saveSettings, 50); }}>http://localhost:3920/mcp</button> to apply, or enter your Traefik gateway).
-              </p>
-            </div>
-
-            <div className="space-y-1.5">
-              <label className="text-xs font-medium">CLI Command Template</label>
-              <Input
-                type="text"
-                value={cliCommandTemplate}
-                onChange={e => setCliCommandTemplate(e.target.value)}
-                onBlur={saveSettings}
-                placeholder='claude "{prompt}"'
-                className="rounded-lg text-xs select-all"
-              />
-              <p className="text-[10px] text-muted-foreground leading-normal font-sans">
-                Use <code className="font-mono select-all bg-muted/60 px-1 rounded">{`{prompt}`}</code> as placeholder. Click an example to apply it:<br />
-                • <button type="button" className="font-mono select-all hover:underline hover:text-foreground cursor-pointer bg-muted/60 px-1 rounded text-left border-0 p-0 m-0" onClick={() => { setCliCommandTemplate('claude "{prompt}"'); setTimeout(saveSettings, 50); }}>claude "{`{prompt}`}"</button><br />
-                • <button type="button" className="font-mono select-all hover:underline hover:text-foreground cursor-pointer bg-muted/60 px-1 rounded text-left border-0 p-0 m-0" onClick={() => { setCliCommandTemplate('agy chat "{prompt}"'); setTimeout(saveSettings, 50); }}>agy chat "{`{prompt}`}"</button><br />
-                • <button type="button" className="font-mono select-all hover:underline hover:text-foreground cursor-pointer bg-muted/60 px-1 rounded text-left border-0 p-0 m-0" onClick={() => { setCliCommandTemplate('copilot explain "{prompt}"'); setTimeout(saveSettings, 50); }}>copilot explain "{`{prompt}`}"</button>
-              </p>
-            </div>
-          </div>
-        )}
       </Section>
 
     </div>
