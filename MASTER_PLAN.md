@@ -1,6 +1,6 @@
 # MASTER PLAN — Magpie (née AI Research Assistant)
 
-> **Status as of 2025-07-11**: Build ✅ | Tests 137/137 ✅ | Tranche 7 (freeze fixes) **DONE**
+> **Status as of 2026-07-21**: Build ✅ | Tests 454/454 ✅ | Pushed to GitHub ✅
 
 ---
 
@@ -9,11 +9,15 @@
 | Metric | Status |
 |--------|--------|
 | **Build** | ✅ `tsc` + Vite × 3 configs clean |
-| **Tests** | ✅ 137/137 passing |
-| **Git** | 3 commits on `main` |
+| **Tests** | ✅ 454/454 passing (+317 from 137) |
+| **Git** | Pushed to `github.com/astranero/magpie` |
 | **Freeze fixes (Tranche 7)** | ✅ F1–F9 complete |
 | **Rebrand (Magpie/Lore)** | ✅ Complete |
-| **Test suite** | 137/137 passing |
+| **Copilot SSO** | ✅ GitHub Copilot device-flow auth |
+| **Free APIs** | ✅ 14 tiered APIs without keys |
+| **Weather/Location** | ✅ Date + location in general-knowledge prompts |
+| **Deep Research watchdog** | ✅ Unconditional heartbeat + phase-level keepalives |
+| **Model selector** | ✅ Restored in ChatView |
 
 ---
 
@@ -97,8 +101,9 @@
 | Item | Owner | When |
 |------|-------|------|
 | PNG icon assets (16/48/128) | External designer | Post-v1 |
-| `CHANGELOG.md` at repo root | Maintainer | v1 release |
+| `CHANGELOG.md` at repo root | Maintainer | v1 release — repo now at `github.com/astranero/magpie` |
 | Icons for `dist/` manifest | External | Pre-store |
+| GitHub Actions CI | Maintainer | Post-v1 — repo pushed |
 
 ---
 
@@ -106,9 +111,10 @@
 
 | Area | Severity | Notes |
 |------|----------|-------|
-| `App.tsx` ~1400 lines — extract view components | Medium | Candidate for extraction |
-| `service-worker.ts` ~1900 lines — split handlers | Medium | Message router + domain modules |
-| `deep-researcher.ts` ~1100 lines — extract agents | Medium | Agents as separate modules |
+| `App.tsx` ~2200 lines — extract view components | **High** | Grew ~800 lines since original estimate |
+| `service-worker.ts` ~4000 lines — split handlers | **High** | Doubled; message router + domain modules needed |
+| `deep-researcher.ts` ~3500 lines — extract agents | **High** | Tripled; agents as separate modules |
+| `free-apis.ts` ~550 lines — new standalone module | Low | Already modular; monitor growth |
 | No request coalescing for parallel search calls | Low | Low priority |
 | No retry/backoff on `chrome.storage.local` | Low | Rare failures |
 | No E2E tests (Puppeteer/Playwright) | Medium | High value for regressions |
@@ -149,6 +155,8 @@
 |------|-------|
 | Brand config | `src/lib/brand.ts` |
 | Research state | `src/lib/research-store.ts`, `deep-researcher.ts` |
+| Free APIs | `src/lib/free-apis.ts` — 14 tiered search APIs |
+| Copilot SSO | `src/lib/copilot-auth.ts` |
 | Offscreen (embeddings/rerank/PDF/HTML) | `offscreen/offscreen.ts` |
 | Chat streaming | `service-worker.ts` `chatWithCustomStream`, `App.tsx` `sendCommandOverStream`/`send` |
 | Chat UI | `ChatView.tsx` `MessageBody`, `App.tsx` `messages` state |
@@ -162,7 +170,7 @@
 
 ```bash
 cd apps/extension
-npm test          # 137 tests
+npm test          # 454 tests
 npm run build     # tsc + Vite × 3
 npm run dev       # hot reload for manual testing
 ```
