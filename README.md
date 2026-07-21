@@ -1,7 +1,7 @@
 # Magpie — AI Research Assistant
 
-![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)
-![Build Status](https://img.shields.io/badge/build-passing-brightgreen)
+![License](https://img.shields.io/badge/License-Non--Commercial-red.svg)
+[![Verify Build and Tests](https://github.com/astranero/magpie/actions/workflows/verify.yml/badge.svg)](https://github.com/astranero/magpie/actions/workflows/verify.yml)
 
 A Chrome extension that turns your browser into a personal research library. Capture pages and PDFs, search everything you've collected, chat with your sources, and run multi-agent deep research — all with source-grounded citations.
 
@@ -26,12 +26,12 @@ A Chrome extension that turns your browser into a personal research library. Cap
 
 ## Features
 
-- **Capture & Index:** Save web pages, PDFs, and YouTube videos to your personal library.
-- **Semantic Search:** Search your library using natural language.
-- **Chat with Sources:** Ask questions and get answers grounded in your captured documents.
-- **Multi-Agent Research:** Perform deep research tasks with autonomous agents.
-- **Citation Tracking:** All answers are backed by citations to your sources.
-- **Drive Sync:** Sync your research projects to Google Drive.
+- **Capture & Index:** Save web pages, PDFs, and YouTube videos to your personal library
+- **Semantic Search:** Search your library using natural language
+- **Chat with Sources:** Ask questions and get answers grounded in your captured documents
+- **Multi-Agent Research:** Perform deep research tasks with autonomous agents
+- **Citation Tracking:** All answers are backed by citations to your sources
+- **Drive Sync:** Sync your research projects to Google Drive
 
 ## Quick Start
 
@@ -42,26 +42,26 @@ A Chrome extension that turns your browser into a personal research library. Cap
 
 ### Installation
 
-1.  Clone the repository:
-    ```bash
-    git clone https://github.com/astranero/magpie.git
-    cd magpie
-    ```
+1. Clone the repository:
+   ```bash
+   git clone https://github.com/astranero/magpie.git
+   cd magpie
+   ```
 
-2.  Install dependencies and build the extension:
-    ```bash
-    cd apps/extension
-    npm install
-    npm run build
-    ```
+2. Install dependencies and build:
+   ```bash
+   cd apps/extension
+   npm install
+   npm run build
+   ```
 
-3.  Load the extension in Chrome:
-    -   Open `chrome://extensions`.
-    -   Enable "Developer mode" in the top right.
-    -   Click "Load unpacked".
-    -   Select the `apps/extension/dist` folder.
+3. Load the extension in Chrome:
+   - Open `chrome://extensions`
+   - Enable "Developer mode"
+   - Click "Load unpacked"
+   - Select the `apps/extension/dist` folder
 
-4.  Click the Magpie extension icon in the toolbar to open the side panel.
+4. Click the Magpie icon in the toolbar to open the side panel
 
 ## Commands
 
@@ -77,7 +77,7 @@ A Chrome extension that turns your browser into a personal research library. Cap
 
 ## Architecture
 
-Magpie is built as a Chrome Extension (MV3) with a service worker, a side panel for the UI, and an offscreen document for heavy processing like parsing and embeddings.
+Magpie is a Chrome Extension (MV3) with a service worker, side panel UI, and offscreen document for heavy processing.
 
 ```
 Service Worker              Side Panel              Offscreen
@@ -94,31 +94,29 @@ Service Worker              Side Panel              Offscreen
                         Orama vector index (in-memory)
 ```
 
-For more details, see [ARCHITECTURE.md](ARCHITECTURE.md).
+See [ARCHITECTURE.md](ARCHITECTURE.md) for the full breakdown.
 
 ## Technologies
 
-- **Core:** TypeScript, React, Vite
-- **Extension:** Chrome Extensions MV3
-- **AI/ML:** ONNX Runtime, Orama (hybrid search)
-- **Styling:** Tailwind CSS
-- **Storage:** IndexedDB
+TypeScript · React · Chrome Extensions MV3 · Vite · ONNX Runtime · IndexedDB · Orama (hybrid search) · Tailwind CSS
 
 ## Documentation
 
-- [ARCHITECTURE.md](ARCHITECTURE.md) — Component map and architectural overview.
-- [docs/SECURITY.md](docs/SECURITY.md) — Trust model, Content Security Policy (CSP), and data egress.
-- [docs/STORAGE.md](docs/STORAGE.md) — IndexedDB schema and data management.
-- [docs/CAPTURE.md](docs/CAPTURE.md) — Document capture pipelines.
-- [docs/RESEARCH-PIPELINE.md](docs/RESEARCH-PIPELINE.md) — Research agents and synthesis process.
-- [docs/CITATIONS.md](docs/CITATIONS.md) — Citation anchor grammar.
-- [docs/MCP.md](docs/MCP.md) — Model Context Protocol (MCP) server configuration.
-- [docs/TESTING.md](docs/TESTING.md) — Testing strategy and suite.
+- [ARCHITECTURE.md](ARCHITECTURE.md) — Component map
+- [docs/SECURITY.md](docs/SECURITY.md) — Trust model, CSP, egress
+- [docs/STORAGE.md](docs/STORAGE.md) — IndexedDB schema
+- [docs/CAPTURE.md](docs/CAPTURE.md) — Capture paths
+- [docs/RESEARCH-PIPELINE.md](docs/RESEARCH-PIPELINE.md) — Agents & synthesis
+- [docs/CITATIONS.md](docs/CITATIONS.md) — Anchor grammar
+- [docs/MCP.md](docs/MCP.md) — MCP server config
+- [docs/TESTING.md](docs/TESTING.md) — Test suite
 
 ## Contributing
 
-Contributions are welcome! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for details on how to get started.
+See [CONTRIBUTING.md](CONTRIBUTING.md). PRs welcome.
 
 ## License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+Non-Commercial Source-Available. See [LICENSE](LICENSE).
+
+> **This code is free for personal and educational use.** Commercial use requires explicit permission.
