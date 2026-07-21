@@ -25,12 +25,16 @@
 
 | Tranche | Scope | Status | Commit |
 |---------|-------|--------|--------|
-| **1 — Rebrand** | Magpie/Lore rename, `brand.ts` config, UI strings, manifest, README, PRODUCT/DESIGN docs | ✅ | 75341bb |
+| **1 — Rebrand** | Magpie/Lore rename, `brand.ts` config, UI strings, manifest, README, PRODUCT/DESIGN docs | ✅ | (pre-history) |
 | **2 — Deep Research Fixes** | A/B/C fixes (content-type, heartbeat resume, arXiv full-text) | ✅ | (pre-history) |
 | **3 — Impeccable critique + fix pass** | P0–P3 UI fixes (CSS tokens, callouts, destructive actions, a11y) | ✅ | (pre-history) |
-| **4 — Test Suite Expansion** | 10 new test suites (research-store, mcp-client, commands, frontmatter-parse, academic refs, DOI, quality-gate, paper-rank, chunker, citations) | ✅ | 4a9f0f3 |
-| **5 — Build Fixes** | Restored `research-store`, fixed tests, removed orphan `SourcesView`, fixed types | ✅ | 4a9f0f3 |
-| **7 — Freeze/Performance Fixes (Tranche 7)** | **F1–F9 complete** — streaming coalescing, rAF batching, plain-text streaming, batched embeddings, model preload, semaphore, batch IDB reads, scroll auto, memoized regex | ✅ | 3bb109c |
+| **4 — Test Suite Expansion** | 10 new test suites (research-store, mcp-client, commands, frontmatter-parse, academic refs, DOI, quality-gate, paper-rank, chunker, citations) | ✅ | (pre-history) |
+| **5 — Build Fixes** | Restored `research-store`, fixed tests, removed orphan `SourcesView`, fixed types | ✅ | (pre-history) |
+| **7 — Freeze/Performance Fixes (Tranche 7)** | **F1–F9 complete** — streaming coalescing, rAF batching, plain-text streaming, batched embeddings, model preload, semaphore, batch IDB reads, scroll auto, memoized regex | ✅ | (pre-history) |
+| **8 — Deep Research Heartbeat** | Unconditional keepalive, phase-level wrappers, gathering-phase heartbeat | ✅ | latest |
+| **9 — Model Selector + Chat UX** | Restored model dropdown, model badge on all messages, `/cl` Enter fix, retry button | ✅ | latest |
+| **10 — Weather + Location** | Date/location in general-knowledge prompts, locale detection, weather misspelling catch | ✅ | latest |
+| **11 — GitHub Integration** | PAT field in Settings, repo push, profile README | ✅ | latest |
 
 ---
 
