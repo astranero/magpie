@@ -1,113 +1,83 @@
-<div align="center">
 
-# 🧠 Magpie
+# Magpie — AI Research Assistant
 
-**Your AI Research Assistant — right in your browser sidebar**
+A Chrome extension that turns your browser into a personal research library. Capture pages and PDFs, search everything you've collected, chat with your sources, and run multi-agent deep research — all with source-grounded citations.
 
-[![TypeScript](https://img.shields.io/badge/TypeScript-3178C6?style=flat-square&logo=typescript&logoColor=white)]()
-[![React](https://img.shields.io/badge/React-20232A?style=flat-square&logo=react&logoColor=61DAFB)]()
-[![Vite](https://img.shields.io/badge/Vite-646CFF?style=flat-square&logo=vite&logoColor=white)]()
-[![Chrome MV3](https://img.shields.io/badge/Chrome_MV3-4285F4?style=flat-square&logo=google-chrome&logoColor=white)]()
-[![Tests](https://img.shields.io/badge/Tests-454_passing-22c55e?style=flat-square)]()
-
-Capture everything. Search anything. Cite everything.
-
-</div>
+```
+  ┌──────────────────────────────────────────────────────┐
+  │  📄  Capture →  Index  →  🔍  Search  →  💬  Answer │
+  │  Any page,    Orama+ONNX  Semantic+    With citations│
+  │  PDF, YouTube  embeddings  keyword      [1][2][3]    │
+  └──────────────────────────────────────────────────────┘
+```
 
 ---
 
-## ✨ What It Does
-
-Magpie is a Chrome extension (Manifest V3) that turns your browser into a personal research assistant:
-
-| Feature | What you get |
-|---------|-------------|
-| **📄 Capture** | Save any web page, PDF, YouTube transcript, or local file into a searchable library |
-| **🔍 Global Search** | Semantic + keyword search across everything you've collected |
-| **💬 Chat with Sources** | Ask questions, get answers grounded in your captured sources with clickable citations |
-| **⚡ Quick Research** | `/research <topic>` — web search + cited report in under a minute |
-| **🧪 Deep Research** | `/deepresearch <topic>` — multi-agent pipeline: web + papers + news, cross-referenced |
-| **🎓 Academic Mode** | `/academic <topic>` — papers-only (Semantic Scholar, CrossRef, arXiv, HuggingFace) |
-| **🤖 Agentic Skills** | Create custom `/command` skills from your research findings |
-
----
-
-## 🚀 Quick Start
+## Quick Start
 
 ```bash
-# Clone and build
-git clone https://github.com/astranero/magpie.git
-cd magpie/apps/extension
+cd apps/extension
 npm install
 npm run build
 ```
 
-Then:
-1. Open `chrome://extensions`
-2. Enable **Developer mode** (top-right)
-3. Click **Load unpacked** → select `apps/extension/dist`
-4. Click the Magpie toolbar icon to open the side panel
+Load the `apps/extension/dist` folder as an unpacked extension in `chrome://extensions`. Click the toolbar icon to open the side panel.
 
 ---
 
-## ⚙️ Configuration
+## Commands
 
-| Setting | What it does |
+| Command | What it does |
 |---------|-------------|
-| **Base URL** | Any OpenAI-compatible API. `http://localhost:11434/v1` (Ollama) · `https://openrouter.ai/api/v1` |
-| **Model** | Chat model for answers |
-| **Vision Model** | OCR for scanned PDFs/images. Blank = reuse chat model |
-| **Research Depth** | Standard (~30 sources) · Deep (~80) · Exhaustive (~150) |
-| **API Keys** | Tavily/Brave/Serper for web · S2 key for academic rate limits |
-
-> All data stays local (IndexedDB + browser embeddings). The only network calls are to your LLM endpoint and research fetchers. See [docs/SECURITY.md](docs/SECURITY.md) for the full egress inventory.
+| `/research <topic>` | Web search + cited report in ~30s |
+| `/deepresearch <topic>` | Multi-stage: web + academic + news, cross-checked |
+| `/academic <topic>` | Papers only (Semantic Scholar, arXiv, CrossRef) |
+| `/recall <topic>` | Search your captured library |
+| `/page <question>` | Ask about the current browser tab |
+| `/clear` | Reset chat |
+| `/create-skill <instruction>` | Turn findings into a reusable command |
 
 ---
 
-## 🏗️ Architecture
+## Architecture
 
 ```
-┌────── Service Worker ──────┐     ┌────── Side Panel ──────┐
-│  Chat stream · Research ·   │     │  ChatView · Settings   │
-│  Capture · Auth · Drive     │────▶│  LoreView · Document   │
-└──────────┬──────────────────┘     └────────────────────────┘
-           │
-┌──────────▼──────────────────┐     ┌────── Offscreen ───────┐
-│       IndexedDB + Orama     │◀───▶│  Embeddings · Reranker │
-│  (documents · chunks ·      │     │  PDF parser · HTML     │
-│   chats · history)          │     │  inference worker      │
-└─────────────────────────────┘     └────────────────────────┘
-```
-
-Deep dive: [ARCHITECTURE.md](ARCHITECTURE.md) · [STORAGE.md](docs/STORAGE.md) · [RESEARCH-PIPELINE.md](docs/RESEARCH-PIPELINE.md)
-
----
-
-## 📚 Documentation
-
-| Doc | What it covers |
-|-----|---------------|
-| [ARCHITECTURE.md](ARCHITECTURE.md) | Component map: SW + offscreen + sidepanel + content script |
-| [CAPTURE.md](docs/CAPTURE.md) | Web/PDF/YouTube/image capture paths |
-| [CITATIONS.md](docs/CITATIONS.md) | Anchor grammar, resolution, highlight mapping |
-| [MCP.md](docs/MCP.md) | MCP server config, tool discovery |
-| [RESEARCH-PIPELINE.md](docs/RESEARCH-PIPELINE.md) | Agents, planning, synthesis, checkpointing |
-| [SECURITY.md](docs/SECURITY.md) | CSP, trust model, egress inventory |
-| [STORAGE.md](docs/STORAGE.md) | IndexedDB schema, Orama rehydration |
-| [TESTING.md](docs/TESTING.md) | Running tests, coverage |
-
----
-
-## 🧪 Test Suite
-
-```bash
-cd apps/extension
-npm test          # 454 tests, 45 test files
-npm run build     # tsc + Vite × 3 configs
+Service Worker              Side Panel              Offscreen
+┌──────────────────┐     ┌──────────────────┐    ┌──────────────────┐
+│ Chat streaming   │     │ ChatView         │    │ PDF parser       │
+│ Research agents  │     │ Settings         │    │ HTML parser      │
+│ Capture pipeline │────▶│ LoreView         │    │ Embeddings (ONNX)│
+│ Auth (Copilot/   │     │ DocumentView     │    │ Reranker (ONNX)  │
+│   Google Drive)  │     │ Field log        │    │ Inference worker │
+└────────┬─────────┘     └──────────────────┘    └──────────────────┘
+         │                                              │
+         └────────────── IndexedDB ◄─────────────────────┘
+                        documents · chunks · chats · history
+                        Orama vector index (in-memory)
 ```
 
 ---
 
-## 📄 License
+## Tech
+
+TypeScript · React · Chrome Extensions MV3 · Vite · ONNX Runtime
+IndexedDB · Orama (hybrid search) · Tailwind CSS · KaTeX
+
+---
+
+## Docs
+
+- [ARCHITECTURE.md](ARCHITECTURE.md) — component map
+- [docs/SECURITY.md](docs/SECURITY.md) — trust model, CSP, egress
+- [docs/STORAGE.md](docs/STORAGE.md) — IndexedDB schema
+- [docs/CAPTURE.md](docs/CAPTURE.md) — capture paths
+- [docs/RESEARCH-PIPELINE.md](docs/RESEARCH-PIPELINE.md) — agents & synthesis
+- [docs/CITATIONS.md](docs/CITATIONS.md) — anchor grammar
+- [docs/MCP.md](docs/MCP.md) — MCP server config
+- [docs/TESTING.md](docs/TESTING.md) — test suite
+
+---
+
+## License
 
 MIT
