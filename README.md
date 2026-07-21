@@ -1,7 +1,7 @@
 # Magpie — AI Research Assistant
 
 ![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)
-![Build Status](https://img.shields.io/badge/build-passing-brightgreen)
+[![Verify Build and Tests](https://github.com/astranero/magpie/actions/workflows/verify.yml/badge.svg)](https://github.com/astranero/magpie/actions/workflows/verify.yml)
 
 A Chrome extension that turns your browser into a personal research library. Capture pages and PDFs, search everything you've collected, chat with your sources, and run multi-agent deep research — all with source-grounded citations.
 

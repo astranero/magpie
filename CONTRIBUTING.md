@@ -25,7 +25,7 @@ In short, when you submit code changes, your submissions are understood to be un
 
 ## Report bugs using Github's [issues](https://github.com/astranero/magpie/issues)
 
-We use GitHub issues to track public bugs. Report a bug by [opening a new issue](); it's that easy!
+We use GitHub issues to track public bugs. Report a bug by [opening a new issue](https://github.com/astranero/magpie/issues/new); it's that easy!
 
 ## Write bug reports with detail, background, and sample code
 
@@ -34,7 +34,7 @@ We use GitHub issues to track public bugs. Report a bug by [opening a new issue]
 - A quick summary and/or background
 - Steps to reproduce
 - Be specific!
-- Give sample code if you can. MyUsing `markdown` to format your code snippets is helpful.
+- Give sample code if you can. Using `markdown` to format your code snippets is helpful.
 - What you expected would happen
 - What actually happened
 - Notes (possibly including why you think this might be happening, or stuff you tried that didn't work)
