@@ -1010,7 +1010,13 @@ loadChatHistory(activeChatId).then(() => {
       const res = await msg('GET_DOCUMENT', { docId });
       if (res.success && res.document) {
         const full = res.document as LocalDocument;
-        setGlobalDocuments(prev => [...prev.filter(d => d.id !== docId), full]);
+        // LRU cache: keep only the 5 most recently viewed hydrated docs.
+        // Evicted docs are re-fetched on demand from GET_DOCUMENT.
+        setGlobalDocuments(prev => {
+          const filtered = prev.filter(d => d.id !== docId);
+          const next = [...filtered, full];
+          return next.length > 5 ? next.slice(next.length - 5) : next;
+        });
       }
     }
     if (returnView) docReturnViewRef.current = returnView;

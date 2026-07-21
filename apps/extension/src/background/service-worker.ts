@@ -90,6 +90,22 @@ function startOffscreenHealthCheck() {
 // Call on startup
 startOffscreenHealthCheck();
 
+// Sidepanel process health check. The renderer process (shared by sidepanel +
+// offscreen) can be killed by Chrome OOM without the SW being notified.
+// Periodically ping the sidepanel; if it's gone (and wasn't explicitly closed
+// by the user), mark it closed so the next icon click reopens it fresh.
+self.setInterval(async () => {
+  for (const [tabId, open] of sidePanelOpen) {
+    if (!open) continue;
+    try {
+      await chrome.runtime.sendMessage({ action: 'SIDEPANEL_HEALTH_CHECK' });
+    } catch {
+      // Sidepanel process is dead — mark closed so next click reopens
+      sidePanelOpen.set(tabId, false);
+    }
+  }
+}, 120_000);
+
 // ─────────────────────────────────────────────
 // Defaults and State
 // ─────────────────────────────────────────────
@@ -164,7 +180,12 @@ chrome.action.onClicked.addListener((tab) => {
   } else {
     // Fire setOptions without awaiting, then open() while the gesture is live.
     chrome.sidePanel.setOptions({ tabId, path: 'sidepanel.html', enabled: true });
-    chrome.sidePanel.open({ tabId }).catch((e) => console.warn('sidePanel.open failed:', e));
+    chrome.sidePanel.open({ tabId }).catch((e) => {
+      console.warn('sidePanel.open failed:', e);
+      // The renderer process was likely killed by OOM. Reload the entire
+      // extension so the NEXT icon click starts from a clean state.
+      chrome.runtime.reload();
+    });
     sidePanelOpen.set(tabId, true);
   }
 });

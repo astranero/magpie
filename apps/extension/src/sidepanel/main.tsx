@@ -18,6 +18,24 @@ setInterval(() => {
   } catch { /* no performance.memory */ }
 }, 5000);
 
+// Respond to SW queries: heap report + health check.
+// The SW uses GET_HEAP to monitor combined renderer memory and
+// SIDEPANEL_HEALTH_CHECK to detect if the renderer process was killed.
+chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+  if (msg.action === 'GET_HEAP') {
+    try {
+      const m = (performance as any).memory;
+      sendResponse({ heapMB: m ? Math.round(m.usedJSHeapSize / 1048576) : 0 });
+    } catch { sendResponse({ heapMB: 0 }); }
+    return true;
+  }
+  if (msg.action === 'SIDEPANEL_HEALTH_CHECK') {
+    sendResponse({ ok: true });
+    return true;
+  }
+  return false;
+});
+
 // Dark mode: follows the OS by default; the Theme setting (Settings →
 // Appearance) overrides with explicit light/dark. Toggles the .dark class the
 // design tokens are keyed on (previously the theme was dead code — nothing

@@ -5,7 +5,7 @@ import { chunkDocument, makeDocShortId } from '../lib/chunker';
 import { buildFrontmatter } from '../lib/frontmatter';
 import { addChunksToVectorStore, searchSessionChunks, resetSessionIndex } from '../lib/vector-store';
 import { getJob, updateJob, getPage, savePage, listPages } from '../lib/research-store';
-import { pdfUrlToBody, recreateOffscreen } from '../lib/pdf-parser';
+import { pdfUrlToBody, recreateOffscreen, recycleOffscreenWorker } from '../lib/pdf-parser';
 import { checkContentQuality, extractDoi } from '../lib/quality-gate';
 import { isAcademicQuery } from '../lib/query-intent';
 import { getResearchLimits, getResearchDepth, getSynthesisCharBudget, getSourceQuality, getAcademicDepth, RESEARCH_LIMITS, ResearchLimits, SourceQuality, AcademicDepth } from '../lib/research-limits';
@@ -2257,22 +2257,39 @@ async function getOffscreenHeap(): Promise<number | undefined> {
   } catch { return undefined; }
 }
 
+/** Combined heap: offscreen + sidepanel (they share a renderer process). */
+async function getCombinedHeap(): Promise<number | undefined> {
+  const offscreen = await getOffscreenHeap();
+  let sidepanel = 0;
+  try {
+    const res = await chrome.runtime.sendMessage({ action: 'GET_HEAP' }).catch(() => undefined) as any;
+    sidepanel = res?.heapMB ?? 0;
+  } catch { /* no sidepanel open */ }
+  if (offscreen === undefined) return undefined;
+  return offscreen + sidepanel;
+}
+
 /**
  * GUARANTEED heap reset. Mid-SW-life the renderer heap only RATCHETS UP — Chrome
  * pools the renderer process so closeDocument()+recreate doesn't free it (measured:
  * heap grew across every reclaimed stage boundary). The ONLY real reset is a full
  * extension restart, which Chrome's ~5-min SW recycle does involuntarily and the
  * run resumes cleanly from its per-stage checkpoint. So before a stage that would
- * push an already-high heap over the ~2.9 GB renderer-crash ceiling, restart
- * proactively. Runs at the TOP of every stage (incl. stage 1, which can inherit a
- * hot offscreen from a just-finished run in the same SW life). Returns true if it
- * triggered a reload (caller should stop — this context is being torn down).
+ * push an already-high heap over the ~2 GB renderer-crash ceiling, restart
+ * proactively. Uses combined heap (offscreen + sidepanel + WASM estimate) so the
+ * threshold accounts for the whole shared process, not just the offscreen JS heap.
+ * Runs at the TOP of every stage (incl. stage 1, which can inherit a hot offscreen
+ * from a just-finished run in the same SW life). Returns true if it triggered a
+ * reload (caller should stop — this context is being torn down).
  */
 async function guardHeapOrReload(stage: number, rounds: number, onProgress: (s: string) => void): Promise<boolean> {
-  const heapMB = await getOffscreenHeap();
-  if (heapMB !== undefined && heapMB >= 1800) {
-    crumb('research', 'preemptive reload — heap in danger zone', { heapMB, stage });
-    onProgress(`[STAGE ${stage}/${rounds}] Memory high (${heapMB} MB) — restarting to reclaim (resumes automatically)…`);
+  const combinedMB = await getCombinedHeap();
+  // 1000 MB threshold: offscreen + sidepanel + WASM must stay under Chrome's
+  // ~2 GB per-renderer-process limit. The sidepanel alone adds ~200-500 MB and
+  // WASM inference adds ~100-300 MB, so 1000 MB offscreen is the safe ceiling.
+  if (combinedMB !== undefined && combinedMB >= 1000) {
+    crumb('research', 'preemptive reload — combined heap in danger zone', { combinedMB, stage });
+    onProgress(`[STAGE ${stage}/${rounds}] Memory high (${combinedMB} MB combined) — restarting to reclaim (resumes automatically)…`);
     await updateJob({ phase: 'gathering' }).catch(() => {});
     chrome.runtime.reload(); // tears down this context; nothing after here runs
     await new Promise(() => {}); // park until the reload lands
@@ -3356,6 +3373,7 @@ async function runDeeperResearch(
     onProgress(`[STAGE ${stage}/${rounds}] Reclaiming memory before next stage…`);
     crumb('research', 'stage end', { stage, sources: agents.reduce((n, a) => n + a.sources.length, 0), briefWords: (stageBriefs[stage - 1] || '').split(/\s+/).filter(Boolean).length });
     resetSessionIndex(projectId);
+    recycleOffscreenWorker(); // reclaim WASM heap before next stage
     await recreateOffscreen().catch(() => {});
   }
 
