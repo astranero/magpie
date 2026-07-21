@@ -70,7 +70,7 @@ let parseWorker: Worker;
 let parseReqSeq = 0;
 const parsePending = new Map<number, { resolve: (v: any) => void; reject: (e: any) => void }>();
 let parseCount = 0;
-const PARSE_RECYCLE_EVERY = 15;
+const PARSE_RECYCLE_EVERY = 5;
 let parseRespawns = 0;
 let parseRespawnWindowStart = Date.now();
 
@@ -129,7 +129,7 @@ function prestripHtml(rawHtml: string): string {
   // A giant scraped page (multi-MB HTML) expands 5–10× as a DOM; 3 MB is ample for
   // article extraction, so truncate the boilerplate tail.
   const MAX_HTML = 3_000_000;
-  let html = rawHtml.length > MAX_HTML ? rawHtml.slice(0, MAX_HTML) : rawHtml;
+  const html = rawHtml.length > MAX_HTML ? rawHtml.slice(0, MAX_HTML) : rawHtml;
   // <script>/<link>/<style> would make Chrome fire CSP "script blocked" + preload
   // fetches even in a DOMParser doc; <svg> sprites/<template>/comments just bloat.
   return html
@@ -240,8 +240,8 @@ export interface EmbeddedImage {
   height: number;
 }
 
-const MAX_DOC_IMAGES = 40;
-const MAX_IMAGE_DATAURL = 1_500_000;   // ~1.1 MB binary
+const MAX_DOC_IMAGES = 20;
+const MAX_IMAGE_DATAURL = 700_000;   // ~500 KB binary
 const MIN_IMAGE_DIM = 64;
 
 function imageToPngDataUrl(img: any): { dataUrl: string; width: number; height: number } | null {
@@ -356,7 +356,7 @@ async function parsePdfOpfs(opfsName: string, silent?: boolean): Promise<{ pages
 // proceedings, a scanned book) buffers entirely in memory here and, with pdf.js
 // structures on top, can OOM the offscreen renderer. Cap it: skip oversize PDFs
 // (the run continues with its other sources) rather than risk the whole process.
-const MAX_PDF_URL_MB = 50;
+const MAX_PDF_URL_MB = 30;
 
 async function parsePdfUrl(url: string, silent?: boolean): Promise<{ pages: string[]; imagePages: { index: number; dataUrl: string }[]; images: EmbeddedImage[]; bytes: number }> {
   let sizeMb = 0;
@@ -401,11 +401,7 @@ async function parsePdfData(data: Uint8Array, silent?: boolean): Promise<{ pages
   const seenImageHashes = new Set<string>();
 
   const pageLimit = Math.min(pdf.numPages, MAX_PDF_PAGES);
-  // Rendering scanned pages for OCR only makes sense for small PDFs — a big
-  // book's image-heavy pages are what stalled the parse, and OCR-ing hundreds
-  // of pages is infeasible. Big docs extract text only.
-  const renderScanned = pageLimit <= 40;
-  const MAX_SCANNED_RENDERS = 12;
+  // Scanned-page OCR rendering is disabled — image-only pages get a placeholder.
   postProgress(0, pageLimit);   // document opened — parse begins
   try {
     for (let p = 1; p <= pageLimit; p++) {
@@ -440,35 +436,10 @@ async function parsePdfData(data: Uint8Array, silent?: boolean): Promise<{ pages
         // render it to a canvas for the vision model. But this is EXPENSIVE
         // (full-page raster + PNG), and doing it for the image-heavy early
         // pages of a big book (cover, TOC, screenshots) is what stalled the
-        // whole parse. So: only render for reasonably small PDFs (OCR-ing
-        // hundreds of pages is infeasible anyway), cap the number of renders,
-        // and time-guard each one so a slow render can't hang the parse.
+        // whole parse. Scanned-page OCR rendering is disabled — image-only
+        // pages get a placeholder marker instead.
         if (rawText.length < 20) {
           pages.push(rawText || `*(page ${p}: image / scanned)*`);
-          if (renderScanned && imagePages.length < MAX_SCANNED_RENDERS) {
-            const viewport = page.getViewport({ scale: 2 });
-            const canvas = document.createElement('canvas');
-            canvas.width = viewport.width;
-            canvas.height = viewport.height;
-            const ctx = canvas.getContext('2d');
-            if (ctx) {
-              const task = page.render({ canvasContext: ctx, viewport, canvas } as any);
-              try {
-                await Promise.race([
-                  task.promise,
-                  new Promise((_, rej) => setTimeout(() => rej(new Error('render timeout')), 15000)),
-                ]);
-                imagePages.push({ index: p, dataUrl: canvas.toDataURL('image/png') });
-              } catch {
-                try { task.cancel(); } catch { /* ignore */ }
-              } finally {
-                // Free the canvas backing store immediately — a scale-2 full-page
-                // raster is multi-MB, and letting a dozen linger balloons the
-                // offscreen heap. Zeroing the dimensions releases the pixel buffer.
-                canvas.width = 0; canvas.height = 0;
-              }
-            }
-          }
           continue;
         }
 
@@ -483,6 +454,7 @@ async function parsePdfData(data: Uint8Array, silent?: boolean): Promise<{ pages
         // whole import silently times out. Also yield periodically so the
         // offscreen event loop (and the worker keep-alive) stays responsive.
         page.cleanup();
+        if (typeof (page as any).destroy === 'function') (page as any).destroy();
         if (p % 10 === 0 || p === pageLimit) { postProgress(p, pageLimit); await new Promise(r => setTimeout(r, 0)); }
       }
     }
@@ -510,7 +482,7 @@ async function parsePdfData(data: Uint8Array, silent?: boolean): Promise<{ pages
 // while a handler is in flight; parse progress also refreshes `lastActivity`.
 let lastActivity = Date.now();
 let inFlight = 0;
-const IDLE_CLOSE_MS = 90_000;
+const IDLE_CLOSE_MS = 60_000;
 setInterval(() => {
   if (inFlight > 0) return; // busy — closing now would kill in-flight work
   if (Date.now() - lastActivity >= IDLE_CLOSE_MS) {
