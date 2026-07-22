@@ -208,7 +208,11 @@ export async function searchSessionChunks(
     // concurrently with a research run's ONNX batch → WASM OOM → renderer crash.
     // `priority` lets an interactive chat query jump ahead of the run's queue so
     // the panel answers in seconds instead of freezing until the run finishes.
-    const res: any = await sendToOffscreen({ action: 'OFFSCREEN_GET_EMBEDDINGS', texts: [searchTerms], kind: 'query' }, undefined, { priority: !!opts?.priority });
+    // Capped well below the 3-minute offscreen default: this is a live search
+    // box, and lexical (BM25) search is a correct, near-instant fallback — an
+    // uncached model needing a first-time network download (e.g. a fresh CI
+    // profile) must not make every search wait minutes before showing results.
+    const res: any = await sendToOffscreen({ action: 'OFFSCREEN_GET_EMBEDDINGS', texts: [searchTerms], kind: 'query' }, 15_000, { priority: !!opts?.priority });
     if (res?.ok && res.embeddings && res.embeddings[0]) {
       queryVector = res.embeddings[0];
     }

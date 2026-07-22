@@ -18,8 +18,13 @@
 // GitHub Enterprise deployments can register their own OAuth app; override it
 // via the `githubClientId` setting.
 const COPILOT_CLIENT_ID = 'Iv1.b507a08c87ecfe98';
-/** Default Copilot completions endpoint. Copilot does NOT use OpenAI's /v1 path. */
-export const COPILOT_API_URL = 'https://api.githubcopilot.com';
+/** Default Copilot completions endpoint. `/v1` is the path that has actually
+ *  worked for chat completions (api.githubcopilot.com without /v1 has been
+ *  observed to 401 with "No user or org id found in auth cookie" even with a
+ *  fresh session token + the vscode-style headers). Model listing tries both
+ *  the /v1 and bare paths regardless (see fetchCopilotModels), so this only
+ *  affects the default chat-completions endpoint. */
+export const COPILOT_API_URL = 'https://api.githubcopilot.com/v1';
 export const COPILOT_DEFAULT_MODEL = 'gpt-4o';
 /** Default GitHub host for the OAuth device flow. */
 export const DEFAULT_GITHUB_BASE_URL = 'https://github.com';
@@ -91,6 +96,9 @@ export async function fetchCopilotModels(copilotApiUrl: string, token: string): 
           'Editor-Version': 'vscode/1.95.0',
           'Editor-Plugin-Version': 'copilot-chat/0.22.0',
           'Copilot-Integration-Id': 'vscode-chat',
+          'X-GitHub-Api-Version': '2025-04-01',
+          'OpenAI-Intent': 'conversation-panel',
+          'User-Agent': 'GitHubCopilotChat/0.26.7',
         },
         signal: AbortSignal.timeout(5000),
       });
@@ -132,6 +140,39 @@ export interface CopilotAuth {
 }
 
 const STORAGE_KEY = 'magpie-copilot-auth';
+
+// Pending device-flow state, shared across every side panel so any of them can
+// display the same user code and observe completion. Written by the background
+// service worker (which owns the poll loop), read by each panel via
+// chrome.storage.onChanged. Never contains a long-lived secret — only the
+// short-lived device_code and the user-facing user_code.
+export const COPILOT_PENDING_KEY = 'magpie-copilot-pending';
+
+export interface CopilotPendingAuth {
+  userCode: string;
+  verificationUri: string;
+  /** Device code — used by the background poll loop only. */
+  deviceCode: string;
+  /** Unix ms when the device code expires. */
+  expiresAt: number;
+  status: 'polling' | 'done' | 'error';
+  error?: string;
+}
+
+/** Persist the current device-flow status so all panels can mirror it. */
+export async function setCopilotPending(pending: CopilotPendingAuth | null): Promise<void> {
+  if (pending) {
+    await chrome.storage.local.set({ [COPILOT_PENDING_KEY]: pending });
+  } else {
+    await chrome.storage.local.remove(COPILOT_PENDING_KEY);
+  }
+}
+
+/** Read the current pending device-flow status (if a sign-in is in progress). */
+export async function getCopilotPending(): Promise<CopilotPendingAuth | null> {
+  const s = await chrome.storage.local.get(COPILOT_PENDING_KEY);
+  return (s[COPILOT_PENDING_KEY] as CopilotPendingAuth | undefined) ?? null;
+}
 
 /** Start the device-code flow: returns codes for the user to enter in their browser. */
 export async function startCopilotDeviceFlow(): Promise<CopilotDeviceCode> {
@@ -243,6 +284,24 @@ export async function saveCopilotAuth(accessToken: string): Promise<void> {
     customModel: preferred,
     customModels: models,
   });
+}
+
+/** Re-fetch the Copilot model list using a valid session token (not the
+ *  initial-sign-in-only snapshot) and persist it. Used by the "Refresh
+ *  models" control in Settings and by the chat model picker's refresh
+ *  button, so enterprise users whose model list changes (or was empty at
+ *  sign-in time) can pull it again without signing out and back in. */
+export async function refreshCopilotModels(): Promise<{ models: string[]; apiBase: string }> {
+  const token = await getValidCopilotToken();
+  const s = await chrome.storage.local.get([STORAGE_KEY]);
+  const auth = s[STORAGE_KEY] as CopilotAuth | undefined;
+  const { copilotApiUrl } = await getGithubEndpoints();
+  const apiBase = auth?.apiEndpoint || copilotApiUrl;
+  const models = await fetchCopilotModels(apiBase, token);
+  // Keep both buckets in sync: `copilotModels` for anything Copilot-specific,
+  // `customModels` because that's the shared key the model pickers render.
+  await chrome.storage.local.set({ copilotModels: models, customModels: models });
+  return { models, apiBase };
 }
 
 /** Check if Copilot SSO is configured. */

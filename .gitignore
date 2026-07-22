@@ -31,5 +31,6 @@ yarn-error.log*
 # TypeScript
 *.tsbuildinfo
 
-# Opencode
-.opencode/
+# Opencode (local session/cache state only — skills are tracked)
+.opencode/*
+!.opencode/skill/

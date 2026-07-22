@@ -40,18 +40,15 @@ export default defineConfig({
       targets: [
         {
           src: 'src/manifest.json',
-          dest: '.',
-          rename: { stripBase: 1 }
+          dest: '.'
         },
         {
           src: 'src/icons/**/*',
-          dest: 'icons',
-          rename: { stripBase: 2 }
+          dest: 'icons'
         },
         {
           src: '../../node_modules/onnxruntime-web/dist/ort-wasm-simd-threaded*',
-          dest: 'transformers',
-          rename: { stripBase: 4 }
+          dest: 'transformers'
         }
       ]
     })

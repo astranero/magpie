@@ -16,7 +16,8 @@ export async function getProviderSettings(): Promise<Record<string, string>> {
   }
   // GitHub Copilot SSO: sentinel key triggers token resolution from the stored OAuth token
   let apiKey = s.customKey || '';
-  if (apiKey === '__copilot_sso__') {
+  const isCopilot = apiKey === '__copilot_sso__';
+  if (isCopilot) {
     try { apiKey = await getValidCopilotToken(); }
     catch (e: any) { throw new Error(`Copilot SSO: ${e.message || 'token refresh failed'} — sign in again in Settings.`); }
   }
@@ -26,8 +27,34 @@ export async function getProviderSettings(): Promise<Record<string, string>> {
     apiKey,
     endpoint,
     model: s.customModel || 'gpt-4o',
-    visionModel: s.visionModel || ''
+    visionModel: s.visionModel || '',
+    // String, not boolean — this whole object is typed Record<string, string>
+    // and callers already destructure it that way.
+    isCopilot: isCopilot ? 'true' : ''
   };
+}
+
+/**
+ * Build the request headers for a chat-completion-style call. GitHub
+ * Copilot's API (api.githubcopilot.com) requires Editor-Version,
+ * Editor-Plugin-Version, and Copilot-Integration-Id on every call — without
+ * them it 401s with "No user or org id found in auth cookie" even with a
+ * perfectly valid session token. BYOK providers get the plain OpenAI-style
+ * headers only, since sending GitHub-specific headers to an arbitrary
+ * third-party endpoint would be pointless at best.
+ */
+export function buildProviderHeaders(apiKey: string, isCopilot: boolean): Record<string, string> {
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  if (apiKey) headers['Authorization'] = `Bearer ${apiKey}`;
+  if (isCopilot) {
+    headers['Editor-Version'] = 'vscode/1.95.0';
+    headers['Editor-Plugin-Version'] = 'copilot-chat/0.22.0';
+    headers['Copilot-Integration-Id'] = 'vscode-chat';
+    headers['X-GitHub-Api-Version'] = '2025-04-01';
+    headers['OpenAI-Intent'] = 'conversation-panel';
+    headers['User-Agent'] = 'GitHubCopilotChat/0.26.7';
+  }
+  return headers;
 }
 
 /**
@@ -59,16 +86,11 @@ export function formatProviderError(status: number, body: string): string {
 }
 
 export async function chatWithCustom(systemPrompt: string, history: any[], userPrompt: string, signal?: AbortSignal, modelOverride?: string): Promise<string> {
-  const { apiKey, endpoint, model: defaultModel } = await getProviderSettings();
+  const { apiKey, endpoint, model: defaultModel, isCopilot } = await getProviderSettings();
   const model = modelOverride || defaultModel;
   if (!endpoint) throw new Error('Custom endpoint missing.');
 
-  const headers: Record<string, string> = {
-    'Content-Type': 'application/json'
-  };
-  if (apiKey) {
-    headers['Authorization'] = `Bearer ${apiKey}`;
-  }
+  const headers = buildProviderHeaders(apiKey, !!isCopilot);
 
   const res = await fetch(endpoint, {
     method: 'POST',
@@ -132,12 +154,11 @@ export async function chatWithCustomStream(
     if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; }
   }, { once: true });
 
-  const { apiKey, endpoint, model: defaultModel } = await getProviderSettings();
+  const { apiKey, endpoint, model: defaultModel, isCopilot } = await getProviderSettings();
   const model = modelOverride || defaultModel;
   if (!endpoint) throw new Error('Custom endpoint missing.');
 
-  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-  if (apiKey) headers['Authorization'] = `Bearer ${apiKey}`;
+  const headers = buildProviderHeaders(apiKey, !!isCopilot);
 
   const res = await fetch(endpoint, {
     method: 'POST',
@@ -228,11 +249,10 @@ function safeParseArgs(raw: unknown): any {
 export async function chatWithTools(
   messages: any[], tools: ToolDef[], signal?: AbortSignal, modelOverride?: string
 ): Promise<{ toolCalls: ToolCall[]; content: string; assistantMessage: any }> {
-  const { apiKey, endpoint, model: defaultModel } = await getProviderSettings();
+  const { apiKey, endpoint, model: defaultModel, isCopilot } = await getProviderSettings();
   const model = modelOverride || defaultModel;
   if (!endpoint) throw new Error('Custom endpoint missing.');
-  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-  if (apiKey) headers['Authorization'] = `Bearer ${apiKey}`;
+  const headers = buildProviderHeaders(apiKey, !!isCopilot);
 
   const res = await fetch(endpoint, {
     method: 'POST',

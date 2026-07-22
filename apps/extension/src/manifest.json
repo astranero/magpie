@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Magpie",
   "version": "2.0.0",
-  "description": "Magpie collects your research like a clever bird \u2014 your personal treasure trove of knowledge to search and chat with. Supports Ollama, Gemini, and OpenAI.",
+  "description": "Magpie collects your research like a clever bird \u2014 your personal treasure trove of knowledge to search and chat with. GitHub Copilot SSO or your own API key.",
   "permissions": [
     "sidePanel",
     "activeTab",

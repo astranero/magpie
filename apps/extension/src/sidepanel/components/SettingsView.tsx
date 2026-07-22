@@ -7,52 +7,110 @@ import { CustomSkill, sanitizeCustomSkill } from '../../lib/commands';
 import { McpServerConfig, McpConnection, getMcpServers, saveMcpServers, isAllowedMcpUrl } from '../../lib/mcp-client';
 import { SearchApiKeys, getSearchApiKeys, saveSearchApiKeys } from '../../lib/search-providers';
 import { getCrashLog, clearCrashLog, formatCrashLog } from '../../lib/crash-log';
+import { COPILOT_PENDING_KEY, type CopilotPendingAuth } from '../../lib/copilot-auth';
 
 // ── GitHub Copilot SSO section ────────────────────────────────────────────
-function CopilotSSOSection({ enterpriseGitHubUrl, setEnterpriseGitHubUrl, saveSettings }: {
+function CopilotSSOSection({ enterpriseGitHubUrl, setEnterpriseGitHubUrl, saveSettings, customModel, setCustomModel, customModels }: {
   enterpriseGitHubUrl: string;
   setEnterpriseGitHubUrl: (v: string) => void;
   saveSettings: () => void;
+  /** Only meaningful once signed in — Copilot sign-in writes its fetched
+   *  models into the same shared `customModel`/`customModels` storage keys
+   *  BYOK uses, so App.tsx's state doubles as the Copilot model state too. */
+  customModel: string;
+  setCustomModel: (v: string) => void;
+  customModels: string[];
 }) {
   const [status, setStatus] = useState<'idle' | 'polling' | 'done' | 'error'>('idle');
   const [configured, setConfigured] = useState(false);
   const [userCode, setUserCode] = useState('');
   const [verifyUrl, setVerifyUrl] = useState('');
   const [error, setError] = useState('');
+  const [copied, setCopied] = useState(false);
   const msg = (action: string, data?: any) =>
     new Promise<any>((res) => chrome.runtime.sendMessage({ action, ...data }, res));
 
+  // Reflect a pending device-flow record (shared across every panel via storage).
+  const applyPending = (p: CopilotPendingAuth | null) => {
+    if (!p) return;
+    setUserCode(p.userCode);
+    setVerifyUrl(p.verificationUri);
+    if (p.status === 'done') {
+      setStatus('done'); setConfigured(true);
+    } else if (p.status === 'error') {
+      setStatus('error'); setError(p.error || 'Sign-in failed');
+    } else {
+      setStatus('polling');
+    }
+  };
+
   useEffect(() => {
     msg('COPILOT_STATUS').then(r => { if (r?.configured) setConfigured(true); });
+    // Resume/mirror an in-progress sign-in started in this or another panel.
+    chrome.storage.local.get(COPILOT_PENDING_KEY).then(s => applyPending(s[COPILOT_PENDING_KEY] || null));
+    // Live-sync device code + completion across all open side panels.
+    const onChanged = (changes: Record<string, chrome.storage.StorageChange>, area: string) => {
+      if (area !== 'local' || !changes[COPILOT_PENDING_KEY]) return;
+      applyPending((changes[COPILOT_PENDING_KEY].newValue as CopilotPendingAuth | undefined) || null);
+    };
+    chrome.storage.onChanged.addListener(onChanged);
+    return () => chrome.storage.onChanged.removeListener(onChanged);
   }, []);
 
   const startSignIn = async () => {
-    setStatus('polling'); setError('');
+    setStatus('polling'); setError(''); setCopied(false);
     try {
+      // Background begins polling immediately and persists the code to storage;
+      // the onChanged listener above keeps this and every other panel in sync.
       const codes = await msg('COPILOT_START_DEVICE_FLOW');
       if (!codes?.user_code) throw new Error('No device code returned');
       setUserCode(codes.user_code);
       setVerifyUrl(codes.verification_uri);
-      // Open the verification URL in a new tab for the user
-      chrome.tabs.create({ url: `${codes.verification_uri}?user_code=${codes.user_code}` });
-      // Poll in the background
-      const result = await msg('COPILOT_POLL_TOKEN', {
-        deviceCode: codes.device_code,
-        interval: codes.interval,
-        expiresIn: codes.expires_in,
-      });
-      if (result?.success) { setStatus('done'); setConfigured(true); }
-      else throw new Error(result?.error || 'Sign-in failed');
     } catch (e: any) {
       setError(e.message || 'Sign-in failed');
       setStatus('error');
     }
   };
 
+  const copyCode = async () => {
+    try {
+      await navigator.clipboard.writeText(userCode);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch { /* clipboard unavailable — user can still select the code */ }
+  };
+
+  // Open the verification page WITHOUT stealing focus, so the side panel stays
+  // put and the user can copy the code first, then switch when ready.
+  const openVerification = () => {
+    chrome.tabs.create({ url: verifyUrl || 'https://github.com/login/device', active: false });
+  };
+
   const signOut = async () => {
     await msg('COPILOT_SIGN_OUT');
-    setConfigured(false); setStatus('idle');
+    setConfigured(false); setStatus('idle'); setUserCode(''); setVerifyUrl(''); setError('');
   };
+
+  const [modelsRefreshing, setModelsRefreshing] = useState(false);
+  const [modelsError, setModelsError] = useState('');
+
+  const refreshModels = async () => {
+    setModelsRefreshing(true); setModelsError('');
+    try {
+      const res = await msg('COPILOT_FETCH_MODELS');
+      // The background handler persists the new list to chrome.storage.local
+      // (customModels/copilotModels); App.tsx's storage.onChanged listener
+      // picks that up and flows it back down as the `customModels` prop —
+      // no local state duplication needed here.
+      if (!res?.success) setModelsError(res?.error || 'Failed to fetch models');
+    } catch (e: any) {
+      setModelsError(e?.message || 'Failed to fetch models');
+    } finally {
+      setModelsRefreshing(false);
+    }
+  };
+
+  const selectModel = (m: string) => { setCustomModel(m); setTimeout(saveSettings, 0); };
 
   if (configured) {
     return (
@@ -62,9 +120,44 @@ function CopilotSSOSection({ enterpriseGitHubUrl, setEnterpriseGitHubUrl, saveSe
           <span className="text-xs font-medium text-foreground">Connected to GitHub Copilot</span>
           {enterpriseGitHubUrl && <span className="text-[10px] text-muted-foreground">({new URL(enterpriseGitHubUrl).hostname})</span>}
         </div>
-        <p className="text-[10px] text-muted-foreground">
-          Chat uses your organization's Copilot API. Model selection is handled by Copilot.
-        </p>
+
+        {/* Copilot model picker — clearly labeled so it isn't mistaken for the
+            BYOK "AI Provider Configuration" model select further down. */}
+        <div className="space-y-1.5 rounded-lg border border-border bg-muted/20 p-2.5">
+          <div className="flex items-center justify-between">
+            <label className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide">GitHub Copilot model</label>
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-6 rounded-md text-[10px] px-2"
+              onClick={refreshModels}
+              disabled={modelsRefreshing}
+            >
+              {modelsRefreshing ? 'Refreshing…' : 'Refresh'}
+            </Button>
+          </div>
+          {customModels.length > 0 ? (
+            <Select value={customModel} onValueChange={v => selectModel(v as string)}>
+              <SelectTrigger className="h-8 text-xs rounded-md">
+                <SelectValue placeholder="Select a model" />
+              </SelectTrigger>
+              <SelectContent>
+                {customModels.map(m => <SelectItem key={m} value={m}>{m}</SelectItem>)}
+                {!customModels.includes(customModel) && customModel && (
+                  <SelectItem value={customModel}>{customModel}</SelectItem>
+                )}
+              </SelectContent>
+            </Select>
+          ) : (
+            <p className="text-[10px] text-muted-foreground leading-snug">
+              {customModel
+                ? <>No model list available from your Copilot endpoint — using <span className="font-mono">{customModel}</span>. Some enterprise deployments don't expose a models list; try Refresh, or contact your admin for the exact model id.</>
+                : 'No models loaded yet — click Refresh.'}
+            </p>
+          )}
+          {modelsError && <p className="text-[10px] text-destructive">{modelsError}</p>}
+        </div>
+
         <Button variant="secondary" size="sm" className="rounded-lg text-xs" onClick={signOut}>Sign out</Button>
         {/* Enterprise URL config — always visible, even when signed in */}
         <div className="pt-2 border-t border-border">
@@ -76,6 +169,9 @@ function CopilotSSOSection({ enterpriseGitHubUrl, setEnterpriseGitHubUrl, saveSe
             onChange={e => { setEnterpriseGitHubUrl(e.target.value); setTimeout(saveSettings, 0); }}
             className="mt-1 w-full rounded-md border border-border bg-background px-2 py-1 text-[11px] text-foreground placeholder:text-muted-foreground focus:border-primary focus:outline-none"
           />
+          <p className="mt-1 text-[10px] text-muted-foreground">
+            Changed hosts? Click Refresh above to pull that host's model list.
+          </p>
         </div>
       </div>
     );
@@ -108,13 +204,22 @@ function CopilotSSOSection({ enterpriseGitHubUrl, setEnterpriseGitHubUrl, saveSe
         </>
       ) : status === 'polling' ? (
         <div className="space-y-2 rounded-lg border border-border bg-muted/30 p-3">
-          <p className="text-xs font-medium">Enter this code on GitHub:</p>
-          <code className="block text-center text-lg font-bold font-mono tracking-widest text-primary select-all">{userCode}</code>
+          <p className="text-xs font-medium">1. Copy this code:</p>
+          <div className="flex items-center gap-2">
+            <code className="flex-1 text-center text-lg font-bold font-mono tracking-widest text-primary select-all">{userCode}</code>
+            <Button variant="secondary" size="sm" className="rounded-lg text-xs shrink-0" onClick={copyCode}>
+              {copied ? 'Copied' : 'Copy'}
+            </Button>
+          </div>
+          <p className="text-xs font-medium pt-1">2. Open GitHub and paste it:</p>
+          <Button variant="secondary" size="sm" className="rounded-lg text-xs w-full" onClick={openVerification}>
+            Open {verifyUrl || 'github.com/login/device'} ↗
+          </Button>
           <p className="text-[10px] text-muted-foreground">
-            A tab has opened at {verifyUrl}. Paste the code and authorize.
+            Opens in a background tab so this panel stays open. The code also appears in any other tab's panel.
           </p>
           <p className="text-[10px] text-muted-foreground animate-pulse">Waiting for authorization…</p>
-          <Button variant="secondary" size="sm" className="rounded-lg text-xs w-full mt-1" onClick={() => { setStatus('idle'); setError(''); }}>Cancel</Button>
+          <Button variant="ghost" size="sm" className="rounded-lg text-xs w-full mt-1" onClick={() => { setStatus('idle'); setError(''); }}>Cancel</Button>
         </div>
       ) : (
         <p className="text-xs text-green-600 font-medium">Connected successfully. Reload the panel to start chatting.</p>
@@ -390,7 +495,14 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
 
       {/* ── GitHub Copilot SSO ── */}
       <Section id="copilot" title="GitHub Copilot" subtitle="Sign in with your enterprise GitHub account. Set your enterprise URL below if using GHES." defaultOpen={true}>
-        <CopilotSSOSection enterpriseGitHubUrl={enterpriseGitHubUrl} setEnterpriseGitHubUrl={setEnterpriseGitHubUrl} saveSettings={saveSettings} />
+        <CopilotSSOSection
+          enterpriseGitHubUrl={enterpriseGitHubUrl}
+          setEnterpriseGitHubUrl={setEnterpriseGitHubUrl}
+          saveSettings={saveSettings}
+          customModel={customModel}
+          setCustomModel={setCustomModel}
+          customModels={customModels}
+        />
       </Section>
 
       {/* ── Custom Provider ── */}

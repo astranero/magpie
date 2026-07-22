@@ -37,7 +37,7 @@ A Chrome extension that turns your browser into a personal research library. Cap
 
 ### Prerequisites
 
-- Node.js (v18 or later)
+- Node.js (v18 or later) — v20 LTS recommended
 - npm (v9 or later)
 
 ### Installation
@@ -48,20 +48,32 @@ A Chrome extension that turns your browser into a personal research library. Cap
    cd magpie
    ```
 
-2. Install dependencies and build:
+2. Install dependencies (from the repo root — this is an npm workspaces monorepo):
    ```bash
-   cd apps/extension
    npm install
-   npm run build
    ```
 
-3. Load the extension in Chrome:
-   - Open `chrome://extensions`
+3. Build the extension:
+   ```bash
+   npm run build:extension
+   ```
+   The build is cross-platform (macOS, Linux, and Windows PowerShell/cmd) and
+   outputs to `apps/extension/dist`.
+
+4. Load the extension in Chrome or Edge:
+   - Open `chrome://extensions` (or `edge://extensions`)
    - Enable "Developer mode"
    - Click "Load unpacked"
    - Select the `apps/extension/dist` folder
 
-4. Click the Magpie icon in the toolbar to open the side panel
+5. Click the Magpie icon in the toolbar to open the side panel
+
+> **Installing with an AI agent?** See [.opencode/skill/install-magpie/SKILL.md](.opencode/skill/install-magpie/SKILL.md)
+> for a step-by-step guide an agent can follow to clone, build, and load Magpie.
+
+> **Windows note:** if `node`/`npm` aren't on your `PATH`, install Node.js LTS
+> (e.g. `winget install OpenJS.NodeJS.LTS`) and reopen your terminal. If your
+> execution policy blocks `npm.ps1`, call `npm.cmd` directly.
 
 ## Commands
 

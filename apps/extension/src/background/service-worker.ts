@@ -30,7 +30,7 @@ import { replaceChunksForDoc } from '../lib/db';
 import { pdfUrlToBody, pdfOpfsToBody, pdfBase64ToBody, ensureOffscreen as ensureOffscreenDoc, recreateOffscreen } from '../lib/pdf-parser';
 import { setEnsureOffscreen, setRecreateOffscreen, sendToOffscreen } from '../lib/offscreen-client';
 import { crumb, dumpCrashLog, installCrashHandlers, installCrumbReceiver } from '../lib/crash-log';
-import { getProviderSettings, chatWithCustom, chatWithCustomStream, handleFetchCustomModels, chatWithTools, ToolDef } from './llm-client';
+import { getProviderSettings, buildProviderHeaders, chatWithCustom, chatWithCustomStream, handleFetchCustomModels, chatWithTools, ToolDef } from './llm-client';
 import { handleSearchLibrary, handleRecallDocs } from './library-handlers';
 import { handleLinkDocument, handleUnlinkDocument, handleListDocuments, handleGetDocument, handleDeleteDocument, handleGetDocumentCount, handleUpdateDocumentSelection } from './document-handlers';
 import { handleCreateProject, handleListProjects, handleGetProject, handleUpdateProject, handleDeleteProject, handleCreateChat, handleListChats, handleDeleteChat, handleUpdateChat } from './project-handlers';
@@ -453,27 +453,64 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   return false;
 });
 
-import { startCopilotDeviceFlow, pollForAccessToken, saveCopilotAuth, isCopilotConfigured, signOutCopilot } from '../lib/copilot-auth';
+import { startCopilotDeviceFlow, pollForAccessToken, saveCopilotAuth, isCopilotConfigured, signOutCopilot, setCopilotPending, getCopilotPending, refreshCopilotModels } from '../lib/copilot-auth';
 
 type MessageHandler = (request: Record<string, unknown>, sender: chrome.runtime.MessageSender) => Promise<Record<string, unknown>>;
 
+// Owns the device-code poll loop so it survives side-panel teardown. Every
+// panel mirrors progress through the shared `magpie-copilot-pending` storage
+// key rather than holding the promise itself.
+async function runCopilotPoll(deviceCode: string, interval: number, expiresIn: number): Promise<void> {
+  try {
+    const token = await pollForAccessToken(deviceCode, interval, expiresIn);
+    await saveCopilotAuth(token);
+    const pending = await getCopilotPending();
+    if (pending) await setCopilotPending({ ...pending, status: 'done' });
+  } catch (e: any) {
+    const pending = await getCopilotPending();
+    if (pending) await setCopilotPending({ ...pending, status: 'error', error: e?.message || 'Sign-in failed' });
+  }
+}
+
 const messageHandlers: Record<string, MessageHandler> = {
   // ── GitHub Copilot SSO ──
+  // Start the device flow AND begin polling in the background. The panel only
+  // opens the verification tab and mirrors status via storage — it never holds
+  // the poll promise, so switching/closing tabs can't orphan the sign-in.
   COPILOT_START_DEVICE_FLOW: async () => {
     const codes = await startCopilotDeviceFlow();
+    await setCopilotPending({
+      userCode: codes.user_code,
+      verificationUri: codes.verification_uri,
+      deviceCode: codes.device_code,
+      expiresAt: Date.now() + codes.expires_in * 1000,
+      status: 'polling',
+    });
+    // Fire-and-forget: poll loop lives in the service worker.
+    void runCopilotPoll(codes.device_code, codes.interval, codes.expires_in);
     return codes as any;
   },
-  COPILOT_POLL_TOKEN: async (request) => {
-    const token = await pollForAccessToken(
-      request.deviceCode as string,
-      request.interval as number,
-      request.expiresIn as number
-    );
-    await saveCopilotAuth(token);
-    return { success: true };
+  // Legacy/no-op: polling is now driven by COPILOT_START_DEVICE_FLOW. Kept so an
+  // older panel build calling this still resolves once the background finishes.
+  COPILOT_POLL_TOKEN: async () => {
+    const pending = await getCopilotPending();
+    if (pending?.status === 'done') return { success: true };
+    if (pending?.status === 'error') return { success: false, error: pending.error };
+    return { success: true, pending: true };
   },
   COPILOT_STATUS: async () => ({ configured: await isCopilotConfigured() }),
-  COPILOT_SIGN_OUT: async () => { await signOutCopilot(); return {}; },
+  COPILOT_SIGN_OUT: async () => { await signOutCopilot(); await setCopilotPending(null); return {}; },
+  // Re-fetch the enterprise/org model list using a live session token —
+  // distinct from FETCH_CUSTOM_MODELS, which uses the BYOK key/URL and would
+  // send the Copilot sentinel key as a literal (invalid) API key.
+  COPILOT_FETCH_MODELS: async () => {
+    try {
+      const { models, apiBase } = await refreshCopilotModels();
+      return { success: true, models, apiBase };
+    } catch (e: any) {
+      return { success: false, error: e?.message || 'Failed to fetch Copilot models' };
+    }
+  },
 
   ENSURE_OFFSCREEN: async () => {
     await ensureOffscreen();
@@ -2535,11 +2572,10 @@ async function agenticGather(
  * This catches synonym mismatches, misspellings, and conceptual gaps.
  */
 async function expandQuery(userQuery: string, signal: AbortSignal): Promise<string[]> {
-  const { apiKey, endpoint, model } = await getProviderSettings();
+  const { apiKey, endpoint, model, isCopilot } = await getProviderSettings();
   if (!endpoint || !model) return [];
 
-  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-  if (apiKey) headers['Authorization'] = `Bearer ${apiKey}`;
+  const headers = buildProviderHeaders(apiKey, !!isCopilot);
 
   const res = await fetch(endpoint, {
     method: 'POST',
@@ -3766,15 +3802,14 @@ async function fetchViaJina(url: string): Promise<string> {
 // ── Vision: image → text (OCR / description) ──
 // Uses the same OpenAI-compatible endpoint with the configured vision model.
 async function imageToText(dataUrl: string, instruction?: string): Promise<string> {
-  const { apiKey, endpoint, visionModel, model } = await getProviderSettings();
+  const { apiKey, endpoint, visionModel, model, isCopilot } = await getProviderSettings();
   if (!endpoint) throw new Error('Set an API Base URL in Settings first.');
   // trim(): a whitespace-only visionModel ("Use Text Model" sentinel bug) is
   // truthy and would be sent as a literal " " model name — treat it as unset.
   const useModel = (visionModel?.trim()) || model;
   if (!useModel) throw new Error('Set a Vision Model in Settings first.');
 
-  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-  if (apiKey) headers['Authorization'] = `Bearer ${apiKey}`;
+  const headers = buildProviderHeaders(apiKey, !!isCopilot);
 
   const res = await fetch(endpoint, {
     method: 'POST',
