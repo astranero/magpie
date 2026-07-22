@@ -5,7 +5,7 @@ import remarkGfm from 'remark-gfm';
 import remarkMath from 'remark-math';
 import rehypeKatex from 'rehype-katex';
 import { LocalDocument, ChatMessage, ResearchPlan, ResolvedCitation } from '../types';
-import { Send, StopCircle, Sparkles, ChevronDown, ChevronUp, Loader2, Microscope, Search, User, Copy, Check, Paperclip, FileText } from 'lucide-react';
+import { Send, StopCircle, Sparkles, ChevronDown, ChevronUp, Loader2, Microscope, Search, BookOpen, User, Copy, Check, Paperclip, FileText } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { paletteEntries, SlashCommand } from '../../lib/commands';
 import { ErrorBoundary } from './ErrorBoundary';
@@ -76,8 +76,10 @@ interface PlanCardProps {
 }
 
 const PlanCard: React.FC<PlanCardProps> = ({ msgId, plan, onStart, onCancel }) => {
-  const Icon = plan.mode === 'deep' ? Microscope : Search;
-  const modeName = plan.mode === 'deep' ? 'Deep Research' : 'Research';
+  const isAcademic = plan.sourceMode === 'academic';
+  const Icon = isAcademic ? BookOpen : plan.mode === 'deep' ? Microscope : Search;
+  const modeName = isAcademic ? 'Academic Research' : plan.mode === 'deep' ? 'Deep Research' : 'Research';
+  const actionName = isAcademic ? 'academic research' : plan.mode === 'deep' ? 'deep research' : 'research';
   const isPending = plan.status === 'draft' || plan.status === 'refining';
   const isBusy = plan.status === 'loading' || plan.status === 'refining';
   const directives = plan.subQuestions ?? [];
@@ -167,7 +169,7 @@ const PlanCard: React.FC<PlanCardProps> = ({ msgId, plan, onStart, onCancel }) =
                     className="flex-1 h-8 text-xs font-semibold rounded-lg"
                     onClick={() => onStart?.(msgId, plan)}
                   >
-                    Retry {plan.mode === 'deep' ? 'deep research' : 'research'}
+                    Retry {actionName}
                   </Button>
                   <Button
                     variant="ghost"
@@ -191,7 +193,7 @@ const PlanCard: React.FC<PlanCardProps> = ({ msgId, plan, onStart, onCancel }) =
                     disabled={isBusy}
                     onClick={() => onStart?.(msgId, plan)}
                   >
-                    {plan.mode === 'deep' ? 'Start deep research' : 'Start research'}
+                    {`Start ${actionName}`}
                   </Button>
                   <Button
                     variant="ghost"
@@ -629,6 +631,9 @@ const ModelSelector: React.FC<{
 
   if (entries.length === 0) return null;
 
+  const currentEntry = entries.find(e => e.model === currentModel);
+  const isCopilot = currentEntry?.provider === 'copilot';
+
   return (
     <div ref={containerRef} className="relative inline-block text-left">
       <button
@@ -637,6 +642,9 @@ const ModelSelector: React.FC<{
         className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full border border-border bg-card hover:bg-accent text-xs font-semibold text-foreground shadow-sm transition-colors"
       >
         <Sparkles size={11} className="text-primary shrink-0" />
+        {isCopilot && (
+          <span className="text-[9px] font-mono uppercase tracking-wide px-1 rounded bg-primary/10 text-primary shrink-0">Copilot</span>
+        )}
         <span className="truncate max-w-[130px] font-sans text-xs font-semibold">{formatModelName(currentModel) || 'Select model…'}</span>
         <ChevronDown size={11} className="text-muted-foreground shrink-0" />
       </button>
