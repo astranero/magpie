@@ -1106,9 +1106,9 @@ export const ChatView: React.FC<ChatViewProps> = ({
             )}
 
             <div
-              className={`[contain:layout] w-full ${m.role === 'user' ? 'max-w-[85%] rounded-2xl border px-4 py-3 text-sm shadow-sm transition-all leading-relaxed' : 'w-full'} ${
+              className={`[contain:layout] w-full ${m.role === 'user' ? 'max-w-[70%] rounded-xl border px-3 py-2 text-sm' : 'w-full'} ${
                 m.role === 'user'
-                  ? `bg-primary/15 border-primary/30 text-foreground rounded-tr-sm ${m.queued ? 'opacity-70' : ''}`
+                  ? `bg-primary/10 border-primary/20 text-foreground ${m.queued ? 'opacity-70' : ''}`
                   : m.role === 'system'
                   ? 'bg-muted/40 border-border/60 text-muted-foreground w-full rounded-lg'
                   : 'w-full text-foreground'
