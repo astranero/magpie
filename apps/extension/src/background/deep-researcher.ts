@@ -1042,57 +1042,57 @@ async function scrapeUrlList(
   const urlList = [...new Set(urls)].filter(u => !isJunkUrl(u)).slice(0, cap);
   const sources: SourceRecord[] = [];
   const docIds: string[] = [];
-  let i = 1;
-  for (const url of urlList) {
-    if (signal?.aborted) throwIfAborted(signal);
-    try {
-      // Crash-safe resume: pages scraped before a worker/browser death are
-      // served from the persistent job cache instead of the network.
-      const cached = await getPage(url).catch(() => null);
-      let title: string | undefined;
-      let markdown: string | undefined;
 
-      if (cached) {
-        onProgress(`[${label}] Reading ${i}/${urlList.length} (cached): ${url}`);
-        title = cached.title;
-        markdown = cached.markdown;
-      } else {
+  // Parallelize the scrape: fetch + cache all URLs in parallel, then index them
+  // sequentially (heap guard stays ordered). The network fetch is the bottleneck,
+  // so running up to 5 concurrent fetches cuts stage time by 3-4x without
+  // overwhelming the network or the renderer.
+  const CONCURRENT = 5;
+  for (let batch = 0; batch < urlList.length; batch += CONCURRENT) {
+    const chunk = urlList.slice(batch, batch + CONCURRENT);
+    if (signal?.aborted) throwIfAborted(signal);
+
+    // Fetch this batch of URLs in parallel
+    const fetched = await Promise.all(chunk.map(async (url, idx) => {
+      if (signal?.aborted) throwIfAborted(signal);
+      const i = batch + idx + 1;
+      try {
+        const cached = await getPage(url).catch(() => null);
+        if (cached) {
+          return { url, i, title: cached.title, markdown: cached.markdown, cached: true };
+        }
         onProgress(`[${label}] Reading ${i}/${urlList.length}: ${url}`);
         const scraped = await scrapeUrl(url, signal);
         if (scraped?.markdown) {
-          title = scraped.title;
-          markdown = scraped.markdown;
-          await savePage({ url, title, markdown, label }).catch(() => {});
+          await savePage({ url, title: scraped.title, markdown: scraped.markdown, label }).catch(() => {});
+          return { url, i, title: scraped.title, markdown: scraped.markdown, cached: false };
         }
+        return { url, i, title: undefined, markdown: undefined, cached: false };
+      } catch {
+        return { url, i, title: undefined, markdown: undefined, cached: false };
       }
+    }));
 
-      if (markdown) {
-        const docId = await indexResearchDoc(projectId, title || url, url, markdown, label);
+    // Index sequentially with heap check between batches
+    for (const f of fetched) {
+      if (signal?.aborted) throwIfAborted(signal);
+      if (f.markdown) {
+        const docId = await indexResearchDoc(projectId, f.title || f.url, f.url, f.markdown, label);
         docIds.push(docId);
-        sources.push({ url, title: title || url, label, docId, tier: sourceTier(url) });
-        onProgress(`[${label}] ✓ Captured "${title}"`);
-
-        // MID-STAGE heap guard. The offscreen renderer's MAIN-thread parse heap
-        // (HTML/PDF, ~40-90 MB/source, unfreeable mid-SW-life — Chrome pools the
-        // process) can climb past the ~2.9 GB renderer-crash ceiling WITHIN a
-        // single stage of heavy sources, before the between-stage guard ever runs
-        // (measured: 625→2569 MB across 8 reads, crash on the 9th). So if the heap
-        // is already in the danger zone, stop reading more URLs this stage and let
-        // it brief on what we have — the stage still completes + checkpoints, and
-        // the stage-top guard resets (reload) before the next one.
-        const heapMB = await getOffscreenHeap();
-        if (heapMB !== undefined && heapMB >= 2100) {
-          crumb('research', 'stage cut short — heap high', { heapMB, got: sources.length, of: urlList.length });
-          onProgress(`[${label}] Memory high (${heapMB} MB) — ending this stage early with ${sources.length} source(s)`);
-          break;
-        }
+        sources.push({ url: f.url, title: f.title || f.url, label, docId, tier: sourceTier(f.url) });
+        onProgress(`[${label}] ✓ Captured "${f.title}"${f.cached ? ' (cached)' : ''}`);
       } else {
-        onProgress(`[${label}] ✗ No readable content: ${url}`);
+        onProgress(`[${label}] ✗ Failed: ${f.url}`);
       }
-    } catch (e) {
-      onProgress(`[${label}] ✗ Failed: ${url}`);
     }
-    i++;
+
+    // Heap guard after each batch — same threshold as before
+    const heapMB = await getOffscreenHeap();
+    if (heapMB !== undefined && heapMB >= 2100) {
+      crumb('research', 'stage cut short — heap high', { heapMB, got: sources.length, of: urlList.length });
+      onProgress(`[${label}] Memory high (${heapMB} MB) — ending this stage early with ${sources.length} source(s)`);
+      break;
+    }
     await yieldToEventLoop();
   }
   return { label, sources, docIds };
@@ -1107,14 +1107,20 @@ async function runWebAgent(
   label: AgentLabel
 ): Promise<AgentOutcome> {
   const allUrls = new Set<string>();
-  for (const q of queries) {
-    if (signal?.aborted) throwIfAborted(signal);
-    onProgress(`[${label}] Searching: "${q}"`);
-    const found = await performWebSearch(q, signal);
-    found.forEach(h => allUrls.add(h.url));
-    onProgress(`[${label}] → ${found.length} result(s)`);
-    await new Promise(r => setTimeout(r, 800));
-  }
+  // Parallelize query searches — each is an independent network call.
+  // Keep small stagger (250ms) to avoid triggering rate limits.
+  await Promise.all(queries.map((q, i) =>
+    (async () => {
+      if (signal?.aborted) throwIfAborted(signal);
+      onProgress(`[${label}] Searching: "${q}"`);
+      // Stagger starts slightly to avoid burst-blocking
+      if (i > 0) await new Promise(r => setTimeout(r, i * 250));
+      const found = await performWebSearch(q, signal);
+      found.forEach(h => allUrls.add(h.url));
+      onProgress(`[${label}] → ${found.length} result(s) for "${q}"`);
+      return found;
+    })()
+  ));
   if (allUrls.size === 0) onProgress(`[${label}] Search returned no results (engine may be blocking)`);
   return scrapeUrlList(projectId, allUrls, onProgress, signal, label);
 }
@@ -2685,12 +2691,11 @@ async function synthesizeStageBrief(
   // briefs → "No brief generated"). Briefs are intermediate compression steps, so we
   // deliberately fetch fewer chunks than the final synthesis to keep latency low.
   const rawChunks = await searchSessionChunks(projectId, topic, 20, stageDocIds, { qualityBoost, priorityDocIds: stageDocIds });
-  // Also fetch chunks for each sub-question to get better coverage
-  const extra: any[] = [];
-  for (const q of subQuestions) {
-    const hits = await searchSessionChunks(projectId, q, 8, stageDocIds, { qualityBoost, priorityDocIds: stageDocIds });
-    hits.forEach(c => extra.push(c));
-  }
+  // Fetch chunks for each sub-question in parallel — independent searches.
+  const extraResults = await Promise.all(subQuestions.map(q =>
+    searchSessionChunks(projectId, q, 8, stageDocIds, { qualityBoost, priorityDocIds: stageDocIds })
+  ));
+  const extra = extraResults.flat();
   // Merge + deduplicate by chunk id
   const chunkMap = new Map<string, any>();
   [...rawChunks, ...extra].forEach(c => chunkMap.set(c.id, c));
