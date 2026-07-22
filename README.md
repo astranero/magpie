@@ -7,8 +7,8 @@ A Chrome extension that turns your browser into a personal research library. Cap
 
 ```
   ┌──────────────────────────────────────────────────────────────────────┐
-  │   📄 Capture      Index          🔍 Search        💬 Answer             │
-  │   Any page,    ──▶ Orama+ONNX   ──▶ Semantic+     ──▶ With citations │
+  │   📄 Capture     Index          🔍 Search      💬 Answer              │
+  │   Any page, ──▶  Orama+ONNX ──▶  Semantic+ ──▶ With citations        │
   │   PDF, YouTube   embeddings     keyword         [1][2][3]            │
   └──────────────────────────────────────────────────────────────────────┘
 ```
