@@ -1106,15 +1106,12 @@ export const ChatView: React.FC<ChatViewProps> = ({
             )}
 
             <div
-              // contain:layout — a growing/streaming bubble's internal reflow
-              // stays scoped to this subtree instead of forcing a whole-document
-              // layout pass on every token (documented streaming-chat CLS risk).
-              className={`[contain:layout] w-full ${m.role === 'user' ? 'max-w-[85%]' : 'max-w-[92%]'} rounded-2xl border px-4 py-3 text-sm shadow-sm transition-all leading-relaxed ${
+              className={`[contain:layout] w-full ${m.role === 'user' ? 'max-w-[85%] rounded-2xl border px-4 py-3 text-sm shadow-sm transition-all leading-relaxed' : 'w-full'} ${
                 m.role === 'user'
                   ? `bg-primary/15 border-primary/30 text-foreground rounded-tr-sm ${m.queued ? 'opacity-70' : ''}`
                   : m.role === 'system'
                   ? 'bg-muted/40 border-border/60 text-muted-foreground w-full rounded-lg'
-                  : 'bg-muted/25 border-border text-foreground rounded-tl-sm'
+                  : 'w-full text-foreground'
               }`}
             >
               {/* One malformed message (broken markdown/KaTeX) must not white-

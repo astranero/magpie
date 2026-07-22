@@ -1674,8 +1674,7 @@ loadChatHistory(activeChatId).then(() => {
     // /create-skill [focus] — distill the workspace's research into a
     // reusable custom slash command (saved to Settings → Custom Commands)
     // /teach — mission on first use, then a saved lesson each time. The lesson
-    // lands in Lore as a document because the learner comes back to it; a chat
-    // message would be gone by the next session.
+    // is saved to Lore AND previewed in chat so the learner reads it immediately.
     if (text.toLowerCase() === '/teach' || text.toLowerCase().startsWith('/teach ')) {
       const topic = text.slice('/teach'.length).trim();
       setInput('');
@@ -1685,17 +1684,20 @@ loadChatHistory(activeChatId).then(() => {
         [currentChatId]: [...(prev[currentChatId] || []), { id: uid(), role: 'user', text }]
       }));
       setGenerating(prev => ({ ...prev, [currentChatId]: true }));
-      const res = await msg('TEACH', { projectId: activeProjectId, chatId: currentChatId, topic });
+      const res = await msg('TEACH', { projectId: activeProjectId, chatId: currentChatId, topic, includePageContext });
       setGenerating(prev => ({ ...prev, [currentChatId]: false }));
-      const body = res.success !== false && res.title
-        ? (res.missionCreated
-            ? `**Course started.** I've set this workspace's mission to:\n\n> ${res.mission}\n\nIf that's not quite your goal, say so and I'll re-aim it — every lesson is built from it.\n\n---\n\n`
-            : '')
-          + `**Lesson ${res.lessonNumber}: ${res.title}** — saved to Lore.\n\nOpen it from the Lore tab to read it. Ask me anything about it right here, and run \`/teach\` again when you're ready for the next one.`
-        : `Couldn't build the lesson: ${res.error || 'unknown error'}`;
+      let body: string;
+      if (res.success !== false && res.title) {
+        const header = res.missionCreated
+          ? `**Course started.** I've set this workspace's mission to:\n\n> ${res.mission}\n\nIf that's not quite your goal, say so — every lesson is built from it.\n\n---\n\n`
+          : '';
+        body = `${header}## Lesson ${res.lessonNumber}: ${res.title}\n\n${res.body}\n\n---\n*Lesson also saved to Lore — use \`/teach\` again when you're ready for the next one.*`;
+      } else {
+        body = `Couldn't build the lesson: ${res.error || 'unknown error'}`;
+      }
       setMessages(prev => ({
         ...prev,
-        [currentChatId]: [...(prev[currentChatId] || []), { id: uid(), role: 'system', text: body }]
+        [currentChatId]: [...(prev[currentChatId] || []), { id: uid(), role: 'assistant', text: body }]
       }));
       if (res.success !== false && res.title) loadDocuments(activeProjectId);
       return;
@@ -2179,13 +2181,19 @@ onOpenDocument={(docId, anchorId) => openDocById(docId, anchorId, 'chat')}
               // Model selector support
               customModel={customModel}
               modelEntries={[
-                ...copilotModels.map(m => ({ provider: 'copilot' as const, group: 'GitHub Copilot', model: m })),
-                ...byokModels.map(m => ({ provider: 'byok' as const, group: byokHostLabel(byokUrl), model: m })),
+                // When Copilot is configured and active, show ONLY Copilot models.
+                // BYOK/OpenRouter models are hidden to prevent accidental provider
+                // switching that wastes personal tokens. The user can still switch by
+                // going to Settings → AI Provider Configuration.
+                ...(activeProvider === 'copilot'
+                  ? copilotModels.map(m => ({ provider: 'copilot' as const, group: 'GitHub Copilot', model: m }))
+                  // When BYOK is active, show BYOK models + a hint for switching
+                  : byokModels.map(m => ({ provider: 'byok' as const, group: byokHostLabel(byokUrl), model: m }))
+                ),
                 // Fall back to the shared bucket only when neither catalog has
-                // been populated yet (fresh install, or a provider with no
-                // /models endpoint).
+                // been populated yet (fresh install).
                 ...(copilotModels.length === 0 && byokModels.length === 0
-                  ? customModels.map(m => ({ provider: activeProvider, group: activeProvider === 'copilot' ? 'GitHub Copilot' : byokHostLabel(customUrl), model: m }))
+                  ? customModels.map(m => ({ provider: (activeProvider === 'copilot' ? 'copilot' : 'byok') as 'copilot' | 'byok', group: activeProvider === 'copilot' ? 'GitHub Copilot' : byokHostLabel(customUrl), model: m }))
                   : []),
               ]}
               onSelectModel={(entry) => {

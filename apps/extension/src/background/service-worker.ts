@@ -546,7 +546,10 @@ const messageHandlers: Record<string, MessageHandler> = {
   LINK_DOCUMENT: handleLinkDocument,
   UNLINK_DOCUMENT: handleUnlinkDocument,
   SEARCH_LIBRARY: handleSearchLibrary,
-  TEACH: handleTeach,
+  TEACH: async (request) => {
+    const ctx = (request as any).includePageContext ? await getPageContext().catch(() => null) : null;
+    return handleTeach(request, ctx);
+  },
   REINDEX_LIBRARY: handleReindexLibrary,
   RECALL_DOCS: handleRecallDocs,
   CLEANUP_ORPHANS: async () => {

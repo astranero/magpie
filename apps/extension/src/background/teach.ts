@@ -31,6 +31,8 @@ export interface TeachResult {
   docId: string;
   mission: string;
   missionCreated: boolean;
+  body: string;
+  covers: string;
 }
 
 /** Pull the mission out of a workspace's rules, if a course was started here. */
@@ -135,7 +137,7 @@ Teaching principles — these are what separate a lesson from a lecture:
  * we commit to an explicit, stated mission and invite correction — the learner
  * sees exactly what was assumed and can redirect in one message.
  */
-async function draftMission(topic: string, workspaceTitle: string): Promise<string> {
+async function draftMission(topic: string, workspaceTitle: string, pageContext?: { title: string; url: string; markdown: string }): Promise<string> {
   const sys =
     'You infer a learner\'s real goal from how they describe what they want to learn.\n\n' +
     'Write 2-4 sentences covering: what they want to be able to DO (concrete capability, not ' +
@@ -143,13 +145,16 @@ async function draftMission(topic: string, workspaceTitle: string): Promise<stri
     'Where they have not said, make the most probable assumption and state it plainly as an ' +
     'assumption — a stated wrong guess gets corrected, a vague one silently misdirects every ' +
     'later lesson.\n\nReturn ONLY the mission text, no preamble or heading.';
-  const user = `Workspace: ${workspaceTitle}\nThey want to learn: ${topic}`;
+  let user = `Workspace: ${workspaceTitle}\nThey want to learn: ${topic}`;
+  if (pageContext) {
+    user += `\n\nCURRENT PAGE CONTEXT (the learner asked about this page):\nTitle: ${pageContext.title}\nURL: ${pageContext.url}\nContent:\n${pageContext.markdown.slice(0, 4000)}`;
+  }
   const out = await chatWithCustom(sys, [], user);
   return out.trim().slice(0, 1200);
 }
 
 async function writeLesson(
-  mission: string, topic: string, lessonNumber: number, prior: PriorLesson[]
+  mission: string, topic: string, lessonNumber: number, prior: PriorLesson[], pageContext?: { title: string; url: string; markdown: string }
 ): Promise<{ title: string; covers: string; body: string }> {
   const history = prior.length
     ? prior.map(l => `- Lesson ${l.number}: ${l.title}${l.covers ? ` — covers ${l.covers}` : ''}`).join('\n')
@@ -176,7 +181,8 @@ async function writeLesson(
   const user =
     `MISSION (why they are learning this):\n${mission}\n\n` +
     `LESSONS SO FAR:\n${history}\n\n` +
-    `THIS REQUEST: ${topic || '(no specific request — choose the best next lesson)'}`;
+    `THIS REQUEST: ${topic || '(no specific request — choose the best next lesson)'}` +
+    (pageContext ? `\n\nCURRENT PAGE CONTEXT (the learner asked about this page — write the lesson around it):\nTitle: ${pageContext.title}\nURL: ${pageContext.url}\nContent:\n${pageContext.markdown.slice(0, 4000)}` : '');
 
   const raw = await chatWithCustom(sys, [], user);
   const parsed = parseLessonResponse(raw);
@@ -188,7 +194,7 @@ async function writeLesson(
  * `/teach <topic>` — establish the mission on first use, then write and SAVE the
  * next lesson into this workspace.
  */
-export async function handleTeach(request: Record<string, unknown>): Promise<Record<string, unknown>> {
+export async function handleTeach(request: Record<string, unknown>, pageContext?: { title: string; url: string; markdown: string } | null): Promise<Record<string, unknown>> {
   const projectId = String(request.projectId || '');
   const topic = String(request.topic || '').trim();
   if (!projectId) throw new Error('No workspace selected');
@@ -202,7 +208,7 @@ export async function handleTeach(request: Record<string, unknown>): Promise<Rec
     if (!topic) {
       throw new Error('Tell me what you want to learn — e.g. `/teach spaced repetition for language learning`');
     }
-    mission = await draftMission(topic, project.title || 'this workspace');
+    mission = await draftMission(topic, project.title || 'this workspace', pageContext || undefined);
     await updateProjectRules(projectId, upsertMissionBlock(project.rules, mission));
     missionCreated = true;
   }
@@ -211,7 +217,7 @@ export async function handleTeach(request: Record<string, unknown>): Promise<Rec
   const prior = priorLessons(docs);
   const lessonNumber = nextLessonNumber(prior);
 
-  const { title, covers, body } = await writeLesson(mission, topic, lessonNumber, prior);
+  const { title, covers, body } = await writeLesson(mission, topic, lessonNumber, prior, pageContext || undefined);
 
   const docTitle = `Lesson ${lessonNumber}: ${title}`;
   const wordCount = body.split(/\s+/).filter(Boolean).length;
@@ -233,5 +239,5 @@ export async function handleTeach(request: Record<string, unknown>): Promise<Rec
   }, []);
   await linkDocumentToProject(projectId, docId);
 
-  return { lessonNumber, title, docId, mission, missionCreated } satisfies TeachResult as unknown as Record<string, unknown>;
+  return { lessonNumber, title, docId, mission, missionCreated, body, covers } satisfies TeachResult as unknown as Record<string, unknown>;
 }
