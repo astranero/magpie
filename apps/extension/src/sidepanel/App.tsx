@@ -145,6 +145,11 @@ export default function App() {
   const [customModel, setCustomModel] = useState('');
   const [visionModel, setVisionModel] = useState('');
   const [customModels, setCustomModels] = useState<string[]>([]);
+  // Which provider `customModels`/`customModel` currently belong to — set by
+  // Copilot sign-in (activeProvider: 'copilot', copilot-auth.ts:saveCopilotAuth)
+  // or by BYOK config. Drives labeling in the model picker + which refresh
+  // endpoint onRefreshModels calls.
+  const [activeProvider, setActiveProvider] = useState<'byok' | 'copilot'>('byok');
   const [classificationModel, setClassificationModel] = useState('');
   const [folderName, setFolderName] = useState('Magpie');
   const [syncResearchSources, setSyncResearchSources] = useState(false);
@@ -219,6 +224,19 @@ const [enterpriseGitHubUrl, setEnterpriseGitHubUrl] = useState('');
       if (area !== 'local') return;
       if ('customSkills' in changes) loadCustomSkills().then(setCustomCommands);
       if ('araActiveSession' in changes) adopt(changes.araActiveSession?.newValue);
+      // A Copilot sign-in completing in the background (or in another panel)
+      // writes these directly to storage — mirror them here so THIS panel's
+      // model picker updates without a manual reload.
+      if ('customModels' in changes && Array.isArray(changes.customModels?.newValue)) {
+        setCustomModels(changes.customModels.newValue);
+      }
+      if ('activeProvider' in changes) {
+        const v = changes.activeProvider?.newValue;
+        if (v === 'copilot' || v === 'byok') setActiveProvider(v);
+      }
+      if ('customModel' in changes && typeof changes.customModel?.newValue === 'string') {
+        setCustomModel(changes.customModel.newValue);
+      }
     };
     chrome.storage.onChanged.addListener(onChange);
     return () => chrome.storage.onChanged.removeListener(onChange);
@@ -1063,7 +1081,7 @@ loadChatHistory(activeChatId).then(() => {
   const loadSettings = () => {
     if (typeof chrome !== 'undefined' && chrome.storage) {
       chrome.storage.local.get(
-        ['driveFolderName', 'customUrl', 'customKey', 'customModel', 'customModels', 'visionModel', 'autoLinkCaptures', 'includePageContext', 'syncResearchSources', 'routeChatThroughCli', 'cliCommandTemplate', 'localMcpCompanionUrl', 'enterpriseGitHubUrl'],
+        ['driveFolderName', 'customUrl', 'customKey', 'customModel', 'customModels', 'visionModel', 'autoLinkCaptures', 'includePageContext', 'syncResearchSources', 'routeChatThroughCli', 'cliCommandTemplate', 'localMcpCompanionUrl', 'enterpriseGitHubUrl', 'activeProvider'],
         (r) => {
           if (r.driveFolderName) setFolderName(r.driveFolderName);
           if (r.customUrl) setCustomUrl(r.customUrl);
@@ -1072,6 +1090,7 @@ loadChatHistory(activeChatId).then(() => {
           // Persisted model list: the dropdown survives a panel reload without
           // a refetch round-trip.
           if (Array.isArray(r.customModels)) setCustomModels(r.customModels);
+          if (r.activeProvider === 'copilot' || r.activeProvider === 'byok') setActiveProvider(r.activeProvider);
           if (r.visionModel) setVisionModel(r.visionModel);
           setAutoLinkCaptures(r.autoLinkCaptures !== false); // default ON
           setIncludePageContext(r.includePageContext === true); // default OFF
@@ -2100,9 +2119,18 @@ loadChatHistory(activeChatId).then(() => {
 onOpenDocument={(docId, anchorId) => openDocById(docId, anchorId, 'chat')}
               // Model selector support
               customModel={customModel}
-              modelEntries={customModels.map(m => ({ provider: 'byok' as const, group: 'Custom Provider', model: m }))}
+              modelEntries={customModels.map(m => (
+                activeProvider === 'copilot'
+                  ? { provider: 'copilot' as const, group: 'GitHub Copilot', model: m }
+                  : { provider: 'byok' as const, group: 'Custom Provider', model: m }
+              ))}
               onSelectModel={(entry) => { setCustomModel(entry.model); saveSettings(); }}
               onRefreshModels={async () => {
+                if (activeProvider === 'copilot') {
+                  const res = await msg('COPILOT_FETCH_MODELS');
+                  if (res.success) setCustomModels(res.models as string[]);
+                  return;
+                }
                 if (!customUrl) return;
                 const res = await msg('FETCH_CUSTOM_MODELS', { url: customUrl, apiKey: customKey });
                 if (res.success) { setCustomModels(res.models as string[]); }
