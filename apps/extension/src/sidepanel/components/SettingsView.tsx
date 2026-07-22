@@ -11,6 +11,33 @@ import { getCrashLog, clearCrashLog, formatCrashLog } from '../../lib/crash-log'
 import { COPILOT_PENDING_KEY, type CopilotPendingAuth } from '../../lib/copilot-auth';
 
 // ── GitHub Copilot SSO section ────────────────────────────────────────────
+/**
+ * Enterprise GitHub URL field. Rendered in BOTH the signed-in and signed-out
+ * Copilot branches (the user sees exactly one), so it lives here rather than
+ * being written twice — the two copies had already drifted in styling.
+ */
+function EnterpriseGitHubField({ value, onChange, placeholder, hint, compact }: {
+  value: string;
+  onChange: (v: string) => void;
+  placeholder: string;
+  hint: React.ReactNode;
+  compact?: boolean;
+}) {
+  return (
+    <div>
+      <label className="text-[10px] font-medium text-muted-foreground">Enterprise GitHub URL</label>
+      <input
+        type="url"
+        placeholder={placeholder}
+        value={value}
+        onChange={e => onChange(e.target.value)}
+        className={`mt-1 w-full rounded-md border border-border bg-background text-foreground placeholder:text-muted-foreground focus:border-primary focus:outline-none ${compact ? 'px-2 py-1 text-[11px]' : 'px-2.5 py-1.5 text-xs'}`}
+      />
+      <p className="mt-1 text-[10px] text-muted-foreground">{hint}</p>
+    </div>
+  );
+}
+
 function CopilotSSOSection({ enterpriseGitHubUrl, setEnterpriseGitHubUrl, saveSettings, customModel, setCustomModel, customModels }: {
   enterpriseGitHubUrl: string;
   setEnterpriseGitHubUrl: (v: string) => void;
@@ -162,17 +189,13 @@ function CopilotSSOSection({ enterpriseGitHubUrl, setEnterpriseGitHubUrl, saveSe
         <Button variant="secondary" size="sm" className="rounded-lg text-xs" onClick={signOut}>Sign out</Button>
         {/* Enterprise URL config — always visible, even when signed in */}
         <div className="pt-2 border-t border-border">
-          <label className="text-[10px] font-medium text-muted-foreground">Enterprise GitHub URL</label>
-          <input
-            type="url"
-            placeholder="https://github.acme.com"
+          <EnterpriseGitHubField
+            compact
             value={enterpriseGitHubUrl}
-            onChange={e => { setEnterpriseGitHubUrl(e.target.value); setTimeout(saveSettings, 0); }}
-            className="mt-1 w-full rounded-md border border-border bg-background px-2 py-1 text-[11px] text-foreground placeholder:text-muted-foreground focus:border-primary focus:outline-none"
+            onChange={v => { setEnterpriseGitHubUrl(v); setTimeout(saveSettings, 0); }}
+            placeholder="https://github.acme.com"
+            hint="Changed hosts? Click Refresh above to pull that host's model list."
           />
-          <p className="mt-1 text-[10px] text-muted-foreground">
-            Changed hosts? Click Refresh above to pull that host's model list.
-          </p>
         </div>
       </div>
     );
@@ -181,17 +204,12 @@ function CopilotSSOSection({ enterpriseGitHubUrl, setEnterpriseGitHubUrl, saveSe
   return (
     <div className="space-y-3">
       {/* Enterprise URL input at the top */}
-      <div>
-        <label className="text-[10px] font-medium text-muted-foreground">Enterprise GitHub URL</label>
-        <input
-          type="url"
-          placeholder="https://github.acme.com (leave empty for github.com)"
-          value={enterpriseGitHubUrl}
-          onChange={e => { setEnterpriseGitHubUrl(e.target.value); setTimeout(saveSettings, 0); }}
-          className="mt-1 w-full rounded-md border border-border bg-background px-2.5 py-1.5 text-xs text-foreground placeholder:text-muted-foreground focus:border-primary focus:outline-none"
-        />
-        <p className="mt-1 text-[10px] text-muted-foreground">Used for repo file-tree fetching, raw file content, and Copilot SSO.</p>
-      </div>
+      <EnterpriseGitHubField
+        value={enterpriseGitHubUrl}
+        onChange={v => { setEnterpriseGitHubUrl(v); setTimeout(saveSettings, 0); }}
+        placeholder="https://github.acme.com (leave empty for github.com)"
+        hint="Used for repo file-tree fetching, raw file content, and Copilot SSO."
+      />
       {/* Sign-in button below */}
       <p className="text-[10px] text-muted-foreground leading-normal">
         Sign in with GitHub to use your enterprise Copilot as the AI backend — no API key needed.
@@ -599,54 +617,6 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
               className="rounded-lg text-xs"
             />
 </div>
-
-          <div className="space-y-1.5 pt-2 border-t border-border/60">
-            <label className="text-xs font-medium">Fast Model <span className="text-[10px] text-muted-foreground font-normal">(classification)</span></label>
-            <p className="text-[10px] text-muted-foreground font-mono leading-normal">Used for intent rewriting, routing decisions, and page-relevance checks. A smaller model here speeds up chat. Falls back to your main model when empty.</p>
-            <input
-              type="text"
-              value={classificationModel}
-              onChange={e => setClassificationModel(e.target.value)}
-              onBlur={() => chrome.storage.local.set({ classificationModel: classificationModel.trim() })}
-              placeholder="Leave empty to use main model — e.g. gpt-4o-mini"
-              className="w-full rounded-lg border border-border bg-background px-3 py-2 text-xs font-mono"
-            />
-          </div>
-
-          {/* Companion shared secret. The companion exposes a shell-exec
-              endpoint on localhost; without a token it "will run ANY shell
-              command any local caller sends" — and until now the extension had
-              no way to set one, so every real deployment ran wide open. Any web
-              page can POST to localhost, but cannot READ this token. */}
-          {availableClis.length > 0 && (
-            <div className="space-y-1.5 pt-2 border-t border-border/60">
-              <label className="text-xs font-medium">Companion token <span className="text-[10px] text-muted-foreground font-normal">(local CLI auth)</span></label>
-              <p className="text-[10px] text-muted-foreground font-mono leading-normal">
-                Start the companion with the SAME value as <code>MAGPIE_COMPANION_TOKEN</code>. Without it, any web page you visit can drive the companion's shell-exec endpoint.
-              </p>
-              <div className="flex gap-2">
-                <Input
-                  type="password"
-                  value={companionToken}
-                  onChange={e => setCompanionToken(e.target.value)}
-                  onBlur={() => chrome.storage.local.set({ companionToken: companionToken.trim() })}
-                  placeholder="Generate one, then pass it to the companion"
-                  className="rounded-lg text-xs flex-1"
-                />
-                <Button
-                  variant="secondary"
-                  size="sm"
-                  className="rounded-lg font-medium text-xs shrink-0"
-                  onClick={() => {
-                    const t = generateCompanionToken();
-                    setCompanionToken(t);
-                    chrome.storage.local.set({ companionToken: t });
-                    navigator.clipboard?.writeText(t).catch(() => {});
-                  }}
-                >Generate + copy</Button>
-              </div>
-            </div>
-          )}
 
           <div className="space-y-1.5">
             <label className="text-xs font-medium">API Key</label>
