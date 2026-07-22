@@ -1916,11 +1916,35 @@ async function buildChatRequest(chatId: string, projectId: string, prompt: strin
   // links (streamed as a final delta + saved with the message).
   if (pageContext && usePage) {
     onStatus?.('Reading the page…');
-    // Long pages switch to per-question retrieval (see selectPageMarkdown)
-    const md = await selectPageMarkdown(pageContext, effectiveQuery);
+    const md = pageContext.markdown;
+
+    // For short pages, send the full content. For long pages, send the head
+    // (first 4K chars) + a section index so the model can request specific
+    // sections via the agentic read_section tool instead of dumping everything.
+    const MAX_HEAD = 4000;
+    let pageBlock: string;
+    if (md.length <= MAX_HEAD) {
+      pageBlock = md;
+    } else {
+      // Extract section headings for the index
+      const headingRe = /^(#{1,4})\s+(.+)$/gm;
+      const headings: string[] = [];
+      let hMatch: RegExpExecArray | null;
+      while ((hMatch = headingRe.exec(md)) !== null) {
+        headings.push(hMatch[2].trim());
+      }
+      const head = md.slice(0, MAX_HEAD);
+      const sectionIdx = headings.length > 2
+        ? `\n\nThe page has ${headings.length} sections total. The first few are shown above. ` +
+          `If you need to read a specific section, the user can ask or you can call read_section during enrichment.\n` +
+          `All section headings: ${headings.slice(0, 30).map(h => `"${h}"`).join(', ')}${headings.length > 30 ? '…' : ''}`
+        : '';
+      pageBlock = head + sectionIdx;
+    }
+
     systemPrompt +=
       `\n\n--- CURRENT PAGE (the user is viewing this in their browser right now; it is NOT saved in their library) ---\n` +
-      `Title: ${pageContext.title}\nURL: ${pageContext.url}\n\n${md}\n` +
+      `Title: ${pageContext.title}\nURL: ${pageContext.url}\n\n${pageBlock}\n` +
       `--- END CURRENT PAGE ---\n` +
       `Only answer from the CURRENT PAGE content above. Do NOT use your own knowledge. If the page does not contain the specific answer, say so — do not make up file names, line numbers, error messages, or any other details that are not in the page content. ` +
       `Attribute such claims in plain text, e.g. "according to the page you're viewing". ` +
