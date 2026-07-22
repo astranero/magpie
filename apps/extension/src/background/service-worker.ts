@@ -453,27 +453,64 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   return false;
 });
 
-import { startCopilotDeviceFlow, pollForAccessToken, saveCopilotAuth, isCopilotConfigured, signOutCopilot } from '../lib/copilot-auth';
+import { startCopilotDeviceFlow, pollForAccessToken, saveCopilotAuth, isCopilotConfigured, signOutCopilot, setCopilotPending, getCopilotPending, refreshCopilotModels } from '../lib/copilot-auth';
 
 type MessageHandler = (request: Record<string, unknown>, sender: chrome.runtime.MessageSender) => Promise<Record<string, unknown>>;
 
+// Owns the device-code poll loop so it survives side-panel teardown. Every
+// panel mirrors progress through the shared `magpie-copilot-pending` storage
+// key rather than holding the promise itself.
+async function runCopilotPoll(deviceCode: string, interval: number, expiresIn: number): Promise<void> {
+  try {
+    const token = await pollForAccessToken(deviceCode, interval, expiresIn);
+    await saveCopilotAuth(token);
+    const pending = await getCopilotPending();
+    if (pending) await setCopilotPending({ ...pending, status: 'done' });
+  } catch (e: any) {
+    const pending = await getCopilotPending();
+    if (pending) await setCopilotPending({ ...pending, status: 'error', error: e?.message || 'Sign-in failed' });
+  }
+}
+
 const messageHandlers: Record<string, MessageHandler> = {
   // ── GitHub Copilot SSO ──
+  // Start the device flow AND begin polling in the background. The panel only
+  // opens the verification tab and mirrors status via storage — it never holds
+  // the poll promise, so switching/closing tabs can't orphan the sign-in.
   COPILOT_START_DEVICE_FLOW: async () => {
     const codes = await startCopilotDeviceFlow();
+    await setCopilotPending({
+      userCode: codes.user_code,
+      verificationUri: codes.verification_uri,
+      deviceCode: codes.device_code,
+      expiresAt: Date.now() + codes.expires_in * 1000,
+      status: 'polling',
+    });
+    // Fire-and-forget: poll loop lives in the service worker.
+    void runCopilotPoll(codes.device_code, codes.interval, codes.expires_in);
     return codes as any;
   },
-  COPILOT_POLL_TOKEN: async (request) => {
-    const token = await pollForAccessToken(
-      request.deviceCode as string,
-      request.interval as number,
-      request.expiresIn as number
-    );
-    await saveCopilotAuth(token);
-    return { success: true };
+  // Legacy/no-op: polling is now driven by COPILOT_START_DEVICE_FLOW. Kept so an
+  // older panel build calling this still resolves once the background finishes.
+  COPILOT_POLL_TOKEN: async () => {
+    const pending = await getCopilotPending();
+    if (pending?.status === 'done') return { success: true };
+    if (pending?.status === 'error') return { success: false, error: pending.error };
+    return { success: true, pending: true };
   },
   COPILOT_STATUS: async () => ({ configured: await isCopilotConfigured() }),
-  COPILOT_SIGN_OUT: async () => { await signOutCopilot(); return {}; },
+  COPILOT_SIGN_OUT: async () => { await signOutCopilot(); await setCopilotPending(null); return {}; },
+  // Re-fetch the enterprise/org model list using a live session token —
+  // distinct from FETCH_CUSTOM_MODELS, which uses the BYOK key/URL and would
+  // send the Copilot sentinel key as a literal (invalid) API key.
+  COPILOT_FETCH_MODELS: async () => {
+    try {
+      const { models, apiBase } = await refreshCopilotModels();
+      return { success: true, models, apiBase };
+    } catch (e: any) {
+      return { success: false, error: e?.message || 'Failed to fetch Copilot models' };
+    }
+  },
 
   ENSURE_OFFSCREEN: async () => {
     await ensureOffscreen();
