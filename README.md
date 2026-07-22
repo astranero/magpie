@@ -88,7 +88,7 @@ Service Worker              Side Panel              Offscreen
 │ Auth (Copilot/   │     │ DocumentView     │    │ Reranker (ONNX)  │
 │   Google Drive)  │     │ Field log        │    │ Inference worker │
 └────────┬─────────┘     └──────────────────┘    └──────────────────┘
-         │                                              │
+         │                                               │
          └────────────── IndexedDB ◄─────────────────────┘
                         documents · chunks · chats · history
                         Orama vector index (in-memory)
