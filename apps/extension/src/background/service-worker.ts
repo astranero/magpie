@@ -18,7 +18,7 @@ import { buildFrontmatter, hasFrontmatter } from '../lib/frontmatter';
 import { get as idbGet } from 'idb-keyval';
 import { runDeepResearch, generateSubQuestions, scrapeUrl, isJunkUrl, gatherWebSnippets } from './deep-researcher';
 import { harvestReferences } from '../lib/reference-harvest';
-import { needsIntentResolution, formatHistoryForIntent, parseRepoUrl, selectTreePaths, formatTreeBlock, isChitchat, isRefusalAnswer, isStructureQuestion, isImplementationQuestion, findRepoUrlInText, isPageMetaQuestion, questionKeywords, mentionsPageDeixis, overlapsPage, isLocationDependent, isGeneralKnowledgeQuestion, timezoneToPlace, isEnumerationQuestion, isAssistantMetaQuestion, RepoRef } from '../lib/query-intent';
+import { needsIntentResolution, formatHistoryForIntent, parseRepoUrl, selectTreePaths, formatTreeBlock, isChitchat, isRefusalAnswer, isStructureQuestion, isImplementationQuestion, findRepoUrlInText, isPageMetaQuestion, questionKeywords, mentionsPageDeixis, overlapsPage, isLocationDependent, isGeneralKnowledgeQuestion, timezoneToPlace, isAssistantMetaQuestion, RepoRef } from '../lib/query-intent';
 import { sanitizeCliOutput, isCliErrorOutput, composeCliPrompt } from '../lib/cli-output';
 import { stripSourcesFooter, stripAnySourcesFooter } from '../lib/format';
 import { selectSemantic, fetchWithinBudget, parseRouterSelection, TOTAL_CTX_BUDGET, RerankFn, LinkRef, Selection } from '../lib/context-retrieval';
@@ -806,8 +806,8 @@ const PAGE_CONTEXT_TTL_MS = 2 * 60 * 1000;
 let interactiveDepth = 0;
 const embedOpts = () => ({ priority: interactiveDepth > 0 });
 
-const MAX_PAGE_CHARS = 30000;         // whole-page cutoff before per-question retrieval kicks in
-const PAGE_RETRIEVAL_BUDGET = 22000;  // chars of the most-relevant sections on a long page
+// Constants for page context are now handled by the head+section-index injection
+// + read_section/search_page/read_lines tools in agenticGather.
 
 /**
  * Build the page markdown to inline into the chat request. Short pages go in
@@ -816,71 +816,9 @@ const PAGE_RETRIEVAL_BUDGET = 22000;  // chars of the most-relevant sections on 
  * question cosine-rank and inline only the most relevant sections — the old
  * head+tail truncation silently dropped the middle of long videos.
  * Everything stays in memory; nothing touches IndexedDB or the search index.
+ * Obsolete: replaced by head+section-index injection + read_section/search_page/read_lines
+ * tools in the agentic gather phase (see agenticGather).
  */
-async function selectPageMarkdown(ctx: PageContext, question: string): Promise<string> {
-  const md = ctx.markdown;
-  if (md.length <= MAX_PAGE_CHARS) return md;
-
-  // Enumeration/list questions ("what series are published?") match the featured
-  // item most strongly under semantic retrieval, so they'd get a slice, not the
-  // list. Feed the page in reading order (head-biased) up to the budget instead.
-  if (isEnumerationQuestion(question)) {
-    console.log('[PAGE] enumeration question — reading-order slice, not semantic retrieval');
-    return md.length > PAGE_RETRIEVAL_BUDGET
-      ? md.slice(0, PAGE_RETRIEVAL_BUDGET) + '\n\n[... rest of the page truncated ...]'
-      : md;
-  }
-
-  try {
-    const entry = pageContextCache.get(ctx.url);
-    let chunks = entry?.chunks;
-    if (!chunks) {
-      const raw = chunkDocument({ docShortId: 'dpage00', content: md });
-      const texts = raw.map(c => c.text);
-      const res: any = await sendToOffscreen({ action: 'OFFSCREEN_GET_EMBEDDINGS', texts }, undefined, embedOpts());
-      const embeddings: (number[] | null)[] = res?.ok && Array.isArray(res.embeddings) ? res.embeddings : [];
-      chunks = raw.map((c, i) => ({ text: c.text, position: c.chunkIndex, embedding: embeddings[i] ?? null }));
-      if (entry) entry.chunks = chunks;
-    }
-
-    const qRes: any = await sendToOffscreen({ action: 'OFFSCREEN_GET_EMBEDDINGS', texts: [question], kind: 'query' }, undefined, embedOpts());
-    const qVec: number[] | undefined = qRes?.ok ? qRes.embeddings?.[0] : undefined;
-    if (!qVec) throw new Error('no query embedding');
-
-    // Vectors are normalized → dot product = cosine similarity
-    const scored = chunks
-      .filter(c => c.embedding)
-      .map(c => ({ c, score: c.embedding!.reduce((sum, v, i) => sum + v * qVec[i], 0) }))
-      .sort((a, b) => b.score - a.score);
-
-    const picked: PageChunkEmb[] = [];
-    let used = 0;
-    for (const { c } of scored) {
-      if (used + c.text.length > PAGE_RETRIEVAL_BUDGET) continue;
-      picked.push(c);
-      used += c.text.length;
-      if (used > PAGE_RETRIEVAL_BUDGET * 0.9) break;
-    }
-    if (picked.length === 0) throw new Error('no chunks selected');
-
-    // Reading order, with elision markers between non-adjacent sections
-    picked.sort((a, b) => a.position - b.position);
-    let out = '[Only the sections most relevant to the question are shown]\n\n';
-    let lastPos = -2;
-    for (const c of picked) {
-      if (lastPos >= 0 && c.position > lastPos + 1) out += '\n\n[…]\n\n';
-      else if (lastPos >= 0) out += '\n\n';
-      out += c.text;
-      lastPos = c.position;
-    }
-    return out;
-  } catch (e) {
-    console.warn('Page retrieval mode failed, falling back to truncation', e);
-    return md.slice(0, Math.floor(MAX_PAGE_CHARS * 0.7)) +
-      '\n\n[... middle of the page truncated ...]\n\n' +
-      md.slice(-Math.floor(MAX_PAGE_CHARS * 0.3));
-  }
-}
 
 async function getPageContext(): Promise<PageContext | null> {
   const tabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
@@ -2039,7 +1977,7 @@ async function buildChatRequest(chatId: string, projectId: string, prompt: strin
         : { blocks: [], sources: [] };
     } else if (strategy === 'agentic') {
       onStatus?.('Exploring the page…');
-      enrich = await agenticGather(effectiveQuery, repoRef, tree, linkRefs, signal)
+      enrich = await agenticGather(effectiveQuery, repoRef, tree, linkRefs, signal, pageContext?.markdown)
         .catch(async e => { console.warn('[CTX] agentic failed, falling back to semantic:', e); return semanticEnrich(); });
     } else {
       onStatus?.('Reading relevant files & links…');
@@ -2371,6 +2309,7 @@ const MAX_TOOL_ROUNDS = 3;
  */
 async function agenticGather(
   question: string, repoRef: RepoRef | null, tree: RepoTree | null, linkRefs: LinkRef[], signal: AbortSignal,
+  pageMarkdown?: string,
 ): Promise<{ blocks: string[]; sources: Array<{ title: string; url: string }> }> {
   const tools: ToolDef[] = [];
   const catalogFiles = tree && repoRef ? selectTreePaths(tree.paths.filter(p => !p.endsWith('/')), question, 6_000).selected : [];
@@ -2379,6 +2318,13 @@ async function agenticGather(
   }
   if (linkRefs.length) {
     tools.push({ type: 'function', function: { name: 'read_link', description: 'Fetch the readable content of one link found on the current page, by its exact URL.', parameters: { type: 'object', properties: { url: { type: 'string' } }, required: ['url'] } } });
+  }
+  if (pageMarkdown) {
+    tools.push(
+      { type: 'function', function: { name: 'read_section', description: 'Read a specific section of the current page by its heading text. Use the section headings from the prompt to choose which to read.', parameters: { type: 'object', properties: { heading: { type: 'string', description: 'The exact heading text of the section to read' } }, required: ['heading'] } } },
+      { type: 'function', function: { name: 'search_page', description: 'Search the current page content for a specific string (error message, function name, file path, etc.). Returns matching lines with surrounding context — like grep for the page.', parameters: { type: 'object', properties: { query: { type: 'string', description: 'Text to search for (case-insensitive substring match)' } }, required: ['query'] } } },
+      { type: 'function', function: { name: 'read_lines', description: 'Read a range of lines from the current page by line number. Useful for reading traceback context around a known error line.', parameters: { type: 'object', properties: { startLine: { type: 'number', description: 'First line number (1-indexed)' }, count: { type: 'number', description: 'Number of lines to read (max 200)' } }, required: ['startLine', 'count'] } } },
+    );
   }
   const webAllowed = await isChatWebFallbackEnabled();
   if (webAllowed) {
@@ -2391,6 +2337,9 @@ async function agenticGather(
     `You gather just enough context to answer a question about the web page the user is viewing. ` +
     `Open only the FEW files/links that matter (≤4 total); search the web only if the page/repo can't answer. ` +
     `Stop calling tools as soon as you have enough — do not over-fetch.\n` +
+    (pageMarkdown
+      ? `\nYou can read the page content in detail using read_section (by heading), search_page (grep), or read_lines (by line number). Start by searching for errors or reading the relevant section.\n`
+      : '') +
     (catalogFiles.length ? `\nRepository files you may read:\n${catalogFiles.join('\n')}\n` : '') +
     (catalogLinks.length ? `\nPage links you may read:\n${catalogLinks.map(l => `${l.anchorText || l.url} — ${l.url}`).join('\n')}\n` : '');
   const messages: any[] = [{ role: 'system', content: sys }, { role: 'user', content: question }];
@@ -2401,12 +2350,21 @@ async function agenticGather(
   const validPaths = new Set(catalogFiles);
   const linkByUrl = new Map(linkRefs.map(l => [l.url, l]));
 
+  // Pre-compute page sections and lines for fast lookups
+  const pageLines = pageMarkdown ? pageMarkdown.split('\n') : [];
+  const pageHeadings: Array<{ heading: string; line: number }> = [];
+  if (pageMarkdown) {
+    const hRe = /^(#{1,4})\s+(.+)$/gm;
+    let hm: RegExpExecArray | null;
+    while ((hm = hRe.exec(pageMarkdown)) !== null) {
+      const lineNum = pageMarkdown.slice(0, hm.index).split('\n').length;
+      pageHeadings.push({ heading: hm[2].trim(), line: lineNum });
+    }
+  }
+
   for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
-    const resp = await chatWithTools(messages, tools, signal);   // may throw → caller falls back
+    const resp = await chatWithTools(messages, tools, signal);
     if (resp.toolCalls.length === 0) {
-      // No tool calls on the very first round means the provider can't (or won't)
-      // tool-call — throw so the caller falls back to semantic selection rather
-      // than answer with zero gathered context. Later rounds legitimately stop.
       if (round === 0 && blocks.length === 0) throw new Error('agentic: provider made no tool calls');
       break;
     }
@@ -2430,6 +2388,66 @@ async function agenticGather(
             const b = await fetchLinkBlock(url, known.anchorText || url, signal);
             if (b && used + b.chars <= TOTAL_CTX_BUDGET) { blocks.push(b.block); sources.push(b.source); used += b.chars; result = `read ${url}`; }
             else result = b ? 'context budget full' : 'unreadable';
+          }
+        } else if (call.name === 'read_section' && pageMarkdown) {
+          const heading = String(call.args?.heading || '').toLowerCase().trim();
+          // Find the section by heading (fuzzy match)
+          const match = pageHeadings.find(h => h.heading.toLowerCase().includes(heading) || heading.includes(h.heading.toLowerCase()));
+          if (!match) {
+            const available = pageHeadings.map(h => `"${h.heading}"`).join(', ');
+            result = `Section "${heading}" not found. Available sections: ${available}`;
+          } else {
+            // Extract section content from heading to next heading or end
+            const startLine = match.line - 1;
+            let endLine = pageLines.length;
+            const nextIdx = pageHeadings.indexOf(match) + 1;
+            if (nextIdx < pageHeadings.length) endLine = pageHeadings[nextIdx].line - 1;
+            const sectionText = pageLines.slice(startLine, endLine).join('\n').slice(0, 8000);
+            const block = `\n\n--- SECTION: ${match.heading} ---\n${sectionText}\n--- END SECTION ---\n`;
+            if (used + sectionText.length <= TOTAL_CTX_BUDGET) {
+              blocks.push(block); used += sectionText.length;
+              result = `read section "${match.heading}" (${sectionText.length} chars)`;
+            } else result = 'context budget full';
+          }
+        } else if (call.name === 'search_page' && pageMarkdown) {
+          const query = String(call.args?.query || '').toLowerCase();
+          const CONTEXT = 3; // lines of context before/after
+          const matches: string[] = [];
+          const seen = new Set<string>();
+          for (let i = 0; i < pageLines.length; i++) {
+            if (pageLines[i].toLowerCase().includes(query)) {
+              const start = Math.max(0, i - CONTEXT);
+              const end = Math.min(pageLines.length, i + CONTEXT + 1);
+              const key = `${start}-${end}`;
+              if (seen.has(key)) continue;
+              seen.add(key);
+              const snippet = pageLines.slice(start, end);
+              snippet.unshift(`--- line ${start + 1} ---`);
+              matches.push(snippet.join('\n'));
+              if (matches.length > 10) { matches.push('… (more matches, refine your search)'); break; }
+            }
+          }
+          if (matches.length === 0) result = 'no matches found';
+          else {
+            const text = `\n\n--- SEARCH: "${query}" ---\n${matches.join('\n\n')}\n--- END SEARCH ---\n`;
+            if (used + text.length <= TOTAL_CTX_BUDGET) {
+              blocks.push(text); used += text.length;
+              result = `${matches.length} match(es) for "${query}"`;
+            } else result = 'context budget full';
+          }
+        } else if (call.name === 'read_lines' && pageMarkdown) {
+          const start = Math.max(0, (Number(call.args?.startLine) || 1) - 1);
+          const count = Math.min(Number(call.args?.count) || 50, 200);
+          const end = Math.min(pageLines.length, start + count);
+          if (start >= pageLines.length) result = 'start line beyond page length';
+          else {
+            const snippet = pageLines.slice(start, end);
+            snippet.unshift(`--- lines ${start + 1}-${end} ---`);
+            const text = `\n\n--- LINES ${start + 1}-${end} ---\n${snippet.join('\n')}\n--- END LINES ---\n`;
+            if (used + text.length <= TOTAL_CTX_BUDGET) {
+              blocks.push(text); used += text.length;
+              result = `read lines ${start + 1}-${end}`;
+            } else result = 'context budget full';
           }
         } else if (call.name === 'search_web' && webAllowed) {
           const web = await gatherWebSnippets(String(call.args?.query || question), { signal });
