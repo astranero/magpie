@@ -2181,14 +2181,22 @@ onOpenDocument={(docId, anchorId) => openDocById(docId, anchorId, 'chat')}
               // Model selector support
               customModel={customModel}
               modelEntries={[
-                // When Copilot is configured and active, show ONLY Copilot models.
-                // BYOK/OpenRouter models are hidden to prevent accidental provider
-                // switching that wastes personal tokens. The user can still switch by
-                // going to Settings → AI Provider Configuration.
+                // BOTH catalogs are listed, grouped by provider, so switching between
+                // enterprise Copilot and your own key is visible in one place rather
+                // than buried in Settings. Hiding the inactive provider did prevent
+                // accidental spend, but at the cost of the discoverability problem
+                // this picker exists to solve — so the guard moved to onSelectModel,
+                // which confirms before a switch that starts billing a different
+                // account. Active provider first: it is what you are usually picking.
                 ...(activeProvider === 'copilot'
-                  ? copilotModels.map(m => ({ provider: 'copilot' as const, group: 'GitHub Copilot', model: m }))
-                  // When BYOK is active, show BYOK models + a hint for switching
-                  : byokModels.map(m => ({ provider: 'byok' as const, group: byokHostLabel(byokUrl), model: m }))
+                  ? [
+                      ...copilotModels.map(m => ({ provider: 'copilot' as const, group: 'GitHub Copilot', model: m })),
+                      ...byokModels.map(m => ({ provider: 'byok' as const, group: `${byokHostLabel(byokUrl)} · your API key`, model: m })),
+                    ]
+                  : [
+                      ...byokModels.map(m => ({ provider: 'byok' as const, group: `${byokHostLabel(byokUrl)} · your API key`, model: m })),
+                      ...copilotModels.map(m => ({ provider: 'copilot' as const, group: 'GitHub Copilot', model: m })),
+                    ]
                 ),
                 // Fall back to the shared bucket only when neither catalog has
                 // been populated yet (fresh install).
@@ -2197,8 +2205,19 @@ onOpenDocument={(docId, anchorId) => openDocById(docId, anchorId, 'chat')}
                   : []),
               ]}
               onSelectModel={(entry) => {
-                // Picking a model also SWITCHES the provider — that is the
-                // whole point of showing both catalogs in one list.
+                // The spend risk here is asymmetric: switching TO your own key
+                // starts billing you personally, while switching to Copilot uses
+                // the seat someone already pays for. So only the first direction
+                // is worth interrupting — confirming both would tax the safe case
+                // and re-add the friction this picker exists to remove. The group
+                // label ("· your API key") already states the consequence, so the
+                // dialog is a backstop for a misclick, not the primary signal.
+                if (entry.provider === 'byok' && activeProvider !== 'byok') {
+                  const host = byokHostLabel(byokUrl || customUrl);
+                  if (!window.confirm(
+                    `Switch to ${host}?\n\nMessages will use ${entry.model}, billed to your own API key rather than your Copilot seat.`
+                  )) return;
+                }
                 setCustomModel(entry.model);
                 if (entry.provider === 'copilot') {
                   const base = copilotApiBase || customUrl;
