@@ -58,6 +58,7 @@ vi.mock('../research-store', () => ({
 
 vi.mock('../pdf-parser', () => ({
   recreateOffscreen: vi.fn(async () => {}),
+  recycleOffscreenWorker: vi.fn(async () => {}),
   pdfUrlToBody: vi.fn(async () => ''),
 }));
 
