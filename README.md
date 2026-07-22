@@ -6,11 +6,11 @@
 A Chrome extension that turns your browser into a personal research library. Capture pages and PDFs, search everything you've collected, chat with your sources, and run multi-agent deep research — all with source-grounded citations.
 
 ```
-  ┌──────────────────────────────────────────────────────┐
-  │  📄  Capture →  Index  →  🔍  Search  →  💬  Answer │
-  │  Any page,    Orama+ONNX  Semantic+    With citations│
-  │  PDF, YouTube  embeddings  keyword      [1][2][3]    │
-  └──────────────────────────────────────────────────────┘
+  ┌─────────────────────────────────────────────────────────┐
+  │  📄 Capture ──▶  Index ──▶  🔍 Search ──▶  💬 Answer  │
+  │  Any page,     Orama+ONNX   Semantic+     With citations│
+  │  PDF, YouTube  embeddings   keyword       [1][2][3]    │
+  └─────────────────────────────────────────────────────────┘
 ```
 
 ## Table of Contents
