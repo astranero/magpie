@@ -1493,15 +1493,6 @@ async function classificationModel(): Promise<string | undefined> {
  * library citation footer (clickable [1] chips → open the stored doc) is
  * unaffected — this only governs the web/page-URL trail.
  */
-async function isWebSourcesFooterEnabled(): Promise<boolean> {
-  try {
-    const s = await chrome.storage.local.get(['showWebSources']);
-    return s.showWebSources === true;
-  } catch {
-    return false;
-  }
-}
-
 /** Build the RAG system prompt + formatted history for a chat turn. */
 /**
  * Intent router for an attached page (📄 ON): is this question actually ABOUT
@@ -1571,7 +1562,7 @@ const LANGUAGE_RULE =
   ` ALWAYS write your answer in the language of the user's latest message — or the language they explicitly ask for — ` +
   `even when the sources, page, or these instructions are in another language. Never claim you cannot chat in a language you can write.`;
 
-async function buildChatRequest(chatId: string, projectId: string, prompt: string, signal: AbortSignal, pageContext?: PageContext | null, onStatus?: (s: string) => void): Promise<{ systemPrompt: string; formattedHistory: Array<{ role: string; content: string }>; linkedPages: Array<{ title: string; url: string }>; grounded: boolean; place?: string; branch: ChatBranch }> {
+async function buildChatRequest(chatId: string, projectId: string, prompt: string, signal: AbortSignal, pageContext?: PageContext | null, onStatus?: (s: string) => void): Promise<{ systemPrompt: string; formattedHistory: Array<{ role: string; content: string }>; grounded: boolean; place?: string; branch: ChatBranch }> {
   // BATCH: workspace docs, project rules, locale, history, web-fallback — five
   // separate async sources that previously ran as five sequential awaits. Run
   // them concurrently where possible. History must land first (formattedHistory
@@ -1643,7 +1634,7 @@ async function buildChatRequest(chatId: string, projectId: string, prompt: strin
         : `You are Magpie, a research assistant. The user sent small talk — keep your reply to ONE short, friendly sentence. ` +
           `Do not invite them to do anything, do not mention sources, and do not ask follow-up questions. Never add a "Sources:" line.`) +
       LANGUAGE_RULE;
-    return { systemPrompt, formattedHistory, linkedPages: [], grounded: false, branch: 'chitchat' };
+    return { systemPrompt, formattedHistory, grounded: false, branch: 'chitchat' };
   }
 
   // Questions about the ASSISTANT itself ("do you support kurdish?", "what can
@@ -1659,7 +1650,7 @@ async function buildChatRequest(chatId: string, projectId: string, prompt: strin
       `(including Kurdish — Sorani and Kurmanji), you answer questions from their captured sources and the page they attach with 📄, ` +
       `you can search the web, and you run deep research via /research <topic>.` +
       LANGUAGE_RULE;
-    return { systemPrompt, formattedHistory, linkedPages: [], grounded: false, branch: 'meta' };
+    return { systemPrompt, formattedHistory, grounded: false, branch: 'meta' };
   }
 
   // Weather, time, math, trivia, facts — questions that need live data or
@@ -1682,7 +1673,7 @@ async function buildChatRequest(chatId: string, projectId: string, prompt: strin
             `You are a helpful assistant. The excerpts below were pulled from a live web search just now — treat them as your facts. ` +
             `Answer concisely in natural language. Do not fabricate citations.` + LANGUAGE_RULE +
             `\n--- WEB RESULTS ---\n${web.context}\n--- END WEB RESULTS ---`;
-          return { systemPrompt, formattedHistory, linkedPages: web.sources || [], grounded: false, place, branch: 'web' };
+          return { systemPrompt, formattedHistory, grounded: false, place, branch: 'web' };
         }
       } catch (e) {
         if (signal.aborted) throw e;
@@ -1706,7 +1697,7 @@ async function buildChatRequest(chatId: string, projectId: string, prompt: strin
       `still provide the best answer using your general knowledge — do not refuse. ` +
           `you may supplement from your own knowledge. Answer concisely.` + LANGUAGE_RULE +
           `\n--- WIKIPEDIA ---\n${wikiContext}\n--- END WIKIPEDIA ---`;
-        return { systemPrompt, formattedHistory, linkedPages: wikiHits.map(h => ({ title: h.title || '', url: h.url })), grounded: false, place, branch: 'web' };
+        return { systemPrompt, formattedHistory, grounded: false, place, branch: 'web' };
       }
     } catch (e) {
       if (signal.aborted) throw e;
@@ -1717,7 +1708,7 @@ async function buildChatRequest(chatId: string, projectId: string, prompt: strin
       `If asked about current weather, time, date, or news, provide the best answer you can from what you know. ` +
       `Never say you don't have access to current data or real-time information — just answer based on your training. ` +
       `Be concise — the user wants a quick fact, not an essay.` + LANGUAGE_RULE;
-    return { systemPrompt, formattedHistory, linkedPages: [], grounded: false, place, branch };
+    return { systemPrompt, formattedHistory, grounded: false, place, branch };
   }
 
   // Follow-up questions get rewritten into standalone ones so retrieval,
@@ -1730,36 +1721,7 @@ async function buildChatRequest(chatId: string, projectId: string, prompt: strin
   // through the page path (→ "the page doesn't cover weather"); route it to the
   // normal workspace/web/general pipeline instead.
   //
-  // Optional AGENTIC mode: let the model pick the route (page/workspace/web/
-  // general) in one tool-calling turn. The deterministic guards above still run
-  // first; if the model can't tool-call it returns null and we fall back to the
-  // heuristic `isQuestionAboutPage`.
-  let forcedRoute: ChatRoute | null = null;
-  // Probe the saved library BEFORE deciding, so the router can prefer the user's
-  // own sources when they're genuinely relevant (their explicit ask: "use my
-  // sources when the content is related to something I have"). Reused as the
-  // retrieval result below so this costs at most one extra embed on this path.
-  let probeChunks: any[] = [];
-  if (await getChatRoutingMode() === 'agentic') {
-    if (docIds.length > 0) {
-      probeChunks = await searchSessionChunks(projectId, effectiveQuery, 12, docIds, embedOpts()).catch(() => []);
-    }
-    const hasRelevantSources = isConfidentMatch(probeChunks as Array<{ rerankScore?: number }>);
-    onStatus?.('Deciding how to answer…');
-    forcedRoute = await decideRouteAgentic(effectiveQuery, {
-      hasPage: !!pageContext,
-      pageTitle: pageContext?.title || '',
-      pageDeictic: mentionsPageDeixis(effectiveQuery),
-      hasDocs: docIds.length > 0,
-      hasRelevantSources,
-      webAllowed: chatWebFallback,
-    }, signal).catch((e) => { console.warn('[ROUTER] agentic decision failed, using heuristic:', e); return null; });
-    if (forcedRoute) console.log('[ROUTER] agentic route =', forcedRoute, '(relevant saved sources:', hasRelevantSources, ')');
-  }
-
-  const usePage = !!pageContext && (forcedRoute
-    ? forcedRoute === 'page'
-    : await isQuestionAboutPage(effectiveQuery, pageContext, signal));
+  const usePage = !!pageContext && await isQuestionAboutPage(effectiveQuery, pageContext, signal);
   if (pageContext && !usePage) console.log('[ROUTER] question is not about the open page — routing to workspace/web/general');
   if (!usePage) onStatus?.('Searching your sources…');
 
@@ -1771,8 +1733,8 @@ async function buildChatRequest(chatId: string, projectId: string, prompt: strin
   // is then wasted work — and a wasted query embed on the hot path. When the
   // router sent an off-page question here (usePage false), we DO want retrieval.
   // Chit-chat already returned above.
-  let relevantChunks: any[] = isConfidentMatch(probeChunks as Array<{ rerankScore?: number }>) ? probeChunks : [];
-  if (!usePage && forcedRoute !== 'web' && forcedRoute !== 'general' && docIds.length > 0 && relevantChunks.length === 0) {
+  let relevantChunks: any[] = [];
+  if (!usePage && docIds.length > 0) {
     relevantChunks = await searchSessionChunks(projectId, effectiveQuery, 40, docIds, embedOpts());
     console.log(`[RAG] Initial search for "${effectiveQuery.slice(0, 50)}..." returned ${relevantChunks.length} chunks`);
 
@@ -1856,13 +1818,9 @@ async function buildChatRequest(chatId: string, projectId: string, prompt: strin
   // Location/live questions ("weather today") must not ground on the workspace —
   // a stray chunk that clears the confidence bar sends them to the citation
   // refusal ("cannot answer from sources") instead of a localized web answer.
-  // When the agentic router explicitly chose the workspace, honor it: ground on
-  // the library even if the confidence gate is borderline (the model judged the
-  // saved sources relevant). Otherwise fall back to the confidence heuristic.
-  const groundOnWorkspace = !usePage && forcedRoute !== 'web' && forcedRoute !== 'general' &&
-    (forcedRoute === 'workspace'
-      ? relevantChunks.length > 0
-      : !isLocationDependent(effectiveQuery) && isConfidentMatch(relevantChunks as Array<{ rerankScore?: number }>));
+  const groundOnWorkspace = !usePage &&
+    !isLocationDependent(effectiveQuery) &&
+    isConfidentMatch(relevantChunks as Array<{ rerankScore?: number }>);
   if (groundOnWorkspace) {
     grounded = true;
     // Build citation-anchored context (generous — favor fuller grounding over
@@ -1903,15 +1861,13 @@ async function buildChatRequest(chatId: string, projectId: string, prompt: strin
       `Do NOT guess what the page might be, and do NOT answer from unrelated knowledge.` +
       RESPONSE_STYLE;
     onStatus?.('Writing the answer…');
-    return { systemPrompt: rulesBlock + localeBlock + systemPrompt, formattedHistory, linkedPages: [], grounded: false, place, branch: 'no-page' };
+    return { systemPrompt: rulesBlock + localeBlock + systemPrompt, formattedHistory, grounded: false, place, branch: 'no-page' };
   } else {
     // No workspace match and no open page. Before conceding to stale "general
     // knowledge", escalate to a quick live web search (+ any enabled search
     // MCPs) unless the user turned it off.
     let web: { context: string; sources: Array<{ title: string; url: string }> } = { context: '', sources: [] };
-    // Agentic 'general' route deliberately skips the web probe; agentic 'web'
-    // forces it even if the global fallback toggle is off (the model chose it).
-    if (forcedRoute !== 'general' && (forcedRoute === 'web' || chatWebFallback)) {
+    if (chatWebFallback) {
       onStatus?.('Searching the web…');
       try {
         // Localize the query so "weather today" resolves to the user's region,
@@ -1950,10 +1906,8 @@ async function buildChatRequest(chatId: string, projectId: string, prompt: strin
   // Ephemeral page context: the tab the user is looking at right now.
   // Deliberately fenced off from library sources — it has no citation
   // anchors and is never persisted.
-  const linkedPages: Array<{ title: string; url: string }> = [];
   // Web-fallback sources render as the same clickable footer as auto-followed
   // links (streamed as a final delta + saved with the message).
-  if (webSources.length) linkedPages.push(...webSources);
   if (pageContext && usePage) {
     onStatus?.('Reading the page…');
     // Long pages switch to per-question retrieval (see selectPageMarkdown)
@@ -2062,7 +2016,6 @@ async function buildChatRequest(chatId: string, projectId: string, prompt: strin
     }
 
     for (const b of enrich.blocks) systemPrompt += b;
-    for (const s of enrich.sources) linkedPages.push(s);
     if (enrich.sources.length) console.log(`[CTX] followed ${enrich.sources.length} source(s): ${enrich.sources.map(s => s.url).join(', ')}`);
 
     // ── Forward-check the rest of THIS site ──
@@ -2087,7 +2040,6 @@ chatWebFallback
             `\n\n--- ELSEWHERE ON ${host} (same site the user is reading; found via a site-scoped search just now, NOT saved) ---\n` +
             `${site.context}\n--- END ---\n` +
             `The current page didn't cover this. You MAY answer from these same-site results and should point the user to the relevant page. Attribute claims in plain text to their [W#] source; do not invent anchors.`;
-          for (const s of site.sources) linkedPages.push(s);
         }
       } catch (e) {
         if (signal.aborted) throw e;
@@ -2098,39 +2050,7 @@ chatWebFallback
 
   onStatus?.('Writing the answer…');
   const branch: ChatBranch = grounded ? 'citation' : usePage ? 'page' : webSources.length ? 'web' : 'general';
-  return { systemPrompt: rulesBlock + localeBlock + systemPrompt, formattedHistory, linkedPages, grounded, place, branch };
-}
-
-
-/**
- * Clickable trail of the links the expansion step actually followed —
- * appended to the reply so the user can open them (in-panel preview) even
- * when the model doesn't cite them inline. Part of the saved message, so it
- * survives reloads.
- */
-function linkedPagesFooter(pages: Array<{ title: string; url: string }>): string {
-  if (pages.length === 0) return '';
-  // Concise provenance, not a reading list: dedupe by URL, cap at 3, and prefer
-  // a short label. Web-search titles are long and noisy ("Helsinki, Uusimaa,
-  // Finland Hourly Weather | AccuWeather") — collapse those to the site name;
-  // short anchor titles from followed on-page links (e.g. "Pricing") stay as-is.
-  const seen = new Set<string>();
-  const seenLabels = new Set<string>();
-  const items: string[] = [];
-  for (const p of pages) {
-    if (seen.has(p.url)) continue;
-    seen.add(p.url);
-    let host = '';
-    try { host = new URL(p.url).hostname.replace(/^www\./, ''); } catch { /* keep title */ }
-    const t = (p.title || '').trim();
-    const label = (t && t.length <= 40 ? t : (host || t || p.url)).replace(/[\[\]]/g, '');
-    if (seenLabels.has(label.toLowerCase())) continue; // collapse duplicate labels (e.g. two preuve.ai URLs)
-    seenLabels.add(label.toLowerCase());
-    items.push(`[${label}](${p.url.replace(/\(/g, '%28').replace(/\)/g, '%29')})`);
-    if (items.length >= 3) break;
-  }
-  if (!items.length) return '';
-  return `\n\n---\n*Sources:* ${items.join(' · ')}`;
+  return { systemPrompt: rulesBlock + localeBlock + systemPrompt, formattedHistory, grounded, place, branch };
 }
 
 // ─────────────────────────────────────────────
@@ -2307,72 +2227,6 @@ async function getPageContextStrategy(): Promise<PageCtxStrategy> {
 // ─────────────────────────────────────────────
 // Chat routing mode — heuristic (default) or agentic
 // ─────────────────────────────────────────────
-type ChatRoute = 'page' | 'workspace' | 'web' | 'general';
-async function getChatRoutingMode(): Promise<'heuristic' | 'agentic'> {
-  try {
-    const s = await chrome.storage.local.get(['chatRoutingMode']);
-    return s.chatRoutingMode === 'agentic' ? 'agentic' : 'heuristic';
-  } catch { return 'heuristic'; }
-}
-
-/**
- * Agentic route picker: ONE tool-calling turn where the model chooses the single
- * best source for the answer. It replaces only the ambiguous middle of the
- * router — the deterministic guards (chit-chat, assistant-meta, page deixis) run
- * BEFORE this and still win. Returns null when the model can't tool-call (small
- * / CLI / non-tool providers) or errors, so the caller falls back to the
- * heuristic `isQuestionAboutPage` path. It DECIDES only — never executes or
- * answers — so the existing branch code stays the single place that builds
- * context (keeps the documented invariants intact).
- */
-async function decideRouteAgentic(
-  query: string,
-  ctx: { hasPage: boolean; pageTitle: string; pageDeictic: boolean; hasDocs: boolean; hasRelevantSources: boolean; webAllowed: boolean },
-  signal?: AbortSignal,
-): Promise<ChatRoute | null> {
-  const tools: ToolDef[] = [];
-  const noArgs = { type: 'object' as const, properties: {} };
-  // Offer the page route only when it should be able to win: the user explicitly
-  // referenced the open page ("this page/repo"), OR there's no relevant saved
-  // source to cite. This is what makes topical questions ("state of the art in
-  // X") cite the user's LIBRARY instead of narrating the open tab.
-  const offerPage = ctx.hasPage && (ctx.pageDeictic || !ctx.hasRelevantSources);
-  if (offerPage) tools.push({ type: 'function', function: { name: 'answer_from_page', description: 'Use ONLY when the question is explicitly about the web page the user currently has open (its content, structure, or links).', parameters: noArgs } });
-  if (ctx.hasDocs) tools.push({ type: 'function', function: { name: 'search_workspace', description: 'Answer from the user\'s SAVED research library and cite the stored documents. Strongly preferred whenever relevant saved sources exist.', parameters: noArgs } });
-  if (ctx.webAllowed) tools.push({ type: 'function', function: { name: 'search_web', description: 'Use ONLY for live/current facts not in the library or page (weather, prices, breaking news, "today").', parameters: noArgs } });
-  tools.push({ type: 'function', function: { name: 'answer_from_general_knowledge', description: 'Use for general questions answerable from the model\'s own knowledge, with no page, library, or web needed.', parameters: noArgs } });
-  // Only one route available → no decision to make; let the heuristic handle it.
-  if (tools.length <= 1) return null;
-
-  const sys =
-    `You are a routing controller for a research assistant. Choose the SINGLE best information source ` +
-    `for the user's question by calling EXACTLY ONE tool. Do not answer the question and do not write prose — only call a tool.\n` +
-    `PRIORITY: the user's own SAVED LIBRARY comes first. If relevant saved sources exist, you MUST call search_workspace ` +
-    `unless the user explicitly asked about the currently open page, or the question needs live/current info (weather, prices, news).\n` +
-    `Otherwise: explicit open-page question → answer_from_page; live/current facts → search_web; general knowledge → answer_from_general_knowledge.`;
-  const messages = [
-    { role: 'system', content: sys },
-    { role: 'user', content:
-      `Question: ${query}\n` +
-      `Open page: ${ctx.hasPage ? `attached — "${ctx.pageTitle}"${ctx.pageDeictic ? ' (user referenced "this page")' : ''}` : 'none'}\n` +
-      `Saved library has RELEVANT sources for this question: ${ctx.hasRelevantSources ? 'YES — you MUST prefer search_workspace' : (ctx.hasDocs ? 'no confident match' : 'library empty')}\n` +
-      `Web search: ${ctx.webAllowed ? 'available' : 'disabled'}` },
-  ];
-  const resp = await withTimeout(
-    chatWithTools(messages, tools, signal, await classificationModel()),
-    ROUTE_LLM_TIMEOUT_MS,
-    'agentic route decision'
-  ); // may throw → caller falls back
-  const call = resp.toolCalls[0];
-  if (!call) return null;
-  switch (call.name) {
-    case 'answer_from_page': return 'page';
-    case 'search_workspace': return 'workspace';
-    case 'search_web': return 'web';
-    case 'answer_from_general_knowledge': return 'general';
-    default: return null;
-  }
-}
 
 /** Offscreen cross-encoder as a plain RerankFn for the selector. */
 const offscreenRerank: RerankFn = async (query, passages) => {
@@ -2824,9 +2678,7 @@ chrome.runtime.onConnect.addListener((port) => {
         (text) => safePost({ type: 'STATUS', text })
       );
       const { formattedHistory, grounded, place, branch } = built;
-      // Only these two are reassigned below (override prepend; refusal→web swap).
       let systemPrompt = built.systemPrompt;
-      let linkedPages = built.linkedPages;
 
       if (systemPromptOverride) {
         systemPrompt = systemPromptOverride + '\n\n' + systemPrompt;
@@ -2958,7 +2810,6 @@ chrome.runtime.onConnect.addListener((port) => {
             LANGUAGE_RULE +
             `\n--- WEB RESULTS ---\n${web.context}\n--- END WEB RESULTS ---`;
           await chatWithCustomStream(webSys, [], prompt, localController.signal, emitDelta);
-          linkedPages = web.sources; // footer below now points at the web sources
         }
       }
 
@@ -2980,8 +2831,6 @@ chrome.runtime.onConnect.addListener((port) => {
       // The footer lists WEB pages (web-search results / followed links). It is
       // OFF by default: users want "Sources" to mean their saved library, not
       // weather sites. Library-doc citations render separately as [n] chips.
-      const answerDisclaimsSources = /\b(don'?t (?:discuss|cover|mention|contain)|not (?:discussed|covered|mentioned|found|on this page|in (?:your|the) sources|about )|outside (?:their|its|the) scope|general knowledge|not sourced from)\b/i.test(full);
-      const wantWebFooter = (await isWebSourcesFooterEnabled()) && !answerDisclaimsSources;
       // ALWAYS remove any "Sources:" line the MODEL wrote — our footer (added
       // below only when enabled) is the single authoritative one. This is what
       // was still leaking "Sources: lushbinary.com · zylos.ai" into answers.
@@ -2990,10 +2839,7 @@ chrome.runtime.onConnect.addListener((port) => {
         full = cleaned;
         replaceDisplay(full);   // atomic swap — no clear-then-refill flicker
       }
-      if (wantWebFooter && full.trim()) {
-        const footer = linkedPagesFooter(linkedPages);
-        if (footer) emitDelta(footer);
-      }
+
 
       if (full.trim()) {
         const { model: usedModel } = await getProviderSettings();
@@ -3418,7 +3264,6 @@ const RESEARCH_MAX_WALL_MS = 60 * 60 * 1000;
 // relevance). Prevents "Understanding the question…" from hanging forever when
 // the provider is unresponsive. Falls back gracefully on timeout.
 const INTENT_LLM_TIMEOUT_MS = 15_000;
-const ROUTE_LLM_TIMEOUT_MS = 20_000;
 // Max conversation turns fed into the context window. Long chats balloon the
 // prompt (each message ~200+ tokens) → slow TTFT. A 16-turn window preserves
 // recent context while keeping prefill under ~3K tokens.
