@@ -14,6 +14,7 @@ export type DocKind =
   | 'deep-research'
   | 'research-sources'
   | 'skill'
+  | 'lesson'
   | 'academic';
 
 export interface FrontmatterFields {
@@ -24,6 +25,10 @@ export interface FrontmatterFields {
   captured?: string;     // ISO timestamp; defaults to now
   wordCount?: number;
   tags?: string[];       // extra tags beyond the defaults
+  /** Extra scalar keys emitted verbatim before `tags:` — for document kinds
+   *  that carry their own metadata (e.g. a lesson's number and coverage, read
+   *  back to sequence a course). Values are YAML-escaped. */
+  extra?: Record<string, string | number>;
 }
 
 function yamlEscape(s: string): string {
@@ -60,6 +65,9 @@ export function buildFrontmatter(f: FrontmatterFields): string {
   lines.push(`captured: ${captured}`);
   lines.push(`created: ${captured.slice(0, 10)}`);
   if (typeof f.wordCount === 'number') lines.push(`word_count: ${f.wordCount}`);
+  for (const [k, v] of Object.entries(f.extra || {})) {
+    lines.push(`${k}: ${typeof v === 'number' ? v : yamlEscape(String(v))}`);
+  }
   lines.push('tags:');
   for (const t of tags) lines.push(`  - ${t}`);
   lines.push('---');

@@ -1673,6 +1673,34 @@ loadChatHistory(activeChatId).then(() => {
 
     // /create-skill [focus] — distill the workspace's research into a
     // reusable custom slash command (saved to Settings → Custom Commands)
+    // /teach — mission on first use, then a saved lesson each time. The lesson
+    // lands in Lore as a document because the learner comes back to it; a chat
+    // message would be gone by the next session.
+    if (text.toLowerCase() === '/teach' || text.toLowerCase().startsWith('/teach ')) {
+      const topic = text.slice('/teach'.length).trim();
+      setInput('');
+      const currentChatId = activeChatId;
+      setMessages(prev => ({
+        ...prev,
+        [currentChatId]: [...(prev[currentChatId] || []), { id: uid(), role: 'user', text }]
+      }));
+      setGenerating(prev => ({ ...prev, [currentChatId]: true }));
+      const res = await msg('TEACH', { projectId: activeProjectId, chatId: currentChatId, topic });
+      setGenerating(prev => ({ ...prev, [currentChatId]: false }));
+      const body = res.success !== false && res.title
+        ? (res.missionCreated
+            ? `**Course started.** I've set this workspace's mission to:\n\n> ${res.mission}\n\nIf that's not quite your goal, say so and I'll re-aim it — every lesson is built from it.\n\n---\n\n`
+            : '')
+          + `**Lesson ${res.lessonNumber}: ${res.title}** — saved to Lore.\n\nOpen it from the Lore tab to read it. Ask me anything about it right here, and run \`/teach\` again when you're ready for the next one.`
+        : `Couldn't build the lesson: ${res.error || 'unknown error'}`;
+      setMessages(prev => ({
+        ...prev,
+        [currentChatId]: [...(prev[currentChatId] || []), { id: uid(), role: 'system', text: body }]
+      }));
+      if (res.success !== false && res.title) loadDocuments(activeProjectId);
+      return;
+    }
+
     if (text.toLowerCase() === '/create-skill' || text.toLowerCase().startsWith('/create-skill ')) {
       const instruction = text.slice('/create-skill'.length).trim();
       setInput('');

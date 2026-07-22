@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { sanitizeCustomSkill, findPromptCommand, paletteEntries, buildHelpText, customSkillToCommand } from '../commands';
+import { sanitizeCustomSkill, findPromptCommand, paletteEntries, buildHelpText, customSkillToCommand, builtinCommandNames, SLASH_COMMANDS } from '../commands';
 
 const rawSkill = {
   cmd: '/competitors',
@@ -77,5 +77,46 @@ describe('buildHelpText', () => {
     expect(helpText).toContain('/competitors');
     expect(helpText).toContain('/research');
     expect(helpText).toContain('/academic');
+  });
+});
+
+// /create-skill mints commands at runtime and must never shadow a built-in.
+// The set it checks against used to be hand-written in service-worker.ts and
+// went stale the moment a command was added — derive it, and prove it stays
+// in step with the registry.
+describe('builtinCommandNames', () => {
+  it('covers every command in the registry', () => {
+    const names = builtinCommandNames();
+    expect(names.size).toBe(SLASH_COMMANDS.length);
+    for (const c of SLASH_COMMANDS) expect(names.has(c.cmd)).toBe(true);
+  });
+
+  it('blocks a custom skill from shadowing any built-in', () => {
+    for (const c of SLASH_COMMANDS) {
+      expect(sanitizeCustomSkill({ cmd: c.cmd, desc: 'x', systemPrompt: 'y'.repeat(60) })).toBeNull();
+    }
+  });
+});
+
+describe('ported commands', () => {
+  it('/grill is a prompt command that asks one question at a time', () => {
+    const hit = findPromptCommand('/grill my migration plan');
+    expect(hit?.command.cmd).toBe('/grill');
+    expect(hit?.query).toBe('my migration plan');
+    expect(hit?.command.systemPrompt).toMatch(/ONE question per reply/);
+  });
+
+  it('/teach is a builtin — App routes it, so it must not be handled as a prompt', () => {
+    const teach = SLASH_COMMANDS.find(c => c.cmd === '/teach');
+    expect(teach?.kind).toBe('builtin');
+    expect(findPromptCommand('/teach rust ownership')).toBeNull();
+  });
+
+  it('both appear in the palette and in /help', () => {
+    expect(paletteEntries('/gr').map(c => c.cmd)).toContain('/grill');
+    expect(paletteEntries('/te').map(c => c.cmd)).toContain('/teach');
+    const help = buildHelpText();
+    expect(help).toContain('/grill');
+    expect(help).toContain('/teach');
   });
 });

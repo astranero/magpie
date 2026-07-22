@@ -62,3 +62,17 @@ test('command palette lists slash commands including /recall', async () => {
   await expect(page.getByRole('listbox', { name: /command suggestions/i }).getByText('/RECALL')).toBeVisible({ timeout: 5000 });
   await page.close();
 });
+
+test('ported commands appear in the palette', async () => {
+  const page = await context.newPage();
+  await page.goto(`chrome-extension://${extensionId}/sidepanel.html`);
+  await page.getByRole('button', { name: /chat/i }).click();
+  const input = page.getByPlaceholder(/Ask a question/i);
+
+  await input.fill('/gr');
+  await expect(page.getByText('/grill').first()).toBeVisible({ timeout: 8000 });
+
+  await input.fill('/te');
+  await expect(page.getByText('/teach').first()).toBeVisible({ timeout: 8000 });
+  await page.close();
+});

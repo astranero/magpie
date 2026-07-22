@@ -40,6 +40,8 @@ import {
   markJobActive, markJobFinished, updateHeartbeat, JOB_MAX_AGE_MS, HEARTBEAT_STALE_MS
 } from '../lib/research-store';
 import { enqueueResearch, dequeueResearch, getResearchQueue, clearResearchQueue } from '../lib/research-queue';
+import { builtinCommandNames } from '../lib/commands';
+import { handleTeach } from './teach';
 import { wikipediaSearch, wikipediaPageSummary } from '../lib/free-apis';
 
 // ─────────────────────────────────────────────
@@ -544,6 +546,7 @@ const messageHandlers: Record<string, MessageHandler> = {
   LINK_DOCUMENT: handleLinkDocument,
   UNLINK_DOCUMENT: handleUnlinkDocument,
   SEARCH_LIBRARY: handleSearchLibrary,
+  TEACH: handleTeach,
   REINDEX_LIBRARY: handleReindexLibrary,
   RECALL_DOCS: handleRecallDocs,
   CLEANUP_ORPHANS: async () => {
@@ -3075,7 +3078,7 @@ Return ONLY the JSON.`;
   const skills: Array<{ cmd: string; desc: string; systemPrompt: string }> =
     Array.isArray(s.customSkills) ? s.customSkills : [];
   const taken = new Set(skills.map(sk => sk.cmd));
-  const BUILTINS = new Set(['/page', '/research', '/deepresearch', '/academic', '/analyze', '/recall', '/compare', '/timeline', '/challenge', '/connect', '/extract', '/brief', '/clear', '/help', '/create-skill']);
+  const BUILTINS = builtinCommandNames();
   let finalCmd = cmd;
   let n = 2;
   while (taken.has(finalCmd) || BUILTINS.has(finalCmd)) finalCmd = `${cmd}-${n++}`;

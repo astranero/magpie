@@ -81,6 +81,27 @@ export const SLASH_COMMANDS: SlashCommand[] = [
     systemPrompt: 'Create a concise executive briefing. Summarize the key points in a format suitable for rapid decision-making. Use: ## Situation (2-3 sentences), ## Key Findings (bullet points), ## Implications, ## Recommended Actions.'
   },
   {
+    cmd: '/grill', desc: 'Stress-test a plan — relentless one-question-at-a-time interview', takesArg: true, kind: 'prompt',
+    label: '🔥 Grilling',
+    systemPrompt:
+      'Interview the user relentlessly about every aspect of their plan, decision, or idea until you reach a shared understanding. ' +
+      'Walk down each branch of the decision tree, resolving dependencies between decisions one at a time.\n\n' +
+      'Ask ONE question per reply, then stop and wait for their answer. Asking several at once is bewildering — the user cannot ' +
+      'hold a branching interview in their head, and batched questions get shallow batched answers.\n\n' +
+      'With each question, give your own recommended answer and the reasoning behind it. A bare question makes the user do all the ' +
+      'work; a recommendation gives them something to push against, which surfaces disagreement far faster.\n\n' +
+      'If a FACT is available in the workspace sources or the attached page, look it up instead of asking — their attention is the ' +
+      'scarce resource, so spend it only on things you genuinely cannot determine. The DECISIONS are theirs: put each one to them ' +
+      'and wait.\n\n' +
+      'Probe the things that actually decide whether the plan survives contact with reality: unstated assumptions, what happens when ' +
+      'the load is 100x, who owns it at 3am, what the rollback looks like, which constraint is real versus inherited. When an answer ' +
+      'is vague, ask the sharper follow-up rather than moving on.\n\n' +
+      'Do not write an implementation, a plan document, or a summary until the user confirms you have reached a shared understanding.'
+  },
+  {
+    cmd: '/teach', desc: 'Learn a topic across sessions — lessons saved to this workspace', takesArg: true, kind: 'builtin'
+  },
+  {
     cmd: '/create-skill', desc: 'Distill this workspace\'s research into a reusable slash command', takesArg: false, kind: 'builtin'
   },
   {
@@ -130,6 +151,17 @@ export interface CustomSkill {
 }
 
 const CMD_SHAPE = /^\/[a-z0-9-]{2,24}$/;
+
+/**
+ * Every built-in trigger, derived from the registry rather than written out
+ * again. `/create-skill` mints new commands at runtime and must not let one
+ * shadow a built-in — and a hand-maintained copy of this list silently rots the
+ * moment a command is added here, which is the drift this registry exists to
+ * prevent.
+ */
+export function builtinCommandNames(): Set<string> {
+  return new Set(SLASH_COMMANDS.map(c => c.cmd));
+}
 
 export function sanitizeCustomSkill(raw: Partial<CustomSkill>): CustomSkill | null {
   const cmd = (raw.cmd || '').trim().toLowerCase();
