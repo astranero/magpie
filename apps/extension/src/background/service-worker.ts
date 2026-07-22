@@ -2322,7 +2322,7 @@ async function agenticGather(
   if (pageMarkdown) {
     tools.push(
       { type: 'function', function: { name: 'read_section', description: 'Read a specific section of the current page by its heading text. Use the section headings from the prompt to choose which to read.', parameters: { type: 'object', properties: { heading: { type: 'string', description: 'The exact heading text of the section to read' } }, required: ['heading'] } } },
-      { type: 'function', function: { name: 'search_page', description: 'Search the current page content for a specific string (error message, function name, file path, etc.). Returns matching lines with surrounding context — like grep for the page.', parameters: { type: 'object', properties: { query: { type: 'string', description: 'Text to search for (case-insensitive substring match)' } }, required: ['query'] } } },
+      { type: 'function', function: { name: 'search_page', description: 'Search the ENTIRE page content (not just the head shown above) for a specific string — error message, function name, file path, exception type, etc. Returns matching lines with surrounding context. Like grep for the page. Use this to find errors, tracebacks, or specific patterns anywhere in the page.', parameters: { type: 'object', properties: { query: { type: 'string', description: 'Text to search for (case-insensitive substring match)' } }, required: ['query'] } } },
       { type: 'function', function: { name: 'read_lines', description: 'Read a range of lines from the current page by line number. Useful for reading traceback context around a known error line.', parameters: { type: 'object', properties: { startLine: { type: 'number', description: 'First line number (1-indexed)' }, count: { type: 'number', description: 'Number of lines to read (max 200)' } }, required: ['startLine', 'count'] } } },
     );
   }
@@ -2402,11 +2402,14 @@ async function agenticGather(
             let endLine = pageLines.length;
             const nextIdx = pageHeadings.indexOf(match) + 1;
             if (nextIdx < pageHeadings.length) endLine = pageHeadings[nextIdx].line - 1;
-            const sectionText = pageLines.slice(startLine, endLine).join('\n').slice(0, 8000);
-            const block = `\n\n--- SECTION: ${match.heading} ---\n${sectionText}\n--- END SECTION ---\n`;
+            const rawSection = pageLines.slice(startLine, endLine).join('\n');
+            const truncated = rawSection.length > 8000;
+            const sectionText = rawSection.slice(0, 8000);
+            const block = `\n\n--- SECTION: ${match.heading} ---\n${sectionText}\n--- END SECTION ---\n` +
+              (truncated ? `\n(Note: this section is ${rawSection.length} chars total. Only the first 8000 are shown. Use search_page or read_lines to explore further.)\n` : '');
             if (used + sectionText.length <= TOTAL_CTX_BUDGET) {
               blocks.push(block); used += sectionText.length;
-              result = `read section "${match.heading}" (${sectionText.length} chars)`;
+              result = `read section "${match.heading}" (${sectionText.length} chars${truncated ? ` of ${rawSection.length}` : ''})`;
             } else result = 'context budget full';
           }
         } else if (call.name === 'search_page' && pageMarkdown) {
