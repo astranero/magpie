@@ -55,5 +55,5 @@ jobs:
         run: npx playwright install chromium --with-deps
 
       - name: Run E2E Tests
-        run: npx playwright test --config=apps/extension/playwright.config.ts
+        run: npx playwright test --config=playwright.config.ts
         working-directory: apps/extension
