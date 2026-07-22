@@ -176,7 +176,7 @@ const [enterpriseGitHubUrl, setEnterpriseGitHubUrl] = useState('');
   const [autoLinkCaptures, setAutoLinkCaptures] = useState(true);
   // Ephemeral page context: include the current tab's content in chat
   // without capturing it (persisted preference)
-  const [includePageContext, setIncludePageContext] = useState(false);
+  const [includePageContext, setIncludePageContext] = useState(true); // default ON — most users chat about the page they're on
   // Where to return when leaving DocumentView (citation chips open docs from
   // chat; source list opens them from sources), + chat reading position so
   // "back" lands on the message the user was reading, not the bottom.
@@ -1124,7 +1124,7 @@ loadChatHistory(activeChatId).then(() => {
           if (r.activeProvider === 'copilot' || r.activeProvider === 'byok') setActiveProvider(r.activeProvider);
           if (r.visionModel) setVisionModel(r.visionModel);
           setAutoLinkCaptures(r.autoLinkCaptures !== false); // default ON
-          setIncludePageContext(r.includePageContext === true); // default OFF
+          setIncludePageContext(r.includePageContext !== false); // default ON
           setSyncResearchSources(r.syncResearchSources === true); // default OFF
           if (typeof r.routeChatThroughCli === 'boolean') {
             setRouteChatThroughCli(r.routeChatThroughCli ? 'enabled' : 'disabled');
