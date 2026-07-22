@@ -3,7 +3,7 @@ import * as researchStore from '../research-store';
 import type { ResearchJob } from '../research-store';
 
 let mockStorage: Map<string, any>;
-let setMock: ReturnType<typeof vi.fn<any[], any>>;
+let setMock: ReturnType<typeof vi.fn>;
 
 function makeJob(over: Partial<ResearchJob> = {}): ResearchJob {
   return {
@@ -20,7 +20,7 @@ function makeJob(over: Partial<ResearchJob> = {}): ResearchJob {
 
 beforeEach(() => {
   mockStorage = new Map<string, any>();
-  setMock = vi.fn<any[], any>(async (items: Record<string, any>) => {
+  setMock = vi.fn(async (items: Record<string, any>) => {
     Object.entries(items).forEach(([key, value]) => {
       mockStorage.set(key, value);
     });
