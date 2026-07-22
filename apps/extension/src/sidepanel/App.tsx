@@ -2213,7 +2213,13 @@ onOpenDocument={(docId, anchorId) => openDocById(docId, anchorId, 'chat')}
               onRefreshModels={async () => {
                 if (activeProvider === 'copilot') {
                   const res = await msg('COPILOT_FETCH_MODELS');
-                  if (res.success) setCustomModels(res.models as string[]);
+                  if (res.success) {
+                    const models = res.models as string[];
+                    setCopilotModels(models);
+                    setCustomModels(models);
+                    if (res.apiBase) setCopilotApiBase(res.apiBase as string);
+                    chrome.storage.local.set({ copilotModels: models, copilotApiBase: (res.apiBase as string) || '' });
+                  }
                   return;
                 }
                 if (!customUrl) return;
