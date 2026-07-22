@@ -336,6 +336,26 @@ async function scrapePage(): Promise<{
     }
   }
 
+  // ── LOG / TECHNICAL PAGE DETECTION ──
+  // Pages with high <pre>/<code>/monospace density (CI logs, error pages,
+  // Azure DevOps pipelines, stack traces) are poorly served by Readability
+  // (which strips structure). Instead, use the raw innerText which preserves
+  // line-by-line layout and is 10-100x faster.
+  const body = document.body;
+  const totalText = body?.innerText || '';
+  const preCount = document.querySelectorAll('pre').length;
+  const codeCount = document.querySelectorAll('code').length;
+  const monospaceDensity = totalText.length > 0
+    ? (preCount * 200 + codeCount * 50) / totalText.length
+    : 0;
+  const isLogPage = monospaceDensity > 0.3 || preCount > 20 || totalText.split('\n').length > 500;
+
+  if (isLogPage) {
+    // Fast path: innerText preserves line structure, good for logs/errors
+    const wordCount = totalText.split(/\s+/).filter(w => w.length > 0).length;
+    return { title, url, favicon, markdown: totalText.slice(0, 100000), wordCount };
+  }
+
   // ── STANDARD PAGE EXTRACTION ──
   const documentClone = document.cloneNode(true) as Document;
   

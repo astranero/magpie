@@ -1922,7 +1922,8 @@ async function buildChatRequest(chatId: string, projectId: string, prompt: strin
       `\n\n--- CURRENT PAGE (the user is viewing this in their browser right now; it is NOT saved in their library) ---\n` +
       `Title: ${pageContext.title}\nURL: ${pageContext.url}\n\n${md}\n` +
       `--- END CURRENT PAGE ---\n` +
-      `You may answer from the current page. Attribute such claims in plain text, e.g. "according to the page you're viewing". ` +
+      `Only answer from the CURRENT PAGE content above. Do NOT use your own knowledge. If the page does not contain the specific answer, say so — do not make up file names, line numbers, error messages, or any other details that are not in the page content. ` +
+      `Attribute such claims in plain text, e.g. "according to the page you're viewing". ` +
       `NEVER use [anchor] citations for current-page content — anchors are only for library sources.`;
 
     // Build/pipeline logs: guarantee the error/failure lines reach the model
