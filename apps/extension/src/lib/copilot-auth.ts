@@ -26,6 +26,48 @@ const COPILOT_CLIENT_ID = 'Iv1.b507a08c87ecfe98';
  *  affects the default chat-completions endpoint. */
 export const COPILOT_API_URL = 'https://api.githubcopilot.com/v1';
 export const COPILOT_DEFAULT_MODEL = 'gpt-4o';
+
+/** Host of the PUBLIC Copilot API. Enterprise proxies use their own host and
+ *  are never rewritten by `normalizeCopilotApiBase`. */
+const PUBLIC_COPILOT_HOST = 'api.githubcopilot.com';
+
+/**
+ * Editor-identity headers the Copilot API requires on EVERY call. Without them
+ * it 401s with "No user or org id found in auth cookie" even with a perfectly
+ * valid session token. Defined once: this set was duplicated in the model-list
+ * fetch and the chat client, and a version bump applied to only one of them is
+ * precisely how the 401 gets reintroduced.
+ */
+export const COPILOT_EDITOR_HEADERS: Record<string, string> = {
+  'Editor-Version': 'vscode/1.95.0',
+  'Editor-Plugin-Version': 'copilot-chat/0.22.0',
+  'Copilot-Integration-Id': 'vscode-chat',
+  'X-GitHub-Api-Version': '2025-04-01',
+  'OpenAI-Intent': 'conversation-panel',
+  'User-Agent': 'GitHubCopilotChat/0.26.7',
+};
+
+/**
+ * Force the working `/v1` path on the PUBLIC Copilot API.
+ *
+ * The token exchange (`/copilot_internal/v2/token`) answers with
+ * `endpoints.api = "https://api.githubcopilot.com"` — no `/v1`. Trusting that
+ * verbatim is what made every chat message 401 with "No user or org id found
+ * in auth cookie": `saveCopilotAuth` preferred it over COPILOT_API_URL and
+ * wrote it to `customUrl`, so the fix that set the default to `/v1` was undone
+ * the moment the user signed in.
+ *
+ * Enterprise/proxy bases are returned untouched — their path layout is theirs
+ * to define. Pure + unit-tested.
+ */
+export function normalizeCopilotApiBase(raw: string): string {
+  const base = (raw || '').trim().replace(/\/+$/, '');
+  if (!base) return COPILOT_API_URL;
+  let host: string;
+  try { host = new URL(base).hostname; } catch { return base; }
+  if (host !== PUBLIC_COPILOT_HOST) return base;      // enterprise proxy — leave alone
+  return /\/v1$/i.test(base) ? base : `${base}/v1`;
+}
 /** Default GitHub host for the OAuth device flow. */
 export const DEFAULT_GITHUB_BASE_URL = 'https://github.com';
 
@@ -54,12 +96,9 @@ export function resolveGithubEndpoints(
 ): GithubEndpoints {
   const withHttps = (raw: string) => /^https?:\/\//i.test(raw) ? raw : `https://${raw}`;
   const normalizeBase = (raw: string) => withHttps(raw.trim()).replace(/\/+$/, '');
-  const normalizeApi = (raw: string) => {
-    const u = withHttps(raw.trim()).replace(/\/+$/, '');
-    // Public Copilot uses /chat/completions (no /v1). Enterprise proxies may
-    // expose their own exact base; use what the user provides.
-    return u;
-  };
+  // Public Copilot needs the /v1 path (see normalizeCopilotApiBase); an
+  // enterprise proxy's own base is used exactly as the user provides it.
+  const normalizeApi = (raw: string) => normalizeCopilotApiBase(withHttps(raw.trim()));
   const base = normalizeBase(baseUrl || DEFAULT_GITHUB_BASE_URL);
   const isDotCom = /^https?:\/\/github\.com$/i.test(base);
   const apiBase = isDotCom ? 'https://api.github.com' : `${base}/api/v3`;
@@ -82,10 +121,12 @@ export function resolveGithubEndpoints(
 export async function fetchCopilotModels(copilotApiUrl: string, token: string): Promise<string[]> {
   const base = (copilotApiUrl || COPILOT_API_URL).replace(/\/+$/, '');
   const noV1 = base.replace(/\/v1$/i, '');
+  // `${base}/v1/models` would be /v1/v1/models when base already ends in /v1 —
+  // derive the v1 form from the stripped base instead.
   const candidates = Array.from(new Set([
     `${base}/models`,
     `${noV1}/models`,
-    `${base}/v1/models`,
+    `${noV1}/v1/models`,
   ]));
   for (const endpoint of candidates) {
     try {
@@ -93,12 +134,7 @@ export async function fetchCopilotModels(copilotApiUrl: string, token: string): 
         headers: {
           'Authorization': `Bearer ${token}`,
           'Accept': 'application/json',
-          'Editor-Version': 'vscode/1.95.0',
-          'Editor-Plugin-Version': 'copilot-chat/0.22.0',
-          'Copilot-Integration-Id': 'vscode-chat',
-          'X-GitHub-Api-Version': '2025-04-01',
-          'OpenAI-Intent': 'conversation-panel',
-          'User-Agent': 'GitHubCopilotChat/0.26.7',
+          ...COPILOT_EDITOR_HEADERS,
         },
         signal: AbortSignal.timeout(5000),
       });
@@ -269,7 +305,9 @@ export async function getValidCopilotToken(): Promise<string> {
 export async function saveCopilotAuth(accessToken: string): Promise<void> {
   const { token, expiresAt, apiEndpoint } = await getCopilotSessionToken(accessToken);
   const { copilotApiUrl } = await getGithubEndpoints();
-  const apiBase = apiEndpoint || copilotApiUrl;
+  // The exchange returns the PUBLIC base without /v1; normalize or every chat
+  // call 401s ("No user or org id found in auth cookie").
+  const apiBase = normalizeCopilotApiBase(apiEndpoint || copilotApiUrl);
   const models = await fetchCopilotModels(apiBase, token);
   const preferred = models.find(m => /gpt-4o|gpt-4\.1/i.test(m)) || models[0] || COPILOT_DEFAULT_MODEL;
   await chrome.storage.local.set({
@@ -296,7 +334,7 @@ export async function refreshCopilotModels(): Promise<{ models: string[]; apiBas
   const s = await chrome.storage.local.get([STORAGE_KEY]);
   const auth = s[STORAGE_KEY] as CopilotAuth | undefined;
   const { copilotApiUrl } = await getGithubEndpoints();
-  const apiBase = auth?.apiEndpoint || copilotApiUrl;
+  const apiBase = normalizeCopilotApiBase(auth?.apiEndpoint || copilotApiUrl);
   const models = await fetchCopilotModels(apiBase, token);
   // Keep both buckets in sync: `copilotModels` for anything Copilot-specific,
   // `customModels` because that's the shared key the model pickers render.
@@ -310,11 +348,17 @@ export async function isCopilotConfigured(): Promise<boolean> {
   return !!(s[STORAGE_KEY] as CopilotAuth | undefined)?.accessToken;
 }
 
-/** Sign out of Copilot. */
+/** Sign out of Copilot.
+ *  Clears the Copilot-derived provider state too — leaving `activeProvider:
+ *  'copilot'`, `copilotModels` and `customModels` behind made the panel keep
+ *  showing Copilot as the active provider (with a stale model list) after a
+ *  sign-out, so the next message failed against a provider the user had left. */
 export async function signOutCopilot(): Promise<void> {
-  await chrome.storage.local.remove(STORAGE_KEY);
+  await chrome.storage.local.remove([STORAGE_KEY, COPILOT_PENDING_KEY, 'copilotApiBase', 'copilotModels']);
   const s = await chrome.storage.local.get(['customKey']);
   if (s.customKey === '__copilot_sso__') {
-    await chrome.storage.local.remove(['customUrl', 'customKey', 'customModel']);
+    await chrome.storage.local.remove(['customUrl', 'customKey', 'customModel', 'customModels']);
+    // Fall back to BYOK so the UI doesn't advertise a provider we just left.
+    await chrome.storage.local.set({ activeProvider: 'byok' });
   }
 }

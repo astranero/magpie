@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { resolveGithubEndpoints, COPILOT_API_URL, DEFAULT_GITHUB_BASE_URL } from '../copilot-auth';
+import { resolveGithubEndpoints, normalizeCopilotApiBase, COPILOT_API_URL, COPILOT_EDITOR_HEADERS, DEFAULT_GITHUB_BASE_URL } from '../copilot-auth';
+import { buildProviderHeaders } from '../../background/llm-client';
 
 describe('resolveGithubEndpoints', () => {
   it('defaults to github.com + api.github.com when no base is given', () => {
@@ -46,5 +47,51 @@ describe('resolveGithubEndpoints', () => {
 
   it('honors a custom OAuth client id', () => {
     expect(resolveGithubEndpoints(undefined, undefined, 'Iv1.custom').clientId).toBe('Iv1.custom');
+  });
+});
+
+describe('normalizeCopilotApiBase', () => {
+  // Regression: the /copilot_internal/v2/token exchange answers with
+  // endpoints.api = "https://api.githubcopilot.com" (no /v1). saveCopilotAuth
+  // preferred that over COPILOT_API_URL and wrote it to customUrl, so every
+  // chat message 401'd with "No user or org id found in auth cookie".
+  it('forces /v1 on the public Copilot host', () => {
+    expect(normalizeCopilotApiBase('https://api.githubcopilot.com')).toBe(COPILOT_API_URL);
+    expect(normalizeCopilotApiBase('https://api.githubcopilot.com/')).toBe(COPILOT_API_URL);
+  });
+
+  it('is idempotent — never doubles /v1', () => {
+    expect(normalizeCopilotApiBase(COPILOT_API_URL)).toBe(COPILOT_API_URL);
+    expect(normalizeCopilotApiBase(normalizeCopilotApiBase('https://api.githubcopilot.com'))).toBe(COPILOT_API_URL);
+  });
+
+  it('leaves an enterprise proxy base exactly as provided', () => {
+    expect(normalizeCopilotApiBase('https://copilot.acme.com')).toBe('https://copilot.acme.com');
+    expect(normalizeCopilotApiBase('https://copilot.acme.com/api/v2/')).toBe('https://copilot.acme.com/api/v2');
+  });
+
+  it('falls back to the default for empty/garbage input', () => {
+    expect(normalizeCopilotApiBase('')).toBe(COPILOT_API_URL);
+    expect(normalizeCopilotApiBase('not a url')).toBe('not a url');
+  });
+});
+
+describe('buildProviderHeaders', () => {
+  it('sends the editor-identity headers for Copilot, from the shared constant', () => {
+    const h = buildProviderHeaders('tok', true);
+    expect(h['Authorization']).toBe('Bearer tok');
+    // Every canonical header must be present — a one-sided drift here is what
+    // reintroduces the 401.
+    for (const [k, v] of Object.entries(COPILOT_EDITOR_HEADERS)) expect(h[k]).toBe(v);
+  });
+
+  it('does NOT leak GitHub-specific headers to a BYOK provider', () => {
+    const h = buildProviderHeaders('sk-user-key', false);
+    expect(h['Authorization']).toBe('Bearer sk-user-key');
+    for (const k of Object.keys(COPILOT_EDITOR_HEADERS)) expect(h[k]).toBeUndefined();
+  });
+
+  it('omits Authorization when there is no key (keyless local endpoint)', () => {
+    expect(buildProviderHeaders('', false)['Authorization']).toBeUndefined();
   });
 });

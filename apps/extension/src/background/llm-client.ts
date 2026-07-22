@@ -6,7 +6,7 @@
 
 import { BUILTIN_GEMINI_SENTINEL } from '../lib/provider-detect';
 import { isAllowedProviderUrl } from '../lib/settings';
-import { getValidCopilotToken, COPILOT_API_URL } from '../lib/copilot-auth';
+import { getValidCopilotToken, COPILOT_API_URL, COPILOT_EDITOR_HEADERS } from '../lib/copilot-auth';
 
 export async function getProviderSettings(): Promise<Record<string, string>> {
   const s = await chrome.storage.local.get(['customUrl', 'customKey', 'customModel', 'visionModel']);
@@ -46,14 +46,10 @@ export async function getProviderSettings(): Promise<Record<string, string>> {
 export function buildProviderHeaders(apiKey: string, isCopilot: boolean): Record<string, string> {
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
   if (apiKey) headers['Authorization'] = `Bearer ${apiKey}`;
-  if (isCopilot) {
-    headers['Editor-Version'] = 'vscode/1.95.0';
-    headers['Editor-Plugin-Version'] = 'copilot-chat/0.22.0';
-    headers['Copilot-Integration-Id'] = 'vscode-chat';
-    headers['X-GitHub-Api-Version'] = '2025-04-01';
-    headers['OpenAI-Intent'] = 'conversation-panel';
-    headers['User-Agent'] = 'GitHubCopilotChat/0.26.7';
-  }
+  // Single source of truth (lib/copilot-auth) — this set was duplicated here
+  // and in the model-list fetch, and a one-sided version bump reintroduces the
+  // "No user or org id found in auth cookie" 401.
+  if (isCopilot) Object.assign(headers, COPILOT_EDITOR_HEADERS);
   return headers;
 }
 
