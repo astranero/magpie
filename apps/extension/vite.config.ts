@@ -50,7 +50,8 @@ export default defineConfig({
         },
         {
           src: '../../node_modules/onnxruntime-web/dist/ort-wasm-simd-threaded*',
-          dest: 'transformers'
+          dest: 'transformers',
+          rename: { stripBase: 4 }
         }
       ]
     })
