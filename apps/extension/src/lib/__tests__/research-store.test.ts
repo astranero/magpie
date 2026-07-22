@@ -25,7 +25,7 @@ beforeEach(() => {
       mockStorage.set(key, value);
     });
     return items;
-  });
+  }) as ReturnType<typeof vi.fn>;
 
   (globalThis as any).chrome = {
     storage: {
