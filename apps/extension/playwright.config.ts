@@ -10,5 +10,5 @@ export default defineConfig({
   retries: 1,
   fullyParallel: false,
   reporter: process.env.CI ? 'github' : 'list',
-  use: { trace: 'retain-on-failure' }
+  use: { trace: 'retain-on-failure', launchOptions: { dumpio: true } }
 });

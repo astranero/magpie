@@ -29,7 +29,6 @@ export const MagpieImage: React.FC<{ src?: string; alt?: string; docId?: string;
 
   if (!isMagpie) {
     // Plain image (data: URL or http) — render directly.
-    // eslint-disable-next-line @next/next/no-img-element
     return <img src={src} alt={alt || ''} className={className} />;
   }
   if (failed) {
@@ -46,7 +45,6 @@ export const MagpieImage: React.FC<{ src?: string; alt?: string; docId?: string;
       </span>
     );
   }
-  // eslint-disable-next-line @next/next/no-img-element
   return <img src={dataUrl} alt={alt || ''} className={className} />;
 };
 

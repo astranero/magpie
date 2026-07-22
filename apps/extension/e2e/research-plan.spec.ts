@@ -47,7 +47,7 @@ test('research command renders an in-chat plan card that can be cancelled', asyn
 
   // Cancel flips the card to its terminal state and removes the buttons
   await page.getByRole('button', { name: /^cancel$/i }).click();
-  await expect(page.getByText('Cancelled')).toBeVisible({ timeout: 5000 });
+  await expect(page.getByText('Cancelled').last()).toBeVisible({ timeout: 5000 });
   await expect(startBtn).not.toBeVisible();
 
   await page.close();
@@ -72,7 +72,7 @@ test('academic command renders an Academic Research plan card', async () => {
   await expect(startBtn).toBeVisible({ timeout: 15000 });
 
   await page.getByRole('button', { name: /^cancel$/i }).click();
-  await expect(page.getByText('Cancelled')).toBeVisible({ timeout: 5000 });
+  await expect(page.getByText('Cancelled').last()).toBeVisible({ timeout: 5000 });
   await expect(startBtn).not.toBeVisible();
 
   await page.close();

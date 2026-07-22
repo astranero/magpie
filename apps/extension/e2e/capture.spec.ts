@@ -43,7 +43,7 @@ test('imported document is searchable and opens at the matched passage', async (
   await expect(page.getByText('Default Session').first()).toBeVisible({ timeout: 10000 });
 
   // Seed a project + a document with a distinctive phrase
-  const proj: any = await sendMessage(page, 'CREATE_PROJECT', { title: 'E2E Project' });
+  const proj = await sendMessage(page, 'CREATE_PROJECT', { title: 'E2E Project' }) as { id?: string, project?: { id: string } };
   const projectId = proj?.project?.id || proj?.id;
   expect(projectId).toBeTruthy();
 

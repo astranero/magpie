@@ -14,7 +14,7 @@ const uid = (): string => `m${Date.now().toString(36)}${(_uidSeq++).toString(36)
 const sanitizeSegment = (name: string): string =>
   (name || '')
     .normalize('NFC')
-    .replace(/[‎‏​‌‍﻿]/g, '')
+    .replace(/[\u200E\u200F\u200B\u200C\u200D\uFEFF]/gu, '')
     .replace(/[^\w\s\-().,'!&+#@\[\]{}]/g, '')
     .replace(/\s+/g, ' ')
     .replace(/^\.+/, '').replace(/\.+$/, '')

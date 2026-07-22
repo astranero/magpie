@@ -2819,10 +2819,14 @@ chrome.runtime.onConnect.addListener((port) => {
     interactiveDepth++;
     try {
       const pageCtx = req.includePageContext ? await getPageContext().catch(() => null) : null;
-      let { systemPrompt, formattedHistory, linkedPages, grounded, place, branch } = await buildChatRequest(
+      const built = await buildChatRequest(
         chatId, projectId, prompt, localController.signal, pageCtx,
         (text) => safePost({ type: 'STATUS', text })
       );
+      const { formattedHistory, grounded, place, branch } = built;
+      // Only these two are reassigned below (override prepend; refusal→web swap).
+      let systemPrompt = built.systemPrompt;
+      let linkedPages = built.linkedPages;
 
       if (systemPromptOverride) {
         systemPrompt = systemPromptOverride + '\n\n' + systemPrompt;

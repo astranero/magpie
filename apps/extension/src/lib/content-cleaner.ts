@@ -77,7 +77,7 @@ export function cleanContent(markdown: string): string {
   text = text.replace(/\r\n?/g, '\n');
 
   // 1. Strip invisible Unicode characters (BOM, LTR/RTL marks, zero-width spaces)
-  text = text.replace(/[\u200B\u200C\u200D\u200E\u200F\uFEFF\u00AD\u2060\u180E]/g, '');
+  text = text.replace(/[\u200B\u200C\u200D\u200E\u200F\uFEFF\u00AD\u2060\u180E]/gu, '');
 
   // 2. Remove common web noise patterns (en + de + fi + fr boilerplate)
   const noisePatterns = [

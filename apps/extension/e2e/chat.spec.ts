@@ -1,5 +1,6 @@
 import { test, expect, chromium, type BrowserContext } from '@playwright/test';
 import { createServer, type Server } from 'node:http';
+import { type AddressInfo } from 'node:net';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -32,7 +33,7 @@ function startMockLLM(): Promise<{ server: Server; url: string }> {
       }, 20);
     });
     server.listen(0, '127.0.0.1', () => {
-      const port = (server.address() as any).port;
+      const port = (server.address() as AddressInfo).port;
       resolve({ server, url: `http://127.0.0.1:${port}` });
     });
   });

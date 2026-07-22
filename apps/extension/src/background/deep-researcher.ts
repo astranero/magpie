@@ -182,7 +182,7 @@ export function stripModelBibliography(synthesis: string): string {
  * capstone/exec-summary is absent, and eating that heading maimed the report.
  */
 export function stripLeadingTitle(synthesis: string, topic = ''): string {
-  const s = synthesis.replace(/^﻿?\s*/, '');
+  const s = synthesis.replace(/^\uFEFF?\s*/, '');
   const h1 = s.match(/^#\s+.+\n+/);
   if (h1) return s.slice(h1[0].length);
   const h2 = s.match(/^##\s+(.+)\n+/);

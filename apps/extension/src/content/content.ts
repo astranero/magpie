@@ -258,7 +258,7 @@ function extractTitleFromMarkdown(markdown: string, fallback: string): string {
  */
 function isGenericTitle(title: string): boolean {
   // Strip invisible unicode characters (e.g. U+200E Left-to-Right Mark from Gemini pages)
-  const cleaned = title.trim().replace(/[\u200E\u200F\u200B\u200C\u200D\uFEFF\u00AD]/g, '').trim();
+  const cleaned = title.trim().replace(/[\u200E\u200F\u200B\u200C\u200D\uFEFF\u00AD]/gu, '').trim();
   const genericPatterns = [
     /^google\s*(gemini|docs|sheets|slides|drive|ai|bard)?$/i,
     /^‎?google\s*(gemini)?$/i,   // with LTR mark prefix
