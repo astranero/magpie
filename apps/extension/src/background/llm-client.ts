@@ -47,9 +47,12 @@ export function buildProviderHeaders(apiKey: string, isCopilot: boolean): Record
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
   if (apiKey) headers['Authorization'] = `Bearer ${apiKey}`;
   if (isCopilot) {
-    headers['Editor-Version'] = 'Magpie/1.0';
-    headers['Editor-Plugin-Version'] = 'magpie-research-assistant/1.0';
+    headers['Editor-Version'] = 'vscode/1.95.0';
+    headers['Editor-Plugin-Version'] = 'copilot-chat/0.22.0';
     headers['Copilot-Integration-Id'] = 'vscode-chat';
+    headers['X-GitHub-Api-Version'] = '2025-04-01';
+    headers['OpenAI-Intent'] = 'conversation-panel';
+    headers['User-Agent'] = 'GitHubCopilotChat/0.26.7';
   }
   return headers;
 }

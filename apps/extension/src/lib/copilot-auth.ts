@@ -18,8 +18,13 @@
 // GitHub Enterprise deployments can register their own OAuth app; override it
 // via the `githubClientId` setting.
 const COPILOT_CLIENT_ID = 'Iv1.b507a08c87ecfe98';
-/** Default Copilot completions endpoint. Copilot does NOT use OpenAI's /v1 path. */
-export const COPILOT_API_URL = 'https://api.githubcopilot.com';
+/** Default Copilot completions endpoint. `/v1` is the path that has actually
+ *  worked for chat completions (api.githubcopilot.com without /v1 has been
+ *  observed to 401 with "No user or org id found in auth cookie" even with a
+ *  fresh session token + the vscode-style headers). Model listing tries both
+ *  the /v1 and bare paths regardless (see fetchCopilotModels), so this only
+ *  affects the default chat-completions endpoint. */
+export const COPILOT_API_URL = 'https://api.githubcopilot.com/v1';
 export const COPILOT_DEFAULT_MODEL = 'gpt-4o';
 /** Default GitHub host for the OAuth device flow. */
 export const DEFAULT_GITHUB_BASE_URL = 'https://github.com';
@@ -91,6 +96,9 @@ export async function fetchCopilotModels(copilotApiUrl: string, token: string): 
           'Editor-Version': 'vscode/1.95.0',
           'Editor-Plugin-Version': 'copilot-chat/0.22.0',
           'Copilot-Integration-Id': 'vscode-chat',
+          'X-GitHub-Api-Version': '2025-04-01',
+          'OpenAI-Intent': 'conversation-panel',
+          'User-Agent': 'GitHubCopilotChat/0.26.7',
         },
         signal: AbortSignal.timeout(5000),
       });
