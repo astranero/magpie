@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc && vite build && CONTENT_ENTRY=content vite build -c vite.content.config.ts && CONTENT_ENTRY=inject vite build -c vite.content.config.ts",
+    "build": "tsc && vite build && cross-env CONTENT_ENTRY=content vite build -c vite.content.config.ts && cross-env CONTENT_ENTRY=inject vite build -c vite.content.config.ts",
     "preview": "vite preview",
     "test": "vitest run",
     "test:e2e": "playwright test"
@@ -47,13 +47,14 @@
     "@types/react-dom": "^18.3.0",
     "@types/turndown": "^5.0.6",
     "@vitejs/plugin-react": "^4.3.1",
+    "cross-env": "^7.0.3",
     "autoprefixer": "^10.5.2",
     "jsdom": "^29.1.1",
     "postcss": "^8.5.16",
     "tailwindcss": "^3.4.19",
     "typescript": "^5.2.2",
     "vite": "^5.3.1",
-    "vite-plugin-static-copy": "^1.0.6",
+    "vite-plugin-static-copy": "^3.4.0",
     "vitest": "^1.6.1"
   }
 }
