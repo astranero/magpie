@@ -162,7 +162,7 @@ const PlanCard: React.FC<PlanCardProps> = ({ msgId, plan, onStart, onCancel }) =
             {(plan.status === 'failed' || plan.status === 'cancelled') && (
               <div className="border-t border-border/60 pt-2.5 space-y-2">
                 <div className="text-[11px] text-red-600 dark:text-red-400 leading-snug break-words">
-                  {plan.status === 'cancelled' ? 'Research cancelled.' : `Research failed${plan.error ? `: ${plan.error}` : ''}. Nothing was saved — retry to run the same plan again.`}
+                  {plan.status === 'cancelled' ? 'This run was stopped before it produced a report.' : `Research failed${plan.error ? `: ${plan.error}` : ''}. Nothing was saved — retry to run the same plan again.`}
                 </div>
                 <div className="flex gap-2">
                   <Button
