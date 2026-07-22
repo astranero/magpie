@@ -10,7 +10,37 @@ Target: **8 visible controls + 1 conditional + one collapsed `Advanced` (8 items
 
 ---
 
-## 0. Bugs the audit found (fix FIRST — independent of config work)
+## Status (2026-07-22)
+
+Steps 1–3 are **done**. Corrections to this plan, found while implementing it:
+
+- **§5.2's dead-key list was wrong on four of seven entries.** `localMcpCompanionUrl`
+  and `linkedPagesFooter` are live (both have real callers). `copilotApiUrl` and
+  `githubClientId` are read by `getGithubEndpoints` as enterprise endpoint escape
+  hatches — two lines, no UI, no config-size cost — so removing them would strand a
+  GHES user with a nonstandard Copilot base. **Kept deliberately.**
+  Genuinely dead (read, never written): `showWebSources`, `chatRoutingMode`. Both
+  removed along with the code they gated (−171 lines), including `decideRouteAgentic`
+  and the now-unconsumed `linkedPages` data path.
+- **The audit's "duplicate" framing needs a distinction.** `classificationModel` was a
+  true duplicate (rendered twice in one section — fixed). `enterpriseGitHubUrl` is not:
+  the two copies sit in mutually-exclusive auth branches, so the user sees one. That was
+  duplicated *code*, resolved by extracting `EnterpriseGitHubField`.
+- **Model selection was the real friction, and the cause wasn't in this plan.**
+  `customModels` is a single bucket that `saveCopilotAuth` overwrites, so only the
+  most-recently-configured provider's catalog was ever visible. Fixed by keeping both
+  catalogs live and rendering them as labeled groups; selecting a model switches the
+  active provider trio.
+- **A library-search bug surfaced en route** (unrelated to config): search was
+  semantic-only, so an exact phrase in the user's own document missed whenever the
+  embedder was cold — and a cold embedder *hangs* rather than rejects, pinning the panel
+  on "Searching contents…" forever. Now hybrid literal + semantic with a 6s bound.
+
+Remaining: steps 4–12, and parallel research (§3).
+
+---
+
+## 0. Bugs the audit found (fix FIRST — independent of config work) ✅ DONE
 
 These are correctness/security defects, not preferences. Verified against source.
 
@@ -146,13 +176,12 @@ alignment (we don't train models), Mixture-of-Agents (cost).
 
 ## 5. Ordered steps (each independently shippable)
 
-1. **Bug fixes from §0** (security/correctness; no config change).
-2. Delete unreachable keys: `showWebSources`, `chatRoutingMode`, `copilotApiUrl`,
-   `localMcpCompanionUrl`, `byok` (+ dead `linkedPagesFooter`, `decideRouteAgentic`).
-3. De-dupe rendered controls + create the `Advanced` container.
-   **Three literal duplicates exist:** `classificationModel` rendered twice
-   (`:593`, `:684`), `enterpriseGitHubUrl` rendered in both auth branches
-   (`:164-175`, `:182-192`), `customModel` in both Settings and the chat header.
+1. ~~**Bug fixes from §0** (security/correctness; no config change).~~ ✅
+2. ~~Delete unreachable keys.~~ ✅ — but only `showWebSources`, `chatRoutingMode`,
+   `decideRouteAgentic`, `linkedPages`. See Status: the other four listed here are live.
+3. ~~De-dupe rendered controls.~~ ✅ (`classificationModel`, `EnterpriseGitHubField`).
+   The `Advanced` container is still TODO. `customModel` in both Settings and the chat
+   header is intentional, not a duplicate — the header picker is where users switch.
 4. Model-trio auto-derive (§2) + retain `context_length` from `/models`.
 5. `inferenceDevice` → hardcoded wasm.
 6. Chat-routing merge (one `Chat backend` control) + `pageContextStrategy` derive.
