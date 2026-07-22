@@ -9,7 +9,11 @@ import { SearchApiKeys, getSearchApiKeys, saveSearchApiKeys } from '../../lib/se
 import { getCrashLog, clearCrashLog, formatCrashLog } from '../../lib/crash-log';
 
 // ── GitHub Copilot SSO section ────────────────────────────────────────────
-function CopilotSSOSection() {
+function CopilotSSOSection({ enterpriseGitHubUrl, setEnterpriseGitHubUrl, saveSettings }: {
+  enterpriseGitHubUrl: string;
+  setEnterpriseGitHubUrl: (v: string) => void;
+  saveSettings: () => void;
+}) {
   const [status, setStatus] = useState<'idle' | 'polling' | 'done' | 'error'>('idle');
   const [configured, setConfigured] = useState(false);
   const [userCode, setUserCode] = useState('');
@@ -56,17 +60,42 @@ function CopilotSSOSection() {
         <div className="flex items-center gap-2">
           <span className="w-2 h-2 rounded-full bg-green-500" />
           <span className="text-xs font-medium text-foreground">Connected to GitHub Copilot</span>
+          {enterpriseGitHubUrl && <span className="text-[10px] text-muted-foreground">({new URL(enterpriseGitHubUrl).hostname})</span>}
         </div>
         <p className="text-[10px] text-muted-foreground">
           Chat uses your organization's Copilot API. Model selection is handled by Copilot.
         </p>
         <Button variant="secondary" size="sm" className="rounded-lg text-xs" onClick={signOut}>Sign out</Button>
+        {/* Enterprise URL config — always visible, even when signed in */}
+        <div className="pt-2 border-t border-border">
+          <label className="text-[10px] font-medium text-muted-foreground">Enterprise GitHub URL</label>
+          <input
+            type="url"
+            placeholder="https://github.acme.com"
+            value={enterpriseGitHubUrl}
+            onChange={e => { setEnterpriseGitHubUrl(e.target.value); setTimeout(saveSettings, 0); }}
+            className="mt-1 w-full rounded-md border border-border bg-background px-2 py-1 text-[11px] text-foreground placeholder:text-muted-foreground focus:border-primary focus:outline-none"
+          />
+        </div>
       </div>
     );
   }
 
   return (
     <div className="space-y-3">
+      {/* Enterprise URL input at the top */}
+      <div>
+        <label className="text-[10px] font-medium text-muted-foreground">Enterprise GitHub URL</label>
+        <input
+          type="url"
+          placeholder="https://github.acme.com (leave empty for github.com)"
+          value={enterpriseGitHubUrl}
+          onChange={e => { setEnterpriseGitHubUrl(e.target.value); setTimeout(saveSettings, 0); }}
+          className="mt-1 w-full rounded-md border border-border bg-background px-2.5 py-1.5 text-xs text-foreground placeholder:text-muted-foreground focus:border-primary focus:outline-none"
+        />
+        <p className="mt-1 text-[10px] text-muted-foreground">Used for repo file-tree fetching, raw file content, and Copilot SSO.</p>
+      </div>
+      {/* Sign-in button below */}
       <p className="text-[10px] text-muted-foreground leading-normal">
         Sign in with GitHub to use your enterprise Copilot as the AI backend — no API key needed.
       </p>
@@ -359,30 +388,8 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
       </Section>
 
       {/* ── GitHub Copilot SSO ── */}
-      <Section id="copilot" title="GitHub Copilot" subtitle="Sign in with your enterprise GitHub account." defaultOpen={true}>
-        <CopilotSSOSection />
-      </Section>
-
-      {/* ── Enterprise GitHub (self-hosted) ── */}
-      <Section id="enterprise-github" title="Enterprise GitHub (GHES)" subtitle="Optional — set only if your repos live on a GitHub Enterprise Server instance." defaultOpen={true}>
-        <div className="space-y-2">
-          <label className="text-xs font-medium text-foreground">Enterprise GitHub URL</label>
-          <input
-            type="url"
-            placeholder="https://github.acme.com"
-            value={enterpriseGitHubUrl}
-            onChange={e => {
-              setEnterpriseGitHubUrl(e.target.value);
-              setTimeout(saveSettings, 0);
-            }}
-            className="w-full rounded-md border border-border bg-background px-2.5 py-1.5 text-xs text-foreground placeholder:text-muted-foreground focus:border-primary focus:outline-none"
-          />
-          <p className="text-[10px] text-muted-foreground leading-relaxed">
-            When set, the extension recognizes repos on this host, fetches their file trees and raw
-            content via the GHES API (<code>/api/v3</code>), and uses them for chat context —
-            just like public GitHub repos.
-          </p>
-        </div>
+      <Section id="copilot" title="GitHub Copilot" subtitle="Sign in with your enterprise GitHub account. Set your enterprise URL below if using GHES." defaultOpen={true}>
+        <CopilotSSOSection enterpriseGitHubUrl={enterpriseGitHubUrl} setEnterpriseGitHubUrl={setEnterpriseGitHubUrl} saveSettings={saveSettings} />
       </Section>
 
       {/* ── Custom Provider ── */}

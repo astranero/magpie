@@ -103,11 +103,12 @@ export async function fetchCopilotModels(copilotApiUrl: string, token: string): 
   return [];
 }
 
-/** Read the user's GitHub host config and resolve the concrete endpoints. */
+/** Read the user's enterprise GitHub URL and resolve endpoints.
+ *  Uses the single 'enterpriseGitHubUrl' key — set in Settings → Enterprise GitHub. */
 async function getGithubEndpoints(): Promise<GithubEndpoints> {
-  const s = await chrome.storage.local.get(['githubBaseUrl', 'enterpriseGitHubUrl', 'copilotApiUrl', 'githubClientId']);
+  const s = await chrome.storage.local.get(['enterpriseGitHubUrl', 'copilotApiUrl', 'githubClientId']);
   return resolveGithubEndpoints(
-    (s.githubBaseUrl || s.enterpriseGitHubUrl) as string | undefined,
+    s.enterpriseGitHubUrl as string | undefined,
     s.copilotApiUrl as string | undefined,
     s.githubClientId as string | undefined,
   );
