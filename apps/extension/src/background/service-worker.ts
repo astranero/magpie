@@ -2334,9 +2334,13 @@ async function agenticGather(
 
   const catalogLinks = linkRefs.slice(0, 60);
   const sys =
-    `You gather just enough context to answer a question about the web page the user is viewing. ` +
-    `Open only the FEW files/links that matter (≤4 total); search the web only if the page/repo can't answer. ` +
-    `Stop calling tools as soon as you have enough — do not over-fetch.\n` +
+    `You are a debugger reading a CI/CD page, test failure, or error report. ` +
+    `Your job is to find the ROOT CAUSE: what actually failed, why, and what the expected behavior was. ` +
+    `Be thorough — look at the error message, traceback, diff, and recent changes. ` +
+    `Search for patterns like "Error:", "AssertionError", "expected", "received", "FAIL", "✗" to find the real failure. ` +
+    `Read the relevant sections of the page and traceback context. ` +
+    `Only use read_link if the page references external links that help explain the error. ` +
+    `Stop calling tools when you have enough to explain the root cause.\n` +
     (pageMarkdown
       ? `\nYou can read the page content in detail using read_section (by heading), search_page (grep), or read_lines (by line number). Start by searching for errors or reading the relevant section.\n`
       : '') +
