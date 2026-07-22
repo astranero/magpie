@@ -56,11 +56,15 @@ vi.mock('../research-store', () => ({
   listPages: vi.fn(async () => []),
 }));
 
-vi.mock('../pdf-parser', () => ({
-  recreateOffscreen: vi.fn(async () => {}),
-  recycleOffscreenWorker: vi.fn(async () => {}),
-  pdfUrlToBody: vi.fn(async () => ''),
-}));
+vi.mock('../pdf-parser', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../pdf-parser')>();
+  return {
+    ...actual,
+    recreateOffscreen: vi.fn(async () => {}),
+    recycleOffscreenWorker: vi.fn(async () => {}),
+    pdfUrlToBody: vi.fn(async () => ''),
+  };
+});
 
 vi.mock('../quality-gate', () => ({
   checkContentQuality: vi.fn(() => ({ pass: true })),
