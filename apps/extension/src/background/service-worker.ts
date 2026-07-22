@@ -30,7 +30,7 @@ import { replaceChunksForDoc } from '../lib/db';
 import { pdfUrlToBody, pdfOpfsToBody, pdfBase64ToBody, ensureOffscreen as ensureOffscreenDoc, recreateOffscreen } from '../lib/pdf-parser';
 import { setEnsureOffscreen, setRecreateOffscreen, sendToOffscreen } from '../lib/offscreen-client';
 import { crumb, dumpCrashLog, installCrashHandlers, installCrumbReceiver } from '../lib/crash-log';
-import { getProviderSettings, chatWithCustom, chatWithCustomStream, handleFetchCustomModels, chatWithTools, ToolDef } from './llm-client';
+import { getProviderSettings, buildProviderHeaders, chatWithCustom, chatWithCustomStream, handleFetchCustomModels, chatWithTools, ToolDef } from './llm-client';
 import { handleSearchLibrary, handleRecallDocs } from './library-handlers';
 import { handleLinkDocument, handleUnlinkDocument, handleListDocuments, handleGetDocument, handleDeleteDocument, handleGetDocumentCount, handleUpdateDocumentSelection } from './document-handlers';
 import { handleCreateProject, handleListProjects, handleGetProject, handleUpdateProject, handleDeleteProject, handleCreateChat, handleListChats, handleDeleteChat, handleUpdateChat } from './project-handlers';
@@ -2572,11 +2572,10 @@ async function agenticGather(
  * This catches synonym mismatches, misspellings, and conceptual gaps.
  */
 async function expandQuery(userQuery: string, signal: AbortSignal): Promise<string[]> {
-  const { apiKey, endpoint, model } = await getProviderSettings();
+  const { apiKey, endpoint, model, isCopilot } = await getProviderSettings();
   if (!endpoint || !model) return [];
 
-  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-  if (apiKey) headers['Authorization'] = `Bearer ${apiKey}`;
+  const headers = buildProviderHeaders(apiKey, !!isCopilot);
 
   const res = await fetch(endpoint, {
     method: 'POST',
@@ -3803,15 +3802,14 @@ async function fetchViaJina(url: string): Promise<string> {
 // ── Vision: image → text (OCR / description) ──
 // Uses the same OpenAI-compatible endpoint with the configured vision model.
 async function imageToText(dataUrl: string, instruction?: string): Promise<string> {
-  const { apiKey, endpoint, visionModel, model } = await getProviderSettings();
+  const { apiKey, endpoint, visionModel, model, isCopilot } = await getProviderSettings();
   if (!endpoint) throw new Error('Set an API Base URL in Settings first.');
   // trim(): a whitespace-only visionModel ("Use Text Model" sentinel bug) is
   // truthy and would be sent as a literal " " model name — treat it as unset.
   const useModel = (visionModel?.trim()) || model;
   if (!useModel) throw new Error('Set a Vision Model in Settings first.');
 
-  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-  if (apiKey) headers['Authorization'] = `Bearer ${apiKey}`;
+  const headers = buildProviderHeaders(apiKey, !!isCopilot);
 
   const res = await fetch(endpoint, {
     method: 'POST',
