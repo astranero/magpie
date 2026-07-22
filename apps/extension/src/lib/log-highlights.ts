@@ -12,6 +12,11 @@ const AZURE_MARKER_RE = /##\[(?:error|warning|section|command|debug)\]/;
 const TIMESTAMP_LINE_RE = /^\s*\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/;
 const GENERIC_LOG_RE = /\b(exit code \d+|npm ERR!|Traceback \(most recent call last\)|FAILED|BUILD FAILED|fatal error|##vso\[)/i;
 
+// Test output markers — vitest, jest, pytest, etc.
+const TEST_FAILURE_RE = /\b(FAIL|PASS|Tests:|Test Suites:|×|✓|✗|✖|expected|received|toBe|toEqual|AssertionError|assert\b)/i;
+const STACK_TRACE_RE = /\b(at |in )[\w.]+\(.*\)\s*\(.*:\d+:\d+\)/;
+const ERROR_KEYWORD_RE = /\b(error|failed|failure|exception|crash|timeout|uncaught)\b/i;
+
 /** True when the text reads like a CI/build/terminal log, not an article. */
 export function looksLikeBuildLog(text: string): boolean {
   const t = text || '';
@@ -24,6 +29,37 @@ export function looksLikeBuildLog(text: string): boolean {
   if (timestamped >= Math.max(10, sample.length * 0.3)) return true;
 
   return GENERIC_LOG_RE.test(t) && /\b(error|failed|failure)\b/i.test(t);
+}
+
+/**
+ * Detect if a page is a "debuggable" page — CI logs, test failures, error
+ * reports, crash dumps, or any page with stack traces. These warrant a
+ * thorough debugger-style analysis vs generic page reading.
+ */
+export function looksLikeDebugPage(text: string): boolean {
+  const t = text || '';
+  if (t.length < 200) return false;
+  if (looksLikeBuildLog(t)) return true;
+
+  const lines = t.split('\n');
+
+  // Test runner output: vitest/jest summary lines
+  const testLines = lines.filter(l => TEST_FAILURE_RE.test(l)).length;
+  if (testLines >= 3 && testLines >= lines.length * 0.05) return true;
+
+  // Stack traces
+  const stackLines = lines.filter(l => STACK_TRACE_RE.test(l)).length;
+  if (stackLines >= 2) return true;
+
+  // High density of error-related keywords
+  const errorLines = lines.filter(l => ERROR_KEYWORD_RE.test(l)).length;
+  if (errorLines >= Math.max(5, lines.length * 0.1)) return true;
+
+  // Lots of markdown table rows (test result tables)
+  const tableRows = lines.filter(l => /^\|.*\|.*\|/.test(l)).length;
+  if (tableRows >= 10 && (testLines > 0 || errorLines > 0)) return true;
+
+  return false;
 }
 
 const ERROR_LINE_RE = /##\[error\]|\berror\b[:\s]|npm ERR!|\bfatal\b|\bFAILED\b|\bfailure\b|exception\b|traceback|exit code [1-9]|✗|✖/i;

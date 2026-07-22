@@ -24,7 +24,7 @@ import { stripSourcesFooter, stripAnySourcesFooter } from '../lib/format';
 import { selectSemantic, fetchWithinBudget, parseRouterSelection, TOTAL_CTX_BUDGET, RerankFn, LinkRef, Selection } from '../lib/context-retrieval';
 import { getResearchLimits } from '../lib/research-limits';
 import { DEFAULT_COMPANION_MCP_URL, CLI_TEMPLATE_AUTO } from '../lib/settings';
-import { looksLikeBuildLog, extractLogHighlights } from '../lib/log-highlights';
+import { looksLikeBuildLog, looksLikeDebugPage, extractLogHighlights } from '../lib/log-highlights';
 import { addChunksToVectorStore, searchSessionChunks, resetSessionIndex, resetAllSessionIndexes, isConfidentMatch } from '../lib/vector-store';
 import { replaceChunksForDoc } from '../lib/db';
 import { pdfUrlToBody, pdfOpfsToBody, pdfBase64ToBody, ensureOffscreen as ensureOffscreenDoc, recreateOffscreen } from '../lib/pdf-parser';
@@ -1884,7 +1884,13 @@ async function buildChatRequest(chatId: string, projectId: string, prompt: strin
       `\n\n--- CURRENT PAGE (the user is viewing this in their browser right now; it is NOT saved in their library) ---\n` +
       `Title: ${pageContext.title}\nURL: ${pageContext.url}\n\n${pageBlock}\n` +
       `--- END CURRENT PAGE ---\n` +
-      `Only answer from the CURRENT PAGE content above. Do NOT use your own knowledge. If the page does not contain the specific answer, say so — do not make up file names, line numbers, error messages, or any other details that are not in the page content. ` +
+      (looksLikeDebugPage(pageContext.markdown)
+        ? `You are a smart debugger. Analyze the page content above to find the ROOT CAUSE. ` +
+          `Start by looking at any error message, traceback, or diff shown above. ` +
+          `If the head doesn't contain the error, the enrichment phase will read the deeper sections. ` +
+          `Be thorough: name the exact error, what file/line caused it, what was expected vs received. ` +
+          `Do not make up details not in the page.\n`
+        : `Only answer from the CURRENT PAGE content above. Do NOT use your own knowledge. If the page does not contain the specific answer, say so — do not make up file names, line numbers, error messages, or any other details that are not in the page content. `) +
       `Attribute such claims in plain text, e.g. "according to the page you're viewing". ` +
       `NEVER use [anchor] citations for current-page content — anchors are only for library sources.`;
 
@@ -2333,14 +2339,16 @@ async function agenticGather(
   if (tools.length === 0) return { blocks: [], sources: [] };
 
   const catalogLinks = linkRefs.slice(0, 60);
-  const sys =
-    `You are reading a web page to answer the user's question about it. ` +
-    `Use the tools below to read the page content strategically: ` +
-    `read_section to get a specific section by heading, ` +
-    `search_page to find specific text anywhere on the page (like grep), ` +
-    `and read_lines to read a specific range of lines. ` +
-    `Open only the FEW tools that are directly relevant. ` +
-    `Stop calling tools when you have enough to answer.\n` +
+  const isDebugPage = pageMarkdown ? looksLikeDebugPage(pageMarkdown) : false;
+const sys = isDebugPage
+  ? `You are a smart debugger reading a CI/test/error report page. ` +
+    `Your job is to find the ROOT CAUSE: what failed, why, and what was expected. ` +
+    `Use search_page to find the actual error message (search "Error:", "AssertionError", ` +
+    `"FAIL", "expected", "received", "×", "✗"). Then use read_section or read_lines to ` +
+    `read the traceback and surrounding context. Be thorough — a good debugger looks at ` +
+    `the error, the traceback, the diff, and the context before concluding.\n`
+  : `You are reading a web page to answer the user's question about it. ` +
+    `Use the tools below to read the page content strategically as needed.\n` +
     (pageMarkdown
       ? `\nYou can read the page content in detail using read_section (by heading), search_page (grep), or read_lines (by line number). Start by searching for errors or reading the relevant section.\n`
       : '') +
