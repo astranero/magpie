@@ -129,6 +129,8 @@ interface SettingsViewProps {
   setCliCommandTemplate: (val: string) => void;
   localMcpCompanionUrl: string;
   setLocalMcpCompanionUrl: (val: string) => void;
+  enterpriseGitHubUrl: string;
+  setEnterpriseGitHubUrl: (val: string) => void;
   workspaceName: string;
   workspaceRules: string;
   saveWorkspaceRules: (rules: string) => void | Promise<void>;
@@ -139,7 +141,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   docCount, globalDocCount, onCleanupOrphans, authed, profile, login, logout, folderName, setFolderName, exportWorkspace,
   autoLinkCaptures, setAutoLinkCaptures, saveSettings, syncResearchSources, setSyncResearchSources, forceResync,
   routeChatThroughCli, setRouteChatThroughCli, cliCommandTemplate, setCliCommandTemplate,
-  localMcpCompanionUrl,
+  localMcpCompanionUrl, enterpriseGitHubUrl, setEnterpriseGitHubUrl,
   workspaceName, workspaceRules, saveWorkspaceRules
 }) => {
   // Local draft of the workspace instructions; persisted on blur.
@@ -359,6 +361,28 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
       {/* ── GitHub Copilot SSO ── */}
       <Section id="copilot" title="GitHub Copilot" subtitle="Sign in with your enterprise GitHub account." defaultOpen={true}>
         <CopilotSSOSection />
+      </Section>
+
+      {/* ── Enterprise GitHub (self-hosted) ── */}
+      <Section id="enterprise-github" title="Enterprise GitHub (GHES)" subtitle="Optional — set only if your repos live on a GitHub Enterprise Server instance." defaultOpen={true}>
+        <div className="space-y-2">
+          <label className="text-xs font-medium text-foreground">Enterprise GitHub URL</label>
+          <input
+            type="url"
+            placeholder="https://github.acme.com"
+            value={enterpriseGitHubUrl}
+            onChange={e => {
+              setEnterpriseGitHubUrl(e.target.value);
+              setTimeout(saveSettings, 0);
+            }}
+            className="w-full rounded-md border border-border bg-background px-2.5 py-1.5 text-xs text-foreground placeholder:text-muted-foreground focus:border-primary focus:outline-none"
+          />
+          <p className="text-[10px] text-muted-foreground leading-relaxed">
+            When set, the extension recognizes repos on this host, fetches their file trees and raw
+            content via the GHES API (<code>/api/v3</code>), and uses them for chat context —
+            just like public GitHub repos.
+          </p>
+        </div>
       </Section>
 
       {/* ── Custom Provider ── */}

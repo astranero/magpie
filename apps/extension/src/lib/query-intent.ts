@@ -277,11 +277,11 @@ export function isPageMetaQuestion(q: string): boolean {
 /** First repository URL embedded in page text that parseRepoUrl accepts, if any.
  *  Lets a product/marketing page hand off implementation questions to its own
  *  source repo. */
-export function findRepoUrlInText(text: string): string | null {
+export function findRepoUrlInText(text: string, enterpriseHost?: string): string | null {
   const urls = (text || '').match(/https?:\/\/[^\s)"'<>\]]+/g) || [];
   for (const raw of urls) {
     const url = raw.replace(/[.,);]+$/, '');
-    if (parseRepoUrl(url)) return url;
+    if (parseRepoUrl(url, enterpriseHost)) return url;
   }
   return null;
 }
@@ -341,20 +341,34 @@ export interface RepoRef {
   project?: string;
   /** Branch when the URL pins one; undefined = default branch. */
   branch?: string;
+  /** Enterprise host override (e.g. "github.acme.com") for GHES. */
+  enterpriseHost?: string;
 }
 
 const NON_REPO_GH_OWNERS = new Set(['topics', 'collections', 'features', 'marketplace', 'orgs', 'settings', 'notifications', 'sponsors']);
 
-/** Extract a repository reference from a code-host page URL, else null. */
-export function parseRepoUrl(url: string): RepoRef | null {
+/** Extract a repository reference from a code-host page URL, else null.
+ *  @param enterpriseHost - Optional enterprise GitHub hostname (e.g. "github.acme.com")
+ *    to match in addition to public github.com.
+ */
+export function parseRepoUrl(url: string, enterpriseHost?: string): RepoRef | null {
   const u = url || '';
+  const ghHosts = ['github.com'];
+  if (enterpriseHost && enterpriseHost !== 'github.com') ghHosts.push(enterpriseHost);
+  const ghPattern = `^https?://(?:www\\.)?(${ghHosts.map(h => h.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})/([\\w.-]+)/([\\w.-]+?)(?:\\.git)?(?:/(?:tree|blob)/([^/]+))?(?:[/?#]|$)`;
 
-  // GitHub: github.com/{owner}/{repo}[/tree|blob/{branch}]
-  let m = u.match(/^https?:\/\/(?:www\.)?github\.com\/([\w.-]+)\/([\w.-]+?)(?:\.git)?(?:\/(?:tree|blob)\/([^/]+))?(?:[/?#]|$)/);
+  // GitHub: {host}/{owner}/{repo}[/tree|blob/{branch}]
+  let m = u.match(new RegExp(ghPattern));
   if (m) {
-    const [, owner, repo, branch] = m;
+    const [, host, owner, repo, branch] = m;
     if (NON_REPO_GH_OWNERS.has(owner)) return null;
-    return { provider: 'github', label: `${owner}/${repo}`, owner, repo, branch };
+    const isEnterprise = host !== 'github.com';
+    return {
+      provider: 'github',
+      label: `${owner}/${repo}`,
+      owner, repo, branch,
+      ...(isEnterprise ? { enterpriseHost: host } : {}),
+    };
   }
 
   // GitLab: gitlab.com/{group[/subgroup…]}/{repo}[/-/tree|blob/{branch}]

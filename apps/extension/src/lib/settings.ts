@@ -11,6 +11,9 @@ export const DEFAULT_COMPANION_MCP_URL = 'http://localhost:3920/mcp';
 /** Default GitHub host for the Copilot SSO device flow (github.com). */
 export const DEFAULT_GITHUB_BASE_URL = 'https://github.com';
 
+/** Default enterprise GitHub URL — empty means public github.com only. */
+export const DEFAULT_ENTERPRISE_GITHUB_URL = '';
+
 /**
  * Generate a high-entropy shared secret for the local companion server. The
  * extension stores it and sends it as `Authorization: Bearer …`; the user

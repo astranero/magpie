@@ -151,6 +151,7 @@ export default function App() {
   const [routeChatThroughCli, setRouteChatThroughCli] = useState<string>('disabled');
   const [cliCommandTemplate, setCliCommandTemplate] = useState('auto');
   const [localMcpCompanionUrl, setLocalMcpCompanionUrl] = useState('http://localhost:3920/mcp');
+const [enterpriseGitHubUrl, setEnterpriseGitHubUrl] = useState('');
 
 // Brand import moved to top level removed here due to top-level import restriction
   const [autoLinkCaptures, setAutoLinkCaptures] = useState(true);
@@ -1062,7 +1063,7 @@ loadChatHistory(activeChatId).then(() => {
   const loadSettings = () => {
     if (typeof chrome !== 'undefined' && chrome.storage) {
       chrome.storage.local.get(
-        ['driveFolderName', 'customUrl', 'customKey', 'customModel', 'customModels', 'visionModel', 'autoLinkCaptures', 'includePageContext', 'syncResearchSources', 'routeChatThroughCli', 'cliCommandTemplate', 'localMcpCompanionUrl'],
+        ['driveFolderName', 'customUrl', 'customKey', 'customModel', 'customModels', 'visionModel', 'autoLinkCaptures', 'includePageContext', 'syncResearchSources', 'routeChatThroughCli', 'cliCommandTemplate', 'localMcpCompanionUrl', 'enterpriseGitHubUrl'],
         (r) => {
           if (r.driveFolderName) setFolderName(r.driveFolderName);
           if (r.customUrl) setCustomUrl(r.customUrl);
@@ -1082,6 +1083,7 @@ loadChatHistory(activeChatId).then(() => {
           }
           if (r.cliCommandTemplate) setCliCommandTemplate(r.cliCommandTemplate);
           if (r.localMcpCompanionUrl) setLocalMcpCompanionUrl(r.localMcpCompanionUrl);
+          if (r.enterpriseGitHubUrl) setEnterpriseGitHubUrl(r.enterpriseGitHubUrl);
         }
       );
     }
@@ -2199,6 +2201,13 @@ onOpenDocument={(docId, anchorId) => openDocById(docId, anchorId, 'chat')}
                 setLocalMcpCompanionUrl(v);
                 if (typeof chrome !== 'undefined' && chrome.storage) {
                   chrome.storage.local.set({ localMcpCompanionUrl: v });
+                }
+              }}
+              enterpriseGitHubUrl={enterpriseGitHubUrl}
+              setEnterpriseGitHubUrl={(v) => {
+                setEnterpriseGitHubUrl(v);
+                if (typeof chrome !== 'undefined' && chrome.storage) {
+                  chrome.storage.local.set({ enterpriseGitHubUrl: v });
                 }
               }}
               workspaceName={projects.find(p => p.id === activeProjectId)?.title || 'this workspace'}

@@ -1953,10 +1953,13 @@ async function buildChatRequest(chatId: string, projectId: string, prompt: strin
     // fetched files are DATA, not instructions — the same RAG-injection surface
     // as any followed link. parseRepoUrl allow-lists hosts (github/gitlab/…) and
     // getRepoTree only hits their public read APIs, which bounds the exposure.
-    let repoRef = parseRepoUrl(pageContext.url);
+    const { enterpriseGitHubUrl } = await chrome.storage.local.get(['enterpriseGitHubUrl']).catch(() => ({})) as Record<string, any>;
+    const enterpriseHost = (enterpriseGitHubUrl && typeof enterpriseGitHubUrl === 'string')
+      ? new URL(enterpriseGitHubUrl).hostname : undefined;
+    let repoRef = parseRepoUrl(pageContext.url, enterpriseHost);
     if (!repoRef && isImplementationQuestion(effectiveQuery)) {
-      const linked = findRepoUrlInText(pageContext.markdown);
-      const linkedRef = linked ? parseRepoUrl(linked) : null;
+      const linked = findRepoUrlInText(pageContext.markdown, enterpriseHost);
+      const linkedRef = linked ? parseRepoUrl(linked, enterpriseHost) : null;
       if (linkedRef) {
         repoRef = linkedRef;
         onStatus?.('Found the source repo — reading the code…');
@@ -2108,14 +2111,17 @@ const REPO_TREE_MAX_ENTRIES = 8_000; // give up on monorepos — a truncated ran
 
 async function fetchGitHubTree(ref: RepoRef): Promise<RepoTree | null> {
   let branch = ref.branch;
+  const apiBase = ref.enterpriseHost
+    ? `https://${ref.enterpriseHost}/api/v3`
+    : 'https://api.github.com';
   const headers = { 'Accept': 'application/vnd.github+json' };
   if (!branch) {
-    const repoRes = await fetch(`https://api.github.com/repos/${ref.owner}/${ref.repo}`, { headers });
+    const repoRes = await fetch(`${apiBase}/repos/${ref.owner}/${ref.repo}`, { headers });
     if (!repoRes.ok) return null;
     branch = (await repoRes.json()).default_branch as string;
   }
   const treeRes = await fetch(
-    `https://api.github.com/repos/${ref.owner}/${ref.repo}/git/trees/${encodeURIComponent(branch!)}?recursive=1`,
+    `${apiBase}/repos/${ref.owner}/${ref.repo}/git/trees/${encodeURIComponent(branch!)}?recursive=1`,
     { headers }
   );
   if (!treeRes.ok) return null;
@@ -2216,7 +2222,9 @@ async function fetchRepoFileRaw(ref: RepoRef, branch: string, path: string): Pro
   let url: string;
   switch (ref.provider) {
     case 'github':
-      url = `https://raw.githubusercontent.com/${ref.owner}/${ref.repo}/${encodeURIComponent(branch)}/${encPath}`;
+      url = ref.enterpriseHost
+        ? `https://${ref.enterpriseHost}/raw/${ref.owner}/${ref.repo}/${encodeURIComponent(branch)}/${encPath}`
+        : `https://raw.githubusercontent.com/${ref.owner}/${ref.repo}/${encodeURIComponent(branch)}/${encPath}`;
       break;
     case 'gitlab':
       url = `https://gitlab.com/api/v4/projects/${encodeURIComponent(`${ref.owner}/${ref.repo}`)}/repository/files/${encodeURIComponent(path)}/raw?ref=${encodeURIComponent(branch)}`;
