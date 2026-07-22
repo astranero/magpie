@@ -1977,7 +1977,7 @@ async function buildChatRequest(chatId: string, projectId: string, prompt: strin
         : { blocks: [], sources: [] };
     } else if (strategy === 'agentic') {
       onStatus?.('Exploring the page…');
-      enrich = await agenticGather(effectiveQuery, repoRef, tree, linkRefs, signal, pageContext?.markdown)
+      enrich = await agenticGather(effectiveQuery, repoRef, tree, linkRefs, signal, pageContext?.markdown, onStatus)
         .catch(async e => { console.warn('[CTX] agentic failed, falling back to semantic:', e); return semanticEnrich(); });
     } else {
       onStatus?.('Reading relevant files & links…');
@@ -2309,7 +2309,7 @@ const MAX_TOOL_ROUNDS = 3;
  */
 async function agenticGather(
   question: string, repoRef: RepoRef | null, tree: RepoTree | null, linkRefs: LinkRef[], signal: AbortSignal,
-  pageMarkdown?: string,
+  pageMarkdown?: string, onStatus?: (s: string) => void,
 ): Promise<{ blocks: string[]; sources: Array<{ title: string; url: string }> }> {
   const tools: ToolDef[] = [];
   const catalogFiles = tree && repoRef ? selectTreePaths(tree.paths.filter(p => !p.endsWith('/')), question, 6_000).selected : [];
@@ -2465,6 +2465,7 @@ async function agenticGather(
         if (signal.aborted) throw e;
         result = 'error fetching';
       }
+      onStatus?.(result.length > 60 ? result.slice(0, 60) + '…' : result);
       messages.push({ role: 'tool', tool_call_id: call.id, content: result });
     }
     if (used >= TOTAL_CTX_BUDGET) break;
