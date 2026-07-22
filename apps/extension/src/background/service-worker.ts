@@ -2381,15 +2381,22 @@ const sys = isDebugPage
       break;
     }
     messages.push(resp.assistantMessage);
-    for (const call of resp.toolCalls) {
+    // Run tool calls in parallel — read_section/search_page/read_lines are
+    // local in-memory ops; read_link/read_file/search_web are network fetches.
+    // All are independent of each other within one round. Collect results then
+    // apply them sequentially to avoid budget races.
+    const pendingResults = resp.toolCalls.map(async (call) => {
       let result = 'error';
+      let block: string | null = null;
+      let src: { title: string; url: string } | null = null;
+      let charCount = 0;
       try {
         if (call.name === 'read_file' && repoRef && tree) {
           const path = String(call.args?.path || '');
           if (!validPaths.has(path)) result = 'path not in this repo';
           else {
             const b = await fetchRepoFileBlock(repoRef, tree.branch, path);
-            if (b && used + b.chars <= TOTAL_CTX_BUDGET) { blocks.push(b.block); used += b.chars; result = `read ${path}`; }
+            if (b && used + b.chars <= TOTAL_CTX_BUDGET) { block = b.block; charCount = b.chars; result = `read ${path}`; }
             else result = b ? 'context budget full' : 'file unavailable';
           }
         } else if (call.name === 'read_link') {
@@ -2398,18 +2405,16 @@ const sys = isDebugPage
           if (!known) result = 'link not on the page';
           else {
             const b = await fetchLinkBlock(url, known.anchorText || url, signal);
-            if (b && used + b.chars <= TOTAL_CTX_BUDGET) { blocks.push(b.block); sources.push(b.source); used += b.chars; result = `read ${url}`; }
+            if (b && used + b.chars <= TOTAL_CTX_BUDGET) { block = b.block; src = b.source; charCount = b.chars; result = `read ${url}`; }
             else result = b ? 'context budget full' : 'unreadable';
           }
         } else if (call.name === 'read_section' && pageMarkdown) {
           const heading = String(call.args?.heading || '').toLowerCase().trim();
-          // Find the section by heading (fuzzy match)
           const match = pageHeadings.find(h => h.heading.toLowerCase().includes(heading) || heading.includes(h.heading.toLowerCase()));
           if (!match) {
             const available = pageHeadings.map(h => `"${h.heading}"`).join(', ');
             result = `Section "${heading}" not found. Available sections: ${available}`;
           } else {
-            // Extract section content from heading to next heading or end
             const startLine = match.line - 1;
             let endLine = pageLines.length;
             const nextIdx = pageHeadings.indexOf(match) + 1;
@@ -2417,16 +2422,14 @@ const sys = isDebugPage
             const rawSection = pageLines.slice(startLine, endLine).join('\n');
             const truncated = rawSection.length > 8000;
             const sectionText = rawSection.slice(0, 8000);
-            const block = `\n\n--- SECTION: ${match.heading} ---\n${sectionText}\n--- END SECTION ---\n` +
+            block = `\n\n--- SECTION: ${match.heading} ---\n${sectionText}\n--- END SECTION ---\n` +
               (truncated ? `\n(Note: this section is ${rawSection.length} chars total. Only the first 8000 are shown. Use search_page or read_lines to explore further.)\n` : '');
-            if (used + sectionText.length <= TOTAL_CTX_BUDGET) {
-              blocks.push(block); used += sectionText.length;
-              result = `read section "${match.heading}" (${sectionText.length} chars${truncated ? ` of ${rawSection.length}` : ''})`;
-            } else result = 'context budget full';
+            charCount = sectionText.length;
+            result = `read section "${match.heading}" (${sectionText.length} chars${truncated ? ` of ${rawSection.length}` : ''})`;
           }
         } else if (call.name === 'search_page' && pageMarkdown) {
           const query = String(call.args?.query || '').toLowerCase();
-          const CONTEXT = 3; // lines of context before/after
+          const CONTEXT = 3;
           const matches: string[] = [];
           const seen = new Set<string>();
           for (let i = 0; i < pageLines.length; i++) {
@@ -2444,11 +2447,9 @@ const sys = isDebugPage
           }
           if (matches.length === 0) result = 'no matches found';
           else {
-            const text = `\n\n--- SEARCH: "${query}" ---\n${matches.join('\n\n')}\n--- END SEARCH ---\n`;
-            if (used + text.length <= TOTAL_CTX_BUDGET) {
-              blocks.push(text); used += text.length;
-              result = `${matches.length} match(es) for "${query}"`;
-            } else result = 'context budget full';
+            block = `\n\n--- SEARCH: "${query}" ---\n${matches.join('\n\n')}\n--- END SEARCH ---\n`;
+            charCount = block.length;
+            result = `${matches.length} match(es) for "${query}"`;
           }
         } else if (call.name === 'read_lines' && pageMarkdown) {
           const start = Math.max(0, (Number(call.args?.startLine) || 1) - 1);
@@ -2458,17 +2459,17 @@ const sys = isDebugPage
           else {
             const snippet = pageLines.slice(start, end);
             snippet.unshift(`--- lines ${start + 1}-${end} ---`);
-            const text = `\n\n--- LINES ${start + 1}-${end} ---\n${snippet.join('\n')}\n--- END LINES ---\n`;
-            if (used + text.length <= TOTAL_CTX_BUDGET) {
-              blocks.push(text); used += text.length;
-              result = `read lines ${start + 1}-${end}`;
-            } else result = 'context budget full';
+            block = `\n\n--- LINES ${start + 1}-${end} ---\n${snippet.join('\n')}\n--- END LINES ---\n`;
+            charCount = block.length;
+            result = `read lines ${start + 1}-${end}`;
           }
         } else if (call.name === 'search_web' && webAllowed) {
           const web = await gatherWebSnippets(String(call.args?.query || question), { signal });
           if (web.context && used + web.context.length <= TOTAL_CTX_BUDGET) {
-            blocks.push(`\n\n--- WEB RESULTS ---\n${web.context}\n--- END WEB RESULTS ---`);
-            sources.push(...web.sources); used += web.context.length; result = 'web results added';
+            block = `\n\n--- WEB RESULTS ---\n${web.context}\n--- END WEB RESULTS ---`;
+            charCount = web.context.length;
+            result = 'web results added';
+            src = web.sources?.[0] || null;
           } else result = 'no useful web results';
         } else {
           result = 'unknown tool';
@@ -2476,6 +2477,15 @@ const sys = isDebugPage
       } catch (e) {
         if (signal.aborted) throw e;
         result = 'error fetching';
+      }
+      return { call, result, block, src, charCount };
+    });
+
+    const settled = await Promise.all(pendingResults);
+    for (const { call, result, block, src, charCount } of settled) {
+      if (block && used + charCount <= TOTAL_CTX_BUDGET) {
+        blocks.push(block); used += charCount;
+        if (src) sources.push(src);
       }
       onStatus?.(result.length > 60 ? result.slice(0, 60) + '…' : result);
       messages.push({ role: 'tool', tool_call_id: call.id, content: result });
