@@ -329,6 +329,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   // Chat web-search fallback — default ON; only an explicit false disables it.
   const [webFallback, setWebFallback] = useState(true);
   const [jinaEnabled, setJinaEnabled] = useState(true);
+  const [modelFilter, setModelFilter] = useState('');
   // How chat gathers extra detail from the open page (repo files / links).
   const [pageCtxStrategy, setPageCtxStrategy] = useState<'semantic' | 'router' | 'agentic'>('semantic');
   const [inferenceDevice, setInferenceDevice] = useState<'wasm' | 'webgpu'>('wasm');
@@ -479,7 +480,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   return (
     <div className="flex-1 overflow-y-auto no-scrollbar p-4 space-y-6">
       {/* ── Workspace instructions ── */}
-      <Section id="workspace-rules" title="Workspace Instructions" subtitle={`Persistent context for "${workspaceName}" — added to every prompt.`}>
+      <Section id="workspace-rules" title="Workspace Instructions" subtitle={`Persistent context for "${workspaceName.length > 48 ? workspaceName.slice(0, 45) + '…' : workspaceName}" — added to every prompt.`}>
           <textarea
             value={rulesDraft}
             onChange={e => setRulesDraft(e.target.value)}
@@ -507,6 +508,30 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
 
       {/* ── Custom Provider ── */}
       <Section id="provider" title="AI Provider Configuration" subtitle="Configure your AI backend (or use Copilot above).">
+          {/* Which backend will actually receive the next request — computed
+              from the SAME settings the client reads, so it can't lie. Answers
+              "am I really on enterprise Copilot or on OpenRouter?" at a glance. */}
+          {(() => {
+            const host = (() => { try { return new URL(customUrl).host; } catch { return customUrl || ''; } })();
+            const isCopilotActive = customKey === '__copilot_sso__';
+            const isCliActive = routeChatThroughCli !== 'disabled';
+            const label = isCliActive
+              ? `Local CLI (${cliCommandTemplate === 'auto' ? 'auto' : cliCommandTemplate.split(' ')[0]})`
+              : isCopilotActive
+                ? `GitHub Copilot — ${host || 'api.githubcopilot.com'}`
+                : host ? `Custom provider — ${host}` : 'Not configured';
+            const ok = isCliActive || isCopilotActive || !!host;
+            return (
+              <div className="flex items-center gap-2 rounded-lg border border-border bg-card px-3 py-2">
+                <span className={`w-2 h-2 rounded-full shrink-0 ${ok ? 'bg-emerald-500' : 'bg-amber-500'}`} aria-hidden="true" />
+                <span className="text-xs font-medium">Active:</span>
+                <span className="text-xs font-mono text-muted-foreground truncate" title={customUrl}>{label}</span>
+                {!isCliActive && !isCopilotActive && customModel && (
+                  <span className="ml-auto text-[10px] font-mono text-muted-foreground/70 truncate">{customModel}</span>
+                )}
+              </div>
+            );
+          })()}
           {availableClis.length > 0 && (
             <div className="rounded-lg border border-primary/20 bg-primary/5 px-3 py-2.5 space-y-2">
               <div className="text-[10px] font-semibold text-primary uppercase tracking-wider">Detected Local Options</div>
@@ -591,6 +616,15 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
 
           <div className="space-y-1.5">
             <label className="text-xs font-medium">Model</label>
+            {customModels.length > 12 && (
+              <Input
+                type="text"
+                value={modelFilter}
+                onChange={e => setModelFilter(e.target.value)}
+                placeholder={`Filter ${customModels.length} models…`}
+                className="rounded-lg text-xs mb-1.5"
+              />
+            )}
             <div className="flex gap-2">
               {(customModels.length > 0 || availableClis.length > 0) ? (
                 <Select
@@ -618,7 +652,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                     <SelectValue placeholder="Select a model..." />
                   </SelectTrigger>
                   <SelectContent className="rounded-lg">
-                    {customModels.length > 0 && customModels.map(m => <SelectItem key={m} value={m}>{m}</SelectItem>)}
+                    {customModels.length > 0 && customModels.filter(m => !modelFilter || m.toLowerCase().includes(modelFilter.toLowerCase())).map(m => <SelectItem key={m} value={m}>{m}</SelectItem>)}
                     {!customModels.includes(customModel) && customModel && routeChatThroughCli === 'disabled' && <SelectItem value={customModel}>{customModel}</SelectItem>}
                     
                     {availableClis.length > 0 && (
