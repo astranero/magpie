@@ -71,6 +71,11 @@ async function resolveCitations(text: string): Promise<ResolvedCitation[]> {
 // App Component
 // ══════════════════════════════════════════════
 
+/** Short, human label for a BYOK endpoint — "openrouter.ai" beats a full URL. */
+function byokHostLabel(url: string): string {
+  try { return new URL(url).host.replace(/^www\./, ''); } catch { return url ? 'Custom Provider' : 'Custom Provider'; }
+}
+
 export default function App() {
   // Chat is the first-run default; after that the panel reopens on whatever
   // view it was closed in (restored below — 'document' is transient, so its
@@ -150,6 +155,15 @@ export default function App() {
   // or by BYOK config. Drives labeling in the model picker + which refresh
   // endpoint onRefreshModels calls.
   const [activeProvider, setActiveProvider] = useState<'byok' | 'copilot'>('byok');
+  // Both provider catalogs are kept SIMULTANEOUSLY so the picker can offer
+  // "GitHub Copilot" and your own endpoint side by side. `customModels` alone
+  // could not do this: Copilot sign-in overwrites it, so whichever provider was
+  // configured last was the only one you could pick from.
+  const [copilotModels, setCopilotModels] = useState<string[]>([]);
+  const [byokModels, setByokModels] = useState<string[]>([]);
+  const [byokUrl, setByokUrl] = useState('');
+  const [byokKey, setByokKey] = useState('');
+  const [copilotApiBase, setCopilotApiBase] = useState('');
   const [classificationModel, setClassificationModel] = useState('');
   const [folderName, setFolderName] = useState('Magpie');
   const [syncResearchSources, setSyncResearchSources] = useState(false);
@@ -227,6 +241,12 @@ const [enterpriseGitHubUrl, setEnterpriseGitHubUrl] = useState('');
       // A Copilot sign-in completing in the background (or in another panel)
       // writes these directly to storage — mirror them here so THIS panel's
       // model picker updates without a manual reload.
+      if ('copilotModels' in changes && Array.isArray(changes.copilotModels?.newValue)) {
+        setCopilotModels(changes.copilotModels.newValue);
+      }
+      if ('copilotApiBase' in changes && typeof changes.copilotApiBase?.newValue === 'string') {
+        setCopilotApiBase(changes.copilotApiBase.newValue);
+      }
       if ('customModels' in changes && Array.isArray(changes.customModels?.newValue)) {
         setCustomModels(changes.customModels.newValue);
       }
@@ -1081,7 +1101,7 @@ loadChatHistory(activeChatId).then(() => {
   const loadSettings = () => {
     if (typeof chrome !== 'undefined' && chrome.storage) {
       chrome.storage.local.get(
-        ['driveFolderName', 'customUrl', 'customKey', 'customModel', 'customModels', 'visionModel', 'autoLinkCaptures', 'includePageContext', 'syncResearchSources', 'routeChatThroughCli', 'cliCommandTemplate', 'localMcpCompanionUrl', 'enterpriseGitHubUrl', 'activeProvider'],
+        ['driveFolderName', 'customUrl', 'customKey', 'customModel', 'customModels', 'visionModel', 'autoLinkCaptures', 'includePageContext', 'syncResearchSources', 'routeChatThroughCli', 'cliCommandTemplate', 'localMcpCompanionUrl', 'enterpriseGitHubUrl', 'activeProvider', 'copilotModels', 'copilotApiBase', 'byokModels', 'byokUrl', 'byokKey'],
         (r) => {
           if (r.driveFolderName) setFolderName(r.driveFolderName);
           if (r.customUrl) setCustomUrl(r.customUrl);
@@ -1090,6 +1110,17 @@ loadChatHistory(activeChatId).then(() => {
           // Persisted model list: the dropdown survives a panel reload without
           // a refetch round-trip.
           if (Array.isArray(r.customModels)) setCustomModels(r.customModels);
+          if (Array.isArray(r.copilotModels)) setCopilotModels(r.copilotModels);
+          if (Array.isArray(r.byokModels)) setByokModels(r.byokModels);
+          if (typeof r.copilotApiBase === 'string') setCopilotApiBase(r.copilotApiBase);
+          // Seed the BYOK bucket from the active config the first time, so a
+          // user who set up OpenRouter before this change keeps their catalog
+          // when they later sign into Copilot.
+          if (typeof r.byokUrl === 'string' && r.byokUrl) setByokUrl(r.byokUrl);
+          else if (r.customKey !== '__copilot_sso__' && typeof r.customUrl === 'string') setByokUrl(r.customUrl);
+          if (typeof r.byokKey === 'string' && r.byokKey) setByokKey(r.byokKey);
+          else if (r.customKey !== '__copilot_sso__' && typeof r.customKey === 'string') setByokKey(r.customKey);
+          if (!Array.isArray(r.byokModels) && r.customKey !== '__copilot_sso__' && Array.isArray(r.customModels)) setByokModels(r.customModels);
           if (r.activeProvider === 'copilot' || r.activeProvider === 'byok') setActiveProvider(r.activeProvider);
           if (r.visionModel) setVisionModel(r.visionModel);
           setAutoLinkCaptures(r.autoLinkCaptures !== false); // default ON
@@ -2119,12 +2150,30 @@ loadChatHistory(activeChatId).then(() => {
 onOpenDocument={(docId, anchorId) => openDocById(docId, anchorId, 'chat')}
               // Model selector support
               customModel={customModel}
-              modelEntries={customModels.map(m => (
-                activeProvider === 'copilot'
-                  ? { provider: 'copilot' as const, group: 'GitHub Copilot', model: m }
-                  : { provider: 'byok' as const, group: 'Custom Provider', model: m }
-              ))}
-              onSelectModel={(entry) => { setCustomModel(entry.model); saveSettings(); }}
+              modelEntries={[
+                ...copilotModels.map(m => ({ provider: 'copilot' as const, group: 'GitHub Copilot', model: m })),
+                ...byokModels.map(m => ({ provider: 'byok' as const, group: byokHostLabel(byokUrl), model: m })),
+                // Fall back to the shared bucket only when neither catalog has
+                // been populated yet (fresh install, or a provider with no
+                // /models endpoint).
+                ...(copilotModels.length === 0 && byokModels.length === 0
+                  ? customModels.map(m => ({ provider: activeProvider, group: activeProvider === 'copilot' ? 'GitHub Copilot' : byokHostLabel(customUrl), model: m }))
+                  : []),
+              ]}
+              onSelectModel={(entry) => {
+                // Picking a model also SWITCHES the provider — that is the
+                // whole point of showing both catalogs in one list.
+                setCustomModel(entry.model);
+                if (entry.provider === 'copilot') {
+                  const base = copilotApiBase || customUrl;
+                  setActiveProvider('copilot'); setCustomUrl(base); setCustomKey('__copilot_sso__');
+                  chrome.storage.local.set({ activeProvider: 'copilot', customUrl: base, customKey: '__copilot_sso__', customModel: entry.model, customModels: copilotModels });
+                } else {
+                  const url = byokUrl || customUrl;
+                  setActiveProvider('byok'); setCustomUrl(url); setCustomKey(byokKey);
+                  chrome.storage.local.set({ activeProvider: 'byok', customUrl: url, customKey: byokKey, customModel: entry.model, customModels: byokModels });
+                }
+              }}
               onRefreshModels={async () => {
                 if (activeProvider === 'copilot') {
                   const res = await msg('COPILOT_FETCH_MODELS');
@@ -2133,7 +2182,14 @@ onOpenDocument={(docId, anchorId) => openDocById(docId, anchorId, 'chat')}
                 }
                 if (!customUrl) return;
                 const res = await msg('FETCH_CUSTOM_MODELS', { url: customUrl, apiKey: customKey });
-                if (res.success) { setCustomModels(res.models as string[]); }
+                if (res.success) {
+                  const models = res.models as string[];
+                  setCustomModels(models);
+                  if (customKey !== '__copilot_sso__') {
+                    setByokModels(models); setByokUrl(customUrl); setByokKey(customKey);
+                    chrome.storage.local.set({ byokModels: models, byokUrl: customUrl, byokKey: customKey });
+                  }
+                }
               }}
               customUrl={customUrl}
               toggleDoc={toggleDoc}
@@ -2162,6 +2218,12 @@ onOpenDocument={(docId, anchorId) => openDocById(docId, anchorId, 'chat')}
                  if (res.success) {
                    const models = res.models as string[];
                    setCustomModels(models);
+                   // Remember this catalog as the BYOK bucket so it survives a
+                   // later Copilot sign-in (which overwrites customModels).
+                   if (customKey !== '__copilot_sso__') {
+                     setByokModels(models); setByokUrl(customUrl); setByokKey(customKey);
+                     chrome.storage.local.set({ byokModels: models, byokUrl: customUrl, byokKey: customKey });
+                   }
                    if (typeof chrome !== 'undefined' && chrome.storage) {
                      chrome.storage.local.set({ customModels: models });
                      chrome.storage.local.get(['customModel'], (r) => {

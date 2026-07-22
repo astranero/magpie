@@ -425,7 +425,10 @@ async function performWebSearch(query: string, signal?: AbortSignal): Promise<Se
   // key; otherwise skip straight to the DDG scrape chain (no wasted 401 call).
   try {
     const keys = await getSearchApiKeys();
-    if (keys.jina) {
+    // The privacy toggle must cover the SEARCH path too (s.jina.ai sees every
+    // QUERY), not just the reader (r.jina.ai, which sees scraped URLs). Turning
+    // the toggle off has to mean "no Jina traffic", not "no Jina scraping".
+    if (keys.jina && await isJinaEnabled()) {
       const hits = await jinaWebSearch(query, activeLimits.urlsPerQuery * 2, signal, keys.jina);
       if (hits.length > 0) {
         const sorted = hits.sort((a, b) => (HIGH_QUALITY_DOMAINS.test(a.url) ? 0 : 1) - (HIGH_QUALITY_DOMAINS.test(b.url) ? 0 : 1));

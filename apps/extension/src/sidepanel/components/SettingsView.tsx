@@ -1,3 +1,4 @@
+import { generateCompanionToken } from '../../lib/settings';
 import React, { useEffect, useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -283,13 +284,23 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   const [rulesDraft, setRulesDraft] = useState(workspaceRules);
   useEffect(() => { setRulesDraft(workspaceRules); }, [workspaceRules]);
 
+  const [companionToken, setCompanionToken] = useState('');
+  useEffect(() => {
+    chrome.storage.local.get(['companionToken']).then(r => { if (typeof r.companionToken === 'string') setCompanionToken(r.companionToken); }).catch(() => {});
+  }, []);
   const [availableClis, setAvailableClis] = useState<string[]>([]);
   useEffect(() => {
     const checkClis = async () => {
       try {
+        // Send the shared secret: against a token-protected companion an
+        // unauthenticated probe 401s, availableClis silently empties, and the
+        // user concludes the integration is broken.
+        const { companionToken: probeToken } = await chrome.storage.local.get(['companionToken']);
+        const probeHeaders: Record<string, string> = { 'Content-Type': 'application/json' };
+        if (probeToken) probeHeaders['Authorization'] = `Bearer ${probeToken}`;
         const res = await fetch(localMcpCompanionUrl || 'http://localhost:3920/mcp', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: probeHeaders,
           body: JSON.stringify({
             jsonrpc: '2.0',
             id: Date.now(),
@@ -602,6 +613,41 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
             />
           </div>
 
+          {/* Companion shared secret. The companion exposes a shell-exec
+              endpoint on localhost; without a token it "will run ANY shell
+              command any local caller sends" — and until now the extension had
+              no way to set one, so every real deployment ran wide open. Any web
+              page can POST to localhost, but cannot READ this token. */}
+          {availableClis.length > 0 && (
+            <div className="space-y-1.5 pt-2 border-t border-border/60">
+              <label className="text-xs font-medium">Companion token <span className="text-[10px] text-muted-foreground font-normal">(local CLI auth)</span></label>
+              <p className="text-[10px] text-muted-foreground font-mono leading-normal">
+                Start the companion with the SAME value as <code>MAGPIE_COMPANION_TOKEN</code>. Without it, any web page you visit can drive the companion's shell-exec endpoint.
+              </p>
+              <div className="flex gap-2">
+                <Input
+                  type="password"
+                  value={companionToken}
+                  onChange={e => setCompanionToken(e.target.value)}
+                  onBlur={() => chrome.storage.local.set({ companionToken: companionToken.trim() })}
+                  placeholder="Generate one, then pass it to the companion"
+                  className="rounded-lg text-xs flex-1"
+                />
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  className="rounded-lg font-medium text-xs shrink-0"
+                  onClick={() => {
+                    const t = generateCompanionToken();
+                    setCompanionToken(t);
+                    chrome.storage.local.set({ companionToken: t });
+                    navigator.clipboard?.writeText(t).catch(() => {});
+                  }}
+                >Generate + copy</Button>
+              </div>
+            </div>
+          )}
+
           <div className="space-y-1.5">
             <label className="text-xs font-medium">API Key</label>
             <Input 
@@ -692,6 +738,41 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
               className="w-full rounded-lg border border-border bg-background px-3 py-2 text-xs font-mono"
             />
           </div>
+
+          {/* Companion shared secret. The companion exposes a shell-exec
+              endpoint on localhost; without a token it "will run ANY shell
+              command any local caller sends" — and until now the extension had
+              no way to set one, so every real deployment ran wide open. Any web
+              page can POST to localhost, but cannot READ this token. */}
+          {availableClis.length > 0 && (
+            <div className="space-y-1.5 pt-2 border-t border-border/60">
+              <label className="text-xs font-medium">Companion token <span className="text-[10px] text-muted-foreground font-normal">(local CLI auth)</span></label>
+              <p className="text-[10px] text-muted-foreground font-mono leading-normal">
+                Start the companion with the SAME value as <code>MAGPIE_COMPANION_TOKEN</code>. Without it, any web page you visit can drive the companion's shell-exec endpoint.
+              </p>
+              <div className="flex gap-2">
+                <Input
+                  type="password"
+                  value={companionToken}
+                  onChange={e => setCompanionToken(e.target.value)}
+                  onBlur={() => chrome.storage.local.set({ companionToken: companionToken.trim() })}
+                  placeholder="Generate one, then pass it to the companion"
+                  className="rounded-lg text-xs flex-1"
+                />
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  className="rounded-lg font-medium text-xs shrink-0"
+                  onClick={() => {
+                    const t = generateCompanionToken();
+                    setCompanionToken(t);
+                    chrome.storage.local.set({ companionToken: t });
+                    navigator.clipboard?.writeText(t).catch(() => {});
+                  }}
+                >Generate + copy</Button>
+              </div>
+            </div>
+          )}
 
           <div className="space-y-1.5">
             <label className="text-xs font-medium">Vision Model</label>
@@ -1066,7 +1147,6 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           ['youtube', 'YouTube Comments', 'free Google Cloud API key'],
           ['redditId', 'Reddit Client ID', 'from reddit.com/prefs/apps (script)'],
           ['redditSecret', 'Reddit Secret', 'from same Reddit app'],
-          ['github', 'GitHub PAT', 'ghp_… — classic repo scope or fine-grained'],
         ] as const).map(([id, label, ph]) => (
           <div key={id} className="space-y-1.5">
             <label className="text-xs font-medium">{label}</label>
