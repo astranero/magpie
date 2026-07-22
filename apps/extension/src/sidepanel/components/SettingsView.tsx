@@ -114,6 +114,7 @@ function CopilotSSOSection({ enterpriseGitHubUrl, setEnterpriseGitHubUrl, saveSe
             A tab has opened at {verifyUrl}. Paste the code and authorize.
           </p>
           <p className="text-[10px] text-muted-foreground animate-pulse">Waiting for authorization…</p>
+          <Button variant="secondary" size="sm" className="rounded-lg text-xs w-full mt-1" onClick={() => { setStatus('idle'); setError(''); }}>Cancel</Button>
         </div>
       ) : (
         <p className="text-xs text-green-600 font-medium">Connected successfully. Reload the panel to start chatting.</p>
