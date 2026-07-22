@@ -7,7 +7,7 @@ import { contentHasTag } from '../../lib/frontmatter';
 // one group so they don't bury the user's own curated docs. Pure + module-level
 // so the derived-list useMemos below have stable deps.
 const isResearchSource = (d: LocalDocument) => contentHasTag(d.content || '', 'research-source');
-import { Download, ExternalLink, Trash2, Cloud, CloudDownload, Plus, Minus, Library, BookOpen, FileUp, FolderUp, FileText, Image, Search, X } from 'lucide-react';
+import { Download, ExternalLink, Trash2, Cloud, CloudDownload, Plus, Minus, Library, BookOpen, FileUp, FolderUp, FileText, Search, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { MagpieEmptyIllustration } from './BrandMark';
 
@@ -27,7 +27,6 @@ interface LoreViewProps {
   importMarkdownFiles: () => void;
   importMarkdownFolder: () => void;
   importPdfFiles: () => void;
-  importImageFiles: () => void;
   timeAgo: (iso: string) => string;
   onDocumentClick: (id: string, anchorId?: string) => void;
   searchQuery: string;
@@ -50,7 +49,6 @@ export const LoreView: React.FC<LoreViewProps> = ({
   importMarkdownFiles,
   importMarkdownFolder,
   importPdfFiles,
-  importImageFiles,
   timeAgo,
   onDocumentClick,
   searchQuery,
@@ -218,15 +216,6 @@ export const LoreView: React.FC<LoreViewProps> = ({
               title="Import PDFs — text extracted by code, scanned pages read by vision model"
             >
               <FileText className="w-3 h-3 mr-1.5" /> PDF
-            </Button>
-            <Button
-              variant="outline"
-              className="flex-1 h-7 text-[10px] rounded-lg font-medium"
-              onClick={importImageFiles}
-              disabled={importing}
-              title="Import images — read into text with the vision model"
-            >
-              <Image className="w-3 h-3 mr-1.5" /> Image
             </Button>
           </div>
         </details>

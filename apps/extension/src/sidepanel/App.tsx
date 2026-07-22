@@ -38,7 +38,7 @@ const DocumentView = lazy(() => import('./components/DocumentView').then(m => ({
 import { findPromptCommand, buildHelpText, loadCustomSkills, SlashCommand } from '../lib/commands';
 import { contentHasTag } from '../lib/frontmatter';
 import { timeAgo } from '../lib/format';
-import { fileToDataUrl, collectDirectoryFiles, inlineRelativeImages } from '../lib/import-helpers';
+import { collectDirectoryFiles, inlineRelativeImages } from '../lib/import-helpers';
 
 // ── Helpers ──
 
@@ -1296,35 +1296,7 @@ loadChatHistory(activeChatId).then(() => {
     }
   };
 
-  /** Import local images — turned into searchable text by the vision model. */
-  const importImageFiles = async () => {
-    try {
-      // @ts-ignore — File System Access API
-      const handles = await window.showOpenFilePicker({
-        multiple: true,
-        types: [{ description: 'Images', accept: { 'image/*': ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.avif'] } }]
-      });
-      if (!activeProjectId) { showToast('error', 'No active session'); return; }
-      
-      // Read all files to data URLs first (fast)
-      const files: Array<{ name: string; dataUrl: string }> = [];
-      for (const h of handles) {
-        const file: File = await h.getFile();
-        const dataUrl = await fileToDataUrl(file);
-        files.push({ name: file.name, dataUrl });
-      }
-
-      showToast('success', `🖼️ Sending ${files.length} image(s) for background analysis...`);
-      
-      // Fire and forget — service worker processes async with BroadcastChannel progress
-      msg('IMPORT_LOCAL_IMAGES', {
-        projectId: activeProjectId,
-        files
-      });
-    } catch (err: any) {
-      if (err?.name !== 'AbortError') showToast('error', 'Image import failed');
-    }
-  };
+// Removed importImageFiles due to deprecation of local image analysis to save memory footprint.
 
   const deleteDoc = async (id: string) => {
     // Optimistically remove from UI
@@ -2118,7 +2090,6 @@ loadChatHistory(activeChatId).then(() => {
               importMarkdownFiles={importMarkdownFiles}
               importMarkdownFolder={importMarkdownFolder}
               importPdfFiles={importPdfFiles}
-              importImageFiles={importImageFiles}
               timeAgo={timeAgo}
               onDocumentClick={(id, anchorId) => openDocById(id, anchorId, 'lore')}
               searchQuery={loreSearchQuery}
