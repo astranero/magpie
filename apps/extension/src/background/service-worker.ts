@@ -2190,8 +2190,8 @@ type PageCtxStrategy = 'semantic' | 'router' | 'agentic';
 async function getPageContextStrategy(): Promise<PageCtxStrategy> {
   try {
     const s = await chrome.storage.local.get(['pageContextStrategy']);
-    return s.pageContextStrategy === 'router' || s.pageContextStrategy === 'agentic' ? s.pageContextStrategy : 'semantic';
-  } catch { return 'semantic'; }}
+    return s.pageContextStrategy === 'semantic' || s.pageContextStrategy === 'router' ? s.pageContextStrategy : 'agentic';
+  } catch { return 'agentic'; }}
 
 // ─────────────────────────────────────────────
 // Chat routing mode — heuristic (default) or agentic
@@ -2334,13 +2334,13 @@ async function agenticGather(
 
   const catalogLinks = linkRefs.slice(0, 60);
   const sys =
-    `You are a debugger reading a CI/CD page, test failure, or error report. ` +
-    `Your job is to find the ROOT CAUSE: what actually failed, why, and what the expected behavior was. ` +
-    `Be thorough — look at the error message, traceback, diff, and recent changes. ` +
-    `Search for patterns like "Error:", "AssertionError", "expected", "received", "FAIL", "✗" to find the real failure. ` +
-    `Read the relevant sections of the page and traceback context. ` +
-    `Only use read_link if the page references external links that help explain the error. ` +
-    `Stop calling tools when you have enough to explain the root cause.\n` +
+    `You are reading a web page to answer the user's question about it. ` +
+    `Use the tools below to read the page content strategically: ` +
+    `read_section to get a specific section by heading, ` +
+    `search_page to find specific text anywhere on the page (like grep), ` +
+    `and read_lines to read a specific range of lines. ` +
+    `Open only the FEW tools that are directly relevant. ` +
+    `Stop calling tools when you have enough to answer.\n` +
     (pageMarkdown
       ? `\nYou can read the page content in detail using read_section (by heading), search_page (grep), or read_lines (by line number). Start by searching for errors or reading the relevant section.\n`
       : '') +
