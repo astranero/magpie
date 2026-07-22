@@ -101,6 +101,10 @@ test('chat send streams a reply into the transcript', async () => {
   await input.press('Enter');
 
   await expect(page.getByText('What does photosynthesis do?')).toBeVisible({ timeout: 8000 });
-  await expect(page.getByText(/converts light into chemical energy/i)).toBeVisible({ timeout: 15000 });
+  // Scope to the transcript paragraph: the aria-live status region announces the
+  // same answer text, which makes a bare getByText a strict-mode violation.
+  await expect(
+    page.getByRole('paragraph').filter({ hasText: /converts light into chemical energy/i }).first()
+  ).toBeVisible({ timeout: 15000 });
   await page.close();
 });
