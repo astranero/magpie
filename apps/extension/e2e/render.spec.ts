@@ -84,7 +84,12 @@ test('markdown renders tables, code, and KaTeX math (no raw markup leaks)', asyn
   await expect(doc.getByRole('cell', { name: 'katex' })).toBeVisible();
 
   // Fenced code became a <pre><code> block.
-  await expect(doc.locator('pre code')).toContainText('function greet');
+  const codeBlock = doc.locator('pre').first();
+  await expect(codeBlock.locator('code')).toContainText('function greet');
+  // Tailwind Typography used to force slate-800 here in light mode. Code
+  // should use Magpie's muted surface instead of a near-black rectangle.
+  const codeBlockBg = await codeBlock.evaluate(el => getComputedStyle(el).backgroundColor);
+  expect(codeBlockBg).not.toBe('rgb(30, 41, 59)');
 
   // KaTeX actually rendered (rehype-katex emits .katex), inline + display.
   await expect(doc.locator('.katex').first()).toBeVisible();

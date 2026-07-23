@@ -208,11 +208,21 @@
   .prose {
     --tw-prose-bullets: hsl(var(--primary));
     --tw-prose-counters: hsl(var(--primary));
+    /* Tailwind Typography defaults every fenced block to slate-800, even in
+       light mode. Use Magpie's surfaces instead so code belongs to the page
+       rather than looking like an unrelated black terminal. */
+    --tw-prose-pre-code: hsl(var(--foreground));
+    --tw-prose-pre-bg: hsl(var(--muted));
   }
   .dark .prose,
   .prose.dark\:prose-invert {
     --tw-prose-invert-bullets: hsl(var(--primary));
     --tw-prose-invert-counters: hsl(var(--primary));
+    --tw-prose-invert-pre-code: hsl(var(--foreground));
+    --tw-prose-invert-pre-bg: hsl(var(--muted));
+  }
+  .prose pre {
+    box-shadow: inset 3px 0 0 hsl(var(--primary) / 0.45);
   }
   .prose :is(ul, ol) {
     margin-top: 0.45em;
