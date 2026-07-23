@@ -66,7 +66,13 @@ test('markdown renders tables, code, and KaTeX math (no raw markup leaks)', asyn
 
   await page.reload();
   await page.getByRole('button', { name: /lore/i }).first().click().catch(() => {});
-  await page.getByText(/render-check/i).first().click({ timeout: 10000 });
+  // The panel re-initializes (projects/chats/docs) after reload, and
+  // IMPORT_LOCAL_MD's embedding step can be slow under CI load — the doc
+  // list populating is the actual bottleneck here, not the click itself, so
+  // wait for visibility with a generous timeout before clicking.
+  const renderCheckDoc = page.getByText(/render-check/i).first();
+  await expect(renderCheckDoc).toBeVisible({ timeout: 20000 });
+  await renderCheckDoc.click();
 
   // Table became a real <table> with the expected cell.
   const doc = page.locator('.prose').first();
