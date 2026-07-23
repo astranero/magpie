@@ -68,6 +68,50 @@ function looksLikePdfViewer(): boolean {
     || document.contentType === 'application/pdf';
 }
 
+/**
+ * Best-effort absolute URL for a "raw log" endpoint on CI/build-log viewer
+ * pages (Azure DevOps, GitHub Actions, GitLab, Jenkins, ...). These viewers
+ * virtualize the log body — only the currently-scrolled-into-view lines
+ * actually exist as DOM nodes, so `document.body.innerText` silently omits
+ * everything off-screen (a 45-minute build's failure is very often near the
+ * END of the log, which is exactly the part least likely to still be
+ * mounted). The raw-log link, by contrast, is a real always-present anchor
+ * (not part of the virtualized list) that points at the complete plain-text
+ * log — fetching it sidesteps DOM virtualization entirely.
+ */
+function findRawLogUrl(): string | null {
+  const abs = (u: string | null | undefined): string | null => {
+    if (!u) return null;
+    try { return new URL(u, document.baseURI).href; } catch { return null; }
+  };
+  // Azure DevOps: <a id="__bolt-download" aria-label="View raw log" href="/…/_apis/build/builds/{id}/logs/{logId}">
+  const ado = document.querySelector<HTMLAnchorElement>(
+    'a#__bolt-download, a[aria-label="View raw log" i], a[href*="/_apis/build/builds/"][href*="/logs/"]'
+  );
+  if (ado?.getAttribute('href')) return abs(ado.getAttribute('href'));
+  // Generic: any link whose visible text names itself as the raw/full log —
+  // covers GitLab ("Complete Raw"), Jenkins ("View as plain text"), and
+  // other CI viewers without hardcoding each one.
+  const generic = Array.from(document.querySelectorAll<HTMLAnchorElement>('a[href]'))
+    .find(a => /^(view raw log|raw log|complete raw|view as plain text|download( full)? log)$/i.test((a.textContent || '').trim()));
+  if (generic?.getAttribute('href')) return abs(generic.getAttribute('href'));
+  return null;
+}
+
+/**
+ * Truncate long text keeping BOTH ends, not just the head. A plain
+ * `.slice(0, max)` (the old behavior) silently drops everything after the
+ * cutoff — for a CI log, that's almost always where the actual failure is,
+ * since builds run top-to-bottom and error out near the end.
+ */
+function truncateKeepingTail(text: string, maxChars: number): string {
+  if (text.length <= maxChars) return text;
+  const headChars = Math.floor(maxChars * 0.25);
+  const tailChars = maxChars - headChars;
+  const omitted = text.length - maxChars;
+  return `${text.slice(0, headChars)}\n\n… [${omitted.toLocaleString()} characters omitted] …\n\n${text.slice(-tailChars)}`;
+}
+
 function bufToBase64(buf: ArrayBuffer): string {
   const bytes = new Uint8Array(buf);
   let binary = '';
@@ -351,9 +395,33 @@ async function scrapePage(): Promise<{
   const isLogPage = monospaceDensity > 0.3 || preCount > 20 || totalText.split('\n').length > 500;
 
   if (isLogPage) {
-    // Fast path: innerText preserves line structure, good for logs/errors
+    // Prefer the raw-log endpoint over innerText when the page exposes one:
+    // it's a plain-text fetch, unaffected by the virtualized log viewer only
+    // mounting on-screen rows. Same-origin `fetch` from the content script
+    // carries the page's own session cookies, so authenticated CI viewers
+    // (Azure DevOps, GitLab, etc.) work the same as a logged-in browser tab.
+    const rawLogUrl = findRawLogUrl();
+    if (rawLogUrl) {
+      try {
+        const res = await fetch(rawLogUrl, { credentials: 'include' });
+        if (res.ok) {
+          const rawText = await res.text();
+          // Sanity check: a real raw log should be at least as large as what
+          // we already see on-screen — guards against the link resolving to
+          // something unrelated (e.g. a login/error page for an expired session).
+          if (rawText.trim().length >= totalText.trim().length * 0.5) {
+            const wordCount = rawText.split(/\s+/).filter(w => w.length > 0).length;
+            return { title, url, favicon, markdown: truncateKeepingTail(rawText, 100000), wordCount };
+          }
+        }
+      } catch {
+        // Fall through to the innerText fast path below.
+      }
+    }
+    // Fast path: innerText preserves line structure, good for logs/errors —
+    // but only reflects whatever the virtualized viewer currently has mounted.
     const wordCount = totalText.split(/\s+/).filter(w => w.length > 0).length;
-    return { title, url, favicon, markdown: totalText.slice(0, 100000), wordCount };
+    return { title, url, favicon, markdown: truncateKeepingTail(totalText, 100000), wordCount };
   }
 
   // ── STANDARD PAGE EXTRACTION ──
