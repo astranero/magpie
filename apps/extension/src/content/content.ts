@@ -68,6 +68,182 @@ function looksLikePdfViewer(): boolean {
     || document.contentType === 'application/pdf';
 }
 
+/**
+ * Best-effort absolute URL for a "raw log" endpoint on CI/build-log viewer
+ * pages (Azure DevOps, GitHub Actions, GitLab, Jenkins, ...). These viewers
+ * virtualize the log body — only the currently-scrolled-into-view lines
+ * actually exist as DOM nodes, so `document.body.innerText` silently omits
+ * everything off-screen (a 45-minute build's failure is very often near the
+ * END of the log, which is exactly the part least likely to still be
+ * mounted). The raw-log link, by contrast, is a real always-present anchor
+ * (not part of the virtualized list) that points at the complete plain-text
+ * log — fetching it sidesteps DOM virtualization entirely.
+ */
+function findRawLogUrl(): string | null {
+  const abs = (u: string | null | undefined): string | null => {
+    if (!u) return null;
+    try { return new URL(u, document.baseURI).href; } catch { return null; }
+  };
+  // Azure DevOps: <a id="__bolt-download" aria-label="View raw log" href="/…/_apis/build/builds/{id}/logs/{logId}">
+  const ado = document.querySelector<HTMLAnchorElement>(
+    'a#__bolt-download, a[aria-label="View raw log" i], a[href*="/_apis/build/builds/"][href*="/logs/"]'
+  );
+  if (ado?.getAttribute('href')) return abs(ado.getAttribute('href'));
+  // Generic: any link whose visible text names itself as the raw/full log —
+  // covers GitLab ("Complete Raw"), Jenkins ("View as plain text"), and
+  // other CI viewers without hardcoding each one.
+  const generic = Array.from(document.querySelectorAll<HTMLAnchorElement>('a[href]'))
+    .find(a => /^(view raw log|raw log|complete raw|view as plain text|download( full)? log)$/i.test((a.textContent || '').trim()));
+  if (generic?.getAttribute('href')) return abs(generic.getAttribute('href'));
+  return null;
+}
+
+/**
+ * Truncate long text keeping BOTH ends, not just the head. A plain
+ * `.slice(0, max)` (the old behavior) silently drops everything after the
+ * cutoff — for a CI log, that's almost always where the actual failure is,
+ * since builds run top-to-bottom and error out near the end.
+ */
+function truncateKeepingTail(text: string, maxChars: number): string {
+  if (text.length <= maxChars) return text;
+  const headChars = Math.floor(maxChars * 0.25);
+  const tailChars = maxChars - headChars;
+  const omitted = text.length - maxChars;
+  return `${text.slice(0, headChars)}\n\n… [${omitted.toLocaleString()} characters omitted] …\n\n${text.slice(-tailChars)}`;
+}
+
+/**
+ * Azure DevOps build "Summary"/"Results" pages (and the single-log viewer
+ * page too — same URL shape) render a list of jobs/steps with pass/fail
+ * status and duration, but NOT the actual failure text — that lives inside
+ * each individual step's log, which the user has to click into one at a
+ * time. Rather than trying to detect and click through the UI, use Azure
+ * DevOps's own Timeline REST API: it lists every record (job/phase/task) in
+ * the build with its result and — for leaf tasks — a `log.id` pointing at
+ * that task's plain-text log. This traverses straight to every failing
+ * step's real log content, in parallel, via network calls instead of
+ * simulated navigation.
+ *
+ * Works for both Azure DevOps Services (dev.azure.com/{org}/{project}/_build/…)
+ * and on-prem Azure DevOps Server / TFS (…/{collection}/{project}/_build/…) —
+ * both use `_build` as the route segment and take `buildId` as a query param.
+ */
+function findAdoBuildApiBase(): { apiBase: string; buildId: string } | null {
+  if (!/\/_build\//i.test(location.pathname)) return null;
+  const buildId = new URLSearchParams(location.search).get('buildId');
+  if (!buildId) return null;
+  const base = location.origin + location.pathname.replace(/\/_build\/.*/i, '');
+  return { apiBase: `${base}/_apis/build/builds/${buildId}`, buildId };
+}
+
+async function tryFetchJson(url: string): Promise<any | null> {
+  try {
+    const res = await fetch(url, { credentials: 'include' });
+    if (res.ok) return await res.json();
+  } catch { /* ignore — caller falls back */ }
+  return null;
+}
+
+/** Hard ceiling on how many failed-step logs we fetch in one traversal —
+ *  guards against a pathological build with hundreds of failing matrix jobs
+ *  hammering the server. Real pipelines essentially never exceed this even
+ *  across many stages, so in practice every stage's failures are captured. */
+const MAX_FAILED_STEP_LOGS = 40;
+/** Total character budget shared across every failed step's log, not a flat
+ *  per-step cap — so a build with 2 failures gets generous room per log, and
+ *  one with 20 failures (spread across several stages) still gets ALL of
+ *  them, each proportionally trimmed, instead of silently dropping whichever
+ *  stage's failures didn't fit under a fixed per-step limit. */
+const MAX_TOTAL_FAILED_LOG_CHARS = 150_000;
+const MIN_CHARS_PER_STEP_LOG = 4_000;
+
+async function fetchAdoFailedStepLogs(apiBase: string): Promise<string> {
+  // Azure DevOps requires an api-version; 6.0 is old enough to exist on both
+  // current cloud and most on-prem server versions. Retry without the param
+  // as a last resort for servers that reject it outright.
+  const timeline = await tryFetchJson(`${apiBase}/timeline?api-version=6.0`)
+    ?? await tryFetchJson(`${apiBase}/timeline`);
+  const records: any[] = Array.isArray(timeline?.records) ? timeline.records : [];
+  // No stage/phase filtering here — the timeline response already contains
+  // every record across every stage in one flat array, and only LEAF tasks
+  // carry a log.id (stages/phases don't), so this naturally reaches failures
+  // nested under any stage without needing to walk the hierarchy explicitly.
+  const failed = records
+    .filter(r => r?.result === 'failed' && r?.log?.id != null)
+    .slice(0, MAX_FAILED_STEP_LOGS);
+  if (!failed.length) return '';
+
+  const perStepBudget = Math.max(MIN_CHARS_PER_STEP_LOG, Math.floor(MAX_TOTAL_FAILED_LOG_CHARS / failed.length));
+
+  // Fetch every failing step's log CONCURRENTLY — this is a "traverse the
+  // failing links in parallel" operation, not a sequential crawl, so it
+  // costs roughly one round-trip's worth of latency regardless of how many
+  // steps failed.
+  const results = await Promise.allSettled(
+    failed.map(async (r) => {
+      const res = await fetch(`${apiBase}/logs/${r.log.id}`, { credentials: 'include' });
+      if (!res.ok) throw new Error(`log ${r.log.id}: HTTP ${res.status}`);
+      const text = await res.text();
+      const name = r.name || r.task?.name || `Step ${r.log.id}`;
+      return `## Failed step: ${name}\n\n${truncateKeepingTail(text, perStepBudget)}`;
+    })
+  );
+
+  return results
+    .filter((r): r is PromiseFulfilledResult<string> => r.status === 'fulfilled')
+    .map(r => r.value)
+    .join('\n\n---\n\n');
+}
+
+/**
+ * The Pipeline "Runs" history/list page (multiple past runs, e.g. showing
+ * "#300.14.25-RUN-16 — Failed") is a DIFFERENT page from a single build's
+ * results view: its URL carries a `definitionId`, not a `buildId`, and the
+ * model has no single build to traverse into. Rather than scraping the
+ * (possibly virtualized) run-list DOM for which rows say "Failed", ask Azure
+ * DevOps directly for the recent failed runs of this pipeline definition,
+ * then traverse into each one's failed steps — same Timeline-API approach as
+ * a single build, just fanned out one level further, still in parallel.
+ */
+function findAdoPipelineApiBase(): { apiBase: string; definitionId: string } | null {
+  if (!/\/_build(\/.*)?$/i.test(location.pathname)) return null;
+  const definitionId = new URLSearchParams(location.search).get('definitionId');
+  if (!definitionId) return null;
+  const base = location.origin + location.pathname.replace(/\/_build.*/i, '');
+  return { apiBase: `${base}/_apis/build`, definitionId };
+}
+
+/** How many recent failed runs to traverse into on the pipeline history page.
+ *  Deliberately small — this is "why is the latest run failing", not a full
+ *  audit of pipeline history. */
+const MAX_FAILED_RUNS = 3;
+
+async function fetchAdoRecentFailedRunsLogs(apiBase: string, definitionId: string): Promise<string> {
+  const query = `definitionId=${encodeURIComponent(definitionId)}&statusFilter=completed&resultFilter=failed&$top=${MAX_FAILED_RUNS}`;
+  const list = await tryFetchJson(`${apiBase}/builds?${query}&api-version=6.0`)
+    ?? await tryFetchJson(`${apiBase}/builds?${query}`);
+  const runs: any[] = Array.isArray(list?.value) ? list.value : [];
+  if (!runs.length) return '';
+
+  // Traverse into every failed run's failed steps CONCURRENTLY, same as the
+  // single-build case — the whole multi-run fan-out costs about as much
+  // latency as the slowest single run's logs, not the sum of all of them.
+  const results = await Promise.allSettled(
+    runs.map(async (run) => {
+      const runApiBase = `${apiBase}/builds/${run.id}`;
+      const failedLogs = await fetchAdoFailedStepLogs(runApiBase);
+      if (!failedLogs) return '';
+      const label = run.buildNumber || `Run ${run.id}`;
+      return `# Run ${label} (failed)\n\n${failedLogs}`;
+    })
+  );
+
+  return results
+    .filter((r): r is PromiseFulfilledResult<string> => r.status === 'fulfilled' && !!r.value)
+    .map(r => r.value)
+    .join('\n\n===\n\n');
+}
+
 function bufToBase64(buf: ArrayBuffer): string {
   const bytes = new Uint8Array(buf);
   let binary = '';
@@ -286,6 +462,45 @@ async function scrapePage(): Promise<{
   const favicon = getFavicon();
   let title = document.title || 'Untitled';
 
+  // ── AZURE DEVOPS BUILD PAGE: traverse straight to every failing step's log ──
+  // Works whether the user is on the build's Summary/Results overview (which
+  // only shows step names + pass/fail + duration, never the actual error) or
+  // a single step's log viewer — either way, this pulls the real failure text
+  // for every failed step via the Timeline API, in parallel, instead of
+  // requiring the user (or the model) to click into each one.
+  const adoBuild = findAdoBuildApiBase();
+  if (adoBuild) {
+    try {
+      const failedLogs = await fetchAdoFailedStepLogs(adoBuild.apiBase);
+      if (failedLogs) {
+        const markdown = `# ${title}\n\n${failedLogs}`;
+        const wordCount = markdown.split(/\s+/).filter(w => w.length > 0).length;
+        return { title, url, favicon, markdown, wordCount };
+      }
+    } catch {
+      // Timeline API unavailable/unauthorized — fall through to the normal
+      // page-scrape paths below (innerText / raw-log-link / Readability).
+    }
+  } else {
+    // No single buildId in the URL — this is likely the pipeline's Runs
+    // history/list page ("#300.14.25-RUN-16 — Failed") rather than one
+    // build's results view. Ask the API for the recent failed runs of this
+    // pipeline definition directly, and traverse into each one.
+    const adoPipeline = findAdoPipelineApiBase();
+    if (adoPipeline) {
+      try {
+        const failedRunsLogs = await fetchAdoRecentFailedRunsLogs(adoPipeline.apiBase, adoPipeline.definitionId);
+        if (failedRunsLogs) {
+          const markdown = `# ${title}\n\n${failedRunsLogs}`;
+          const wordCount = markdown.split(/\s+/).filter(w => w.length > 0).length;
+          return { title, url, favicon, markdown, wordCount };
+        }
+      } catch {
+        // Fall through to the normal page-scrape paths below.
+      }
+    }
+  }
+
   // ── YOUTUBE TRANSCRIPT EXTRACTION ──
   if (window.location.hostname.includes('youtube.com') && window.location.pathname === '/watch') {
     try {
@@ -351,9 +566,33 @@ async function scrapePage(): Promise<{
   const isLogPage = monospaceDensity > 0.3 || preCount > 20 || totalText.split('\n').length > 500;
 
   if (isLogPage) {
-    // Fast path: innerText preserves line structure, good for logs/errors
+    // Prefer the raw-log endpoint over innerText when the page exposes one:
+    // it's a plain-text fetch, unaffected by the virtualized log viewer only
+    // mounting on-screen rows. Same-origin `fetch` from the content script
+    // carries the page's own session cookies, so authenticated CI viewers
+    // (Azure DevOps, GitLab, etc.) work the same as a logged-in browser tab.
+    const rawLogUrl = findRawLogUrl();
+    if (rawLogUrl) {
+      try {
+        const res = await fetch(rawLogUrl, { credentials: 'include' });
+        if (res.ok) {
+          const rawText = await res.text();
+          // Sanity check: a real raw log should be at least as large as what
+          // we already see on-screen — guards against the link resolving to
+          // something unrelated (e.g. a login/error page for an expired session).
+          if (rawText.trim().length >= totalText.trim().length * 0.5) {
+            const wordCount = rawText.split(/\s+/).filter(w => w.length > 0).length;
+            return { title, url, favicon, markdown: truncateKeepingTail(rawText, 100000), wordCount };
+          }
+        }
+      } catch {
+        // Fall through to the innerText fast path below.
+      }
+    }
+    // Fast path: innerText preserves line structure, good for logs/errors —
+    // but only reflects whatever the virtualized viewer currently has mounted.
     const wordCount = totalText.split(/\s+/).filter(w => w.length > 0).length;
-    return { title, url, favicon, markdown: totalText.slice(0, 100000), wordCount };
+    return { title, url, favicon, markdown: truncateKeepingTail(totalText, 100000), wordCount };
   }
 
   // ── STANDARD PAGE EXTRACTION ──
