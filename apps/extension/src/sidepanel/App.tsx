@@ -218,48 +218,86 @@ const [enterpriseGitHubUrl, setEnterpriseGitHubUrl] = useState('');
       const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
       if (tz) chrome.storage.local.set({ araTimezone: tz });
     } catch { /* ignore */ }
-    // Adopt the active session another sidepanel instance switched to, so two
-    // windows show the same project AND chat. Stored as ONE pair so the chat id
-    // can never be applied without its project — that inconsistency was what
-    // leaked a stale chat into a freshly-created session. loadChats corrects an
-    // adopted chat that isn't in the project.
-    const adopt = (s: any) => {
-      if (!s || typeof s !== 'object') return;
-      // Record what we're adopting so the resulting state change doesn't echo a
-      // redundant write back to storage.
-      if (typeof s.projectId === 'string' && s.projectId && typeof s.chatId === 'string' && s.chatId) {
-        lastSessionJsonRef.current = JSON.stringify({ projectId: s.projectId, chatId: s.chatId });
-      }
-      if (typeof s.projectId === 'string' && s.projectId) setActiveProjectId(prev => (prev === s.projectId ? prev : s.projectId));
-      if (typeof s.chatId === 'string' && s.chatId) setActiveChatId(prev => (prev === s.chatId ? prev : s.chatId));
+    // Adopt the active session — but ONLY this tab's own remembered session
+    // (or, for a brand-new tab with no session yet, the last-used session as
+    // a convenience starting point). Previously this was a single global
+    // key any panel's write would overwrite, and EVERY open panel — on
+    // whatever tab, whatever project — would adopt it via storage.onChanged,
+    // so switching to/using another tab's panel silently hijacked this
+    // tab's active project/chat (and could clobber it mid in-flight
+    // generation from this panel's point of view, since the UI swapped out
+    // from under it). Scoping the record to this tab's own id fixes that:
+    // other tabs' writes go to a different map entry entirely.
+    let sessionOnChange: ((changes: Record<string, any>, area: string) => void) | null = null;
+    let cancelledSessionSetup = false;
+
+    const setupSessionSync = (tabId: number | null) => {
+      if (cancelledSessionSetup) return;
+      myTabIdRef.current = tabId;
+      const sessionKey = tabId != null ? String(tabId) : null;
+
+      const adopt = (s: any) => {
+        if (!s || typeof s !== 'object') return;
+        // Record what we're adopting so the resulting state change doesn't echo a
+        // redundant write back to storage.
+        if (typeof s.projectId === 'string' && s.projectId && typeof s.chatId === 'string' && s.chatId) {
+          lastSessionJsonRef.current = JSON.stringify({ projectId: s.projectId, chatId: s.chatId });
+        }
+        if (typeof s.projectId === 'string' && s.projectId) setActiveProjectId(prev => (prev === s.projectId ? prev : s.projectId));
+        if (typeof s.chatId === 'string' && s.chatId) setActiveChatId(prev => (prev === s.chatId ? prev : s.chatId));
+      };
+
+      chrome.storage.local.get(['araActiveSessions', 'araLastActiveSession']).then((r: any) => {
+        if (cancelledSessionSetup) return;
+        const perTab = sessionKey ? r.araActiveSessions?.[sessionKey] : null;
+        adopt(perTab || r.araLastActiveSession);
+      });
+
+      sessionOnChange = (changes: Record<string, any>, area: string) => {
+        if (area !== 'local') return;
+        if ('customSkills' in changes) loadCustomSkills().then(setCustomCommands);
+        // Only react to a change in THIS tab's own map entry — a different
+        // tab updating its own entry must not touch this panel at all.
+        if (sessionKey && 'araActiveSessions' in changes) {
+          const newEntry = changes.araActiveSessions?.newValue?.[sessionKey];
+          const oldEntry = changes.araActiveSessions?.oldValue?.[sessionKey];
+          if (JSON.stringify(newEntry) !== JSON.stringify(oldEntry)) adopt(newEntry);
+        }
+        // A Copilot sign-in completing in the background (or in another panel)
+        // writes these directly to storage — mirror them here so THIS panel's
+        // model picker updates without a manual reload.
+        if ('copilotModels' in changes && Array.isArray(changes.copilotModels?.newValue)) {
+          setCopilotModels(changes.copilotModels.newValue);
+        }
+        if ('copilotApiBase' in changes && typeof changes.copilotApiBase?.newValue === 'string') {
+          setCopilotApiBase(changes.copilotApiBase.newValue);
+        }
+        if ('customModels' in changes && Array.isArray(changes.customModels?.newValue)) {
+          setCustomModels(changes.customModels.newValue);
+        }
+        if ('activeProvider' in changes) {
+          const v = changes.activeProvider?.newValue;
+          if (v === 'copilot' || v === 'byok') setActiveProvider(v);
+        }
+        if ('customModel' in changes && typeof changes.customModel?.newValue === 'string') {
+          setCustomModel(changes.customModel.newValue);
+        }
+      };
+      chrome.storage.onChanged.addListener(sessionOnChange);
     };
-    chrome.storage.local.get(['araActiveSession']).then((r: any) => adopt(r.araActiveSession));
-    const onChange = (changes: Record<string, any>, area: string) => {
-      if (area !== 'local') return;
-      if ('customSkills' in changes) loadCustomSkills().then(setCustomCommands);
-      if ('araActiveSession' in changes) adopt(changes.araActiveSession?.newValue);
-      // A Copilot sign-in completing in the background (or in another panel)
-      // writes these directly to storage — mirror them here so THIS panel's
-      // model picker updates without a manual reload.
-      if ('copilotModels' in changes && Array.isArray(changes.copilotModels?.newValue)) {
-        setCopilotModels(changes.copilotModels.newValue);
-      }
-      if ('copilotApiBase' in changes && typeof changes.copilotApiBase?.newValue === 'string') {
-        setCopilotApiBase(changes.copilotApiBase.newValue);
-      }
-      if ('customModels' in changes && Array.isArray(changes.customModels?.newValue)) {
-        setCustomModels(changes.customModels.newValue);
-      }
-      if ('activeProvider' in changes) {
-        const v = changes.activeProvider?.newValue;
-        if (v === 'copilot' || v === 'byok') setActiveProvider(v);
-      }
-      if ('customModel' in changes && typeof changes.customModel?.newValue === 'string') {
-        setCustomModel(changes.customModel.newValue);
-      }
+
+    if (chrome.tabs?.query) {
+      chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+        setupSessionSync(typeof tabs?.[0]?.id === 'number' ? tabs[0].id : null);
+      });
+    } else {
+      setupSessionSync(null);
+    }
+
+    return () => {
+      cancelledSessionSetup = true;
+      if (sessionOnChange) chrome.storage.onChanged.removeListener(sessionOnChange);
     };
-    chrome.storage.onChanged.addListener(onChange);
-    return () => chrome.storage.onChanged.removeListener(onChange);
   }, []);
 
   // When this instance becomes visible again, re-pull the current session's
@@ -317,6 +355,11 @@ loadChatHistory(activeChatId).then(() => {
   // doesn't re-publish the same value (chrome.storage.set fires onChanged even
   // when the value is unchanged).
   const lastSessionJsonRef = useRef<string>('');
+  // This panel's own tab id (resolved once at mount). Scopes the active
+  // project/chat session to THIS tab, so switching focus to another tab's
+  // panel — which has its own project/chat — can never silently overwrite
+  // this one's selection. See the session-sync effect below.
+  const myTabIdRef = useRef<number | null>(null);
   // When another instance is answering, this maps chatId → the local assistant
   // message id we're streaming its broadcast tokens into (live mirror).
   const mirrorStreamRef = useRef<Record<string, string>>({});
@@ -877,7 +920,33 @@ loadChatHistory(activeChatId).then(() => {
         const json = JSON.stringify({ projectId: activeProjectId, chatId: activeChatId });
         if (json !== lastSessionJsonRef.current) {
           lastSessionJsonRef.current = json;
-          chrome.storage.local.set({ araActiveSession: { projectId: activeProjectId, chatId: activeChatId } });
+          const session = { projectId: activeProjectId, chatId: activeChatId };
+          // Global convenience default — read ONLY by a brand-new tab's panel
+          // at its own first mount (see the session-sync effect above), never
+          // re-adopted afterwards. This tab's own session lives in the
+          // per-tab map below, which other tabs can never overwrite.
+          chrome.storage.local.set({ araLastActiveSession: session });
+          const tabId = myTabIdRef.current;
+          if (tabId != null) {
+            chrome.storage.local.get(['araActiveSessions']).then((r: any) => {
+              const existing = (r.araActiveSessions && typeof r.araActiveSessions === 'object') ? r.araActiveSessions : {};
+              const write = (liveIds: Set<string> | null) => {
+                const pruned: Record<string, unknown> = {};
+                for (const [k, v] of Object.entries(existing)) {
+                  // Drop entries for tabs that no longer exist so this map
+                  // doesn't grow unbounded over a long browsing session.
+                  if (!liveIds || liveIds.has(k)) pruned[k] = v;
+                }
+                pruned[String(tabId)] = session;
+                chrome.storage.local.set({ araActiveSessions: pruned });
+              };
+              if (chrome.tabs?.query) {
+                chrome.tabs.query({}, (allTabs) => write(new Set((allTabs || []).map(t => String(t.id)))));
+              } else {
+                write(null);
+              }
+            });
+          }
         }
       }
       loadChatHistory(activeChatId).then(() => resumeMirror(activeChatId));
