@@ -112,6 +112,76 @@ function truncateKeepingTail(text: string, maxChars: number): string {
   return `${text.slice(0, headChars)}\n\n… [${omitted.toLocaleString()} characters omitted] …\n\n${text.slice(-tailChars)}`;
 }
 
+/**
+ * Azure DevOps build "Summary"/"Results" pages (and the single-log viewer
+ * page too — same URL shape) render a list of jobs/steps with pass/fail
+ * status and duration, but NOT the actual failure text — that lives inside
+ * each individual step's log, which the user has to click into one at a
+ * time. Rather than trying to detect and click through the UI, use Azure
+ * DevOps's own Timeline REST API: it lists every record (job/phase/task) in
+ * the build with its result and — for leaf tasks — a `log.id` pointing at
+ * that task's plain-text log. This traverses straight to every failing
+ * step's real log content, in parallel, via network calls instead of
+ * simulated navigation.
+ *
+ * Works for both Azure DevOps Services (dev.azure.com/{org}/{project}/_build/…)
+ * and on-prem Azure DevOps Server / TFS (…/{collection}/{project}/_build/…) —
+ * both use `_build` as the route segment and take `buildId` as a query param.
+ */
+function findAdoBuildApiBase(): { apiBase: string; buildId: string } | null {
+  if (!/\/_build\//i.test(location.pathname)) return null;
+  const buildId = new URLSearchParams(location.search).get('buildId');
+  if (!buildId) return null;
+  const base = location.origin + location.pathname.replace(/\/_build\/.*/i, '');
+  return { apiBase: `${base}/_apis/build/builds/${buildId}`, buildId };
+}
+
+async function tryFetchJson(url: string): Promise<any | null> {
+  try {
+    const res = await fetch(url, { credentials: 'include' });
+    if (res.ok) return await res.json();
+  } catch { /* ignore — caller falls back */ }
+  return null;
+}
+
+/** Cap how many failed-step logs we pull — a build can fail dozens of jobs in
+ *  a matrix; a handful of the actual failures is what answers "why did this
+ *  fail", the rest would just burn context budget. */
+const MAX_FAILED_STEP_LOGS = 8;
+/** Per-step log cap — kept well under the LLM context budget across up to
+ *  MAX_FAILED_STEP_LOGS steps fetched at once. */
+const MAX_CHARS_PER_STEP_LOG = 20000;
+
+async function fetchAdoFailedStepLogs(apiBase: string): Promise<string> {
+  // Azure DevOps requires an api-version; 6.0 is old enough to exist on both
+  // current cloud and most on-prem server versions. Retry without the param
+  // as a last resort for servers that reject it outright.
+  const timeline = await tryFetchJson(`${apiBase}/timeline?api-version=6.0`)
+    ?? await tryFetchJson(`${apiBase}/timeline`);
+  const records: any[] = Array.isArray(timeline?.records) ? timeline.records : [];
+  const failed = records.filter(r => r?.result === 'failed' && r?.log?.id != null);
+  if (!failed.length) return '';
+
+  // Fetch every failing step's log CONCURRENTLY — this is a "traverse the
+  // failing links in parallel" operation, not a sequential crawl, so it
+  // costs roughly one round-trip's worth of latency regardless of how many
+  // steps failed.
+  const results = await Promise.allSettled(
+    failed.slice(0, MAX_FAILED_STEP_LOGS).map(async (r) => {
+      const res = await fetch(`${apiBase}/logs/${r.log.id}`, { credentials: 'include' });
+      if (!res.ok) throw new Error(`log ${r.log.id}: HTTP ${res.status}`);
+      const text = await res.text();
+      const name = r.name || r.task?.name || `Step ${r.log.id}`;
+      return `## Failed step: ${name}\n\n${truncateKeepingTail(text, MAX_CHARS_PER_STEP_LOG)}`;
+    })
+  );
+
+  return results
+    .filter((r): r is PromiseFulfilledResult<string> => r.status === 'fulfilled')
+    .map(r => r.value)
+    .join('\n\n---\n\n');
+}
+
 function bufToBase64(buf: ArrayBuffer): string {
   const bytes = new Uint8Array(buf);
   let binary = '';
@@ -329,6 +399,27 @@ async function scrapePage(): Promise<{
   const url = window.location.href;
   const favicon = getFavicon();
   let title = document.title || 'Untitled';
+
+  // ── AZURE DEVOPS BUILD PAGE: traverse straight to every failing step's log ──
+  // Works whether the user is on the build's Summary/Results overview (which
+  // only shows step names + pass/fail + duration, never the actual error) or
+  // a single step's log viewer — either way, this pulls the real failure text
+  // for every failed step via the Timeline API, in parallel, instead of
+  // requiring the user (or the model) to click into each one.
+  const adoBuild = findAdoBuildApiBase();
+  if (adoBuild) {
+    try {
+      const failedLogs = await fetchAdoFailedStepLogs(adoBuild.apiBase);
+      if (failedLogs) {
+        const markdown = `# ${title}\n\n${failedLogs}`;
+        const wordCount = markdown.split(/\s+/).filter(w => w.length > 0).length;
+        return { title, url, favicon, markdown, wordCount };
+      }
+    } catch {
+      // Timeline API unavailable/unauthorized — fall through to the normal
+      // page-scrape paths below (innerText / raw-log-link / Readability).
+    }
+  }
 
   // ── YOUTUBE TRANSCRIPT EXTRACTION ──
   if (window.location.hostname.includes('youtube.com') && window.location.pathname === '/watch') {
