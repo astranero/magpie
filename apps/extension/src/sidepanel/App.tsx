@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback, lazy, Suspense } from 'react';
+import { useState, useEffect, useRef, useCallback, useMemo, lazy, Suspense } from 'react';
 import { useTranslation } from 'react-i18next';
 import { get, set } from 'idb-keyval';
 
@@ -74,6 +74,10 @@ async function resolveCitations(text: string): Promise<ResolvedCitation[]> {
 /** Short, human label for a BYOK endpoint — "openrouter.ai" beats a full URL. */
 function byokHostLabel(url: string): string {
   try { return new URL(url).host.replace(/^www\./, ''); } catch { return url ? 'Custom Provider' : 'Custom Provider'; }
+}
+
+function sameStrings(a: string[], b: string[]): boolean {
+  return a.length === b.length && a.every((value, index) => value === b[index]);
 }
 
 export default function App() {
@@ -2082,6 +2086,59 @@ loadChatHistory(activeChatId).then(() => {
     }
   };
 
+  // Stable model-picker props matter during streaming: App renders on every
+  // animation-frame-batched delta. Inline arrays/callbacks made ChatView's
+  // model-refresh effect see a "new" callback each time and could turn one
+  // chat answer into a burst of /models requests + storage writes.
+  const modelEntries = useMemo(() => {
+    const copilotEntries = copilotModels.map(model => ({
+      provider: 'copilot' as const,
+      group: 'GitHub Copilot',
+      model,
+    }));
+    const byokEntries = byokModels.map(model => ({
+      provider: 'byok' as const,
+      group: `${byokHostLabel(byokUrl)} · your API key`,
+      model,
+    }));
+    const entries = activeProvider === 'copilot'
+      ? [...copilotEntries, ...byokEntries]
+      : [...byokEntries, ...copilotEntries];
+
+    if (entries.length > 0) return entries;
+    return customModels.map(model => ({
+      provider: activeProvider,
+      group: activeProvider === 'copilot' ? 'GitHub Copilot' : byokHostLabel(customUrl),
+      model,
+    }));
+  }, [activeProvider, byokModels, byokUrl, copilotModels, customModels, customUrl]);
+
+  const refreshChatModels = useCallback(async () => {
+    if (activeProvider === 'copilot') {
+      const res = await msg('COPILOT_FETCH_MODELS');
+      if (!res.success) return;
+      const models = res.models as string[];
+      setCopilotModels(current => sameStrings(current, models) ? current : models);
+      setCustomModels(current => sameStrings(current, models) ? current : models);
+      const apiBase = (res.apiBase as string) || '';
+      if (apiBase) setCopilotApiBase(current => current === apiBase ? current : apiBase);
+      await chrome.storage.local.set({ copilotModels: models, copilotApiBase: apiBase });
+      return;
+    }
+
+    if (!customUrl) return;
+    const res = await msg('FETCH_CUSTOM_MODELS', { url: customUrl, apiKey: customKey });
+    if (!res.success) return;
+    const models = res.models as string[];
+    setCustomModels(current => sameStrings(current, models) ? current : models);
+    if (customKey !== '__copilot_sso__') {
+      setByokModels(current => sameStrings(current, models) ? current : models);
+      setByokUrl(current => current === customUrl ? current : customUrl);
+      setByokKey(current => current === customKey ? current : customKey);
+      await chrome.storage.local.set({ byokModels: models, byokUrl: customUrl, byokKey: customKey });
+    }
+  }, [activeProvider, customKey, customUrl]);
+
   // ══════════════════════════════════════════════
   // Render
   // ══════════════════════════════════════════════
@@ -2220,30 +2277,7 @@ loadChatHistory(activeChatId).then(() => {
 onOpenDocument={(docId, anchorId) => openDocById(docId, anchorId, 'chat')}
               // Model selector support
               customModel={customModel}
-              modelEntries={[
-                // BOTH catalogs are listed, grouped by provider, so switching between
-                // enterprise Copilot and your own key is visible in one place rather
-                // than buried in Settings. Hiding the inactive provider did prevent
-                // accidental spend, but at the cost of the discoverability problem
-                // this picker exists to solve — so the guard moved to onSelectModel,
-                // which confirms before a switch that starts billing a different
-                // account. Active provider first: it is what you are usually picking.
-                ...(activeProvider === 'copilot'
-                  ? [
-                      ...copilotModels.map(m => ({ provider: 'copilot' as const, group: 'GitHub Copilot', model: m })),
-                      ...byokModels.map(m => ({ provider: 'byok' as const, group: `${byokHostLabel(byokUrl)} · your API key`, model: m })),
-                    ]
-                  : [
-                      ...byokModels.map(m => ({ provider: 'byok' as const, group: `${byokHostLabel(byokUrl)} · your API key`, model: m })),
-                      ...copilotModels.map(m => ({ provider: 'copilot' as const, group: 'GitHub Copilot', model: m })),
-                    ]
-                ),
-                // Fall back to the shared bucket only when neither catalog has
-                // been populated yet (fresh install).
-                ...(copilotModels.length === 0 && byokModels.length === 0
-                  ? customModels.map(m => ({ provider: (activeProvider === 'copilot' ? 'copilot' : 'byok') as 'copilot' | 'byok', group: activeProvider === 'copilot' ? 'GitHub Copilot' : byokHostLabel(customUrl), model: m }))
-                  : []),
-              ]}
+              modelEntries={modelEntries}
               onSelectModel={(entry) => {
                 // The spend risk here is asymmetric: switching TO your own key
                 // starts billing you personally, while switching to Copilot uses
@@ -2269,29 +2303,7 @@ onOpenDocument={(docId, anchorId) => openDocById(docId, anchorId, 'chat')}
                   chrome.storage.local.set({ activeProvider: 'byok', customUrl: url, customKey: byokKey, customModel: entry.model, customModels: byokModels });
                 }
               }}
-              onRefreshModels={async () => {
-                if (activeProvider === 'copilot') {
-                  const res = await msg('COPILOT_FETCH_MODELS');
-                  if (res.success) {
-                    const models = res.models as string[];
-                    setCopilotModels(models);
-                    setCustomModels(models);
-                    if (res.apiBase) setCopilotApiBase(res.apiBase as string);
-                    chrome.storage.local.set({ copilotModels: models, copilotApiBase: (res.apiBase as string) || '' });
-                  }
-                  return;
-                }
-                if (!customUrl) return;
-                const res = await msg('FETCH_CUSTOM_MODELS', { url: customUrl, apiKey: customKey });
-                if (res.success) {
-                  const models = res.models as string[];
-                  setCustomModels(models);
-                  if (customKey !== '__copilot_sso__') {
-                    setByokModels(models); setByokUrl(customUrl); setByokKey(customKey);
-                    chrome.storage.local.set({ byokModels: models, byokUrl: customUrl, byokKey: customKey });
-                  }
-                }
-              }}
+              onRefreshModels={refreshChatModels}
               customUrl={customUrl}
               toggleDoc={toggleDoc}
               onUploadMarkdown={importMarkdownFiles}

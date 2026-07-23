@@ -56,7 +56,8 @@ test('markdown renders tables, code, and KaTeX math (no raw markup leaks)', asyn
   await page.goto(`chrome-extension://${extensionId}/sidepanel.html`);
   await expect(page.getByText('Default Session').first()).toBeVisible({ timeout: 10000 });
 
-  const proj: any = await sendMessage(page, 'CREATE_PROJECT', { title: 'Render' });
+  const projectTitle = `Render ${Date.now()}`;
+  const proj: any = await sendMessage(page, 'CREATE_PROJECT', { title: projectTitle });
   const projectId = proj?.project?.id || proj?.id;
   expect(projectId).toBeTruthy();
   await sendMessage(page, 'IMPORT_LOCAL_MD', {
@@ -65,13 +66,16 @@ test('markdown renders tables, code, and KaTeX math (no raw markup leaks)', asyn
   });
 
   await page.reload();
+  // CREATE_PROJECT is a background seed helper; it deliberately does not
+  // change this panel's active workspace. Select the project we imported into
+  // instead of assuming a reload will leave the UI on it.
+  const workspace = page.getByRole('combobox').first();
+  await expect(workspace).toBeVisible({ timeout: 10000 });
+  await workspace.click();
+  await page.getByRole('option', { name: projectTitle, exact: true }).click();
   await page.getByRole('button', { name: /lore/i }).first().click().catch(() => {});
-  // The panel re-initializes (projects/chats/docs) after reload, and
-  // IMPORT_LOCAL_MD's embedding step can be slow under CI load — the doc
-  // list populating is the actual bottleneck here, not the click itself, so
-  // wait for visibility with a generous timeout before clicking.
   const renderCheckDoc = page.getByText(/render-check/i).first();
-  await expect(renderCheckDoc).toBeVisible({ timeout: 20000 });
+  await expect(renderCheckDoc).toBeVisible({ timeout: 10000 });
   await renderCheckDoc.click();
 
   // Table became a real <table> with the expected cell.
