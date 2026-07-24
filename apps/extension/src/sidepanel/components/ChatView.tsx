@@ -7,6 +7,7 @@ import rehypeKatex from 'rehype-katex';
 import { LocalDocument, ChatMessage, ResearchPlan, ResolvedCitation } from '../types';
 import { Send, StopCircle, Sparkles, ChevronDown, ChevronUp, Loader2, Microscope, Search, BookOpen, User, Copy, Check, Paperclip, FileText, RotateCcw, Pencil, Globe, Newspaper, Plug, PenLine, ShieldCheck, CheckCircle2, XCircle } from 'lucide-react';
 import { parseResearchActivity, PHASE_ORDER, PHASE_LABEL, type ResearchPhase } from '../../lib/research-activity';
+import { diagnoseError } from '../../lib/error-recovery';
 import type { LucideIcon } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { paletteEntries, SlashCommand } from '../../lib/commands';
@@ -45,6 +46,10 @@ interface ChatViewProps {
   onRegenerate?: (assistantMsgId: string) => void;
   /** Replace an earlier question and re-run from it; later turns are discarded. */
   onEditAndRerun?: (userMsgId: string, newText: string) => void;
+  /** Open the settings/config view — the recovery action for auth/config errors. */
+  onOpenSettings?: () => void;
+  /** Re-run the last question — the recovery action for a transient failure. */
+  onRetryLast?: () => void;
   researching: Record<string, boolean>;
   researchLogs: Record<string, string[]>;
   documents: LocalDocument[];
@@ -215,6 +220,56 @@ const FieldLog: React.FC<{ log: string[]; onStop: () => void }> = ({ log, onStop
           </div>
         )}
       </div>
+    </div>
+  );
+};
+
+// ─────────────────────────────────────────────
+// A failed turn, with a way out
+// ─────────────────────────────────────────────
+// diagnoseError turns the raw error string into a named cause and one
+// recovery. A 401 offers "Fix the key" → Settings; a timeout offers "Retry".
+// The raw detail is folded away, present but not shouting.
+
+const ErrorRecovery: React.FC<{ raw: string; onSettings?: () => void; onRetry?: () => void }> = ({ raw, onSettings, onRetry }) => {
+  const [showDetail, setShowDetail] = useState(false);
+  const d = diagnoseError(raw);
+  const act =
+    d.action === 'settings' ? { run: onSettings, label: d.actionLabel } :
+    d.action === 'retry' ? { run: onRetry, label: d.actionLabel } :
+    { run: undefined, label: null };
+
+  return (
+    <div className="w-full rounded-lg border border-red-500/30 bg-red-500/5 px-3 py-2.5 space-y-2">
+      <div className="flex items-start gap-2">
+        <XCircle size={14} className="mt-0.5 shrink-0 text-red-600 dark:text-red-400" aria-hidden="true" />
+        <span className="text-xs text-foreground/90 leading-snug">{d.title}</span>
+      </div>
+      <div className="flex items-center gap-2 flex-wrap">
+        {act.run && act.label && (
+          <Button size="sm" className="h-7 text-xs rounded-md" onClick={act.run}>{act.label}</Button>
+        )}
+        {/* Retry is always offered as a secondary, since even a config error
+            can be transient once the config is fixed elsewhere. */}
+        {d.action !== 'retry' && onRetry && (
+          <Button size="sm" variant="ghost" className="h-7 text-xs rounded-md text-muted-foreground" onClick={onRetry}>Retry</Button>
+        )}
+        {d.detail && d.detail !== d.title && (
+          <button
+            type="button"
+            onClick={() => setShowDetail(v => !v)}
+            className="ml-auto text-[10px] font-mono uppercase tracking-wider text-muted-foreground/70 hover:text-muted-foreground"
+            aria-expanded={showDetail}
+          >
+            {showDetail ? 'Hide' : 'Details'}
+          </button>
+        )}
+      </div>
+      {showDetail && d.detail && (
+        <div className="text-[10px] font-mono text-muted-foreground/80 leading-relaxed break-words border-t border-red-500/20 pt-2">
+          {d.detail}
+        </div>
+      )}
     </div>
   );
 };
@@ -1020,6 +1075,8 @@ export const ChatView: React.FC<ChatViewProps> = ({
   onSourceModeChange,
   onRegenerate,
   onEditAndRerun,
+  onOpenSettings,
+  onRetryLast,
   researching,
   researchLogs,
   documents,
@@ -1318,7 +1375,9 @@ export const ChatView: React.FC<ChatViewProps> = ({
               {/* One malformed message (broken markdown/KaTeX) must not white-
                   screen the whole panel — quarantine it per message. */}
               <ErrorBoundary compact label="message">
-                {m.role === 'assistant' || m.role === 'system' ? (
+                {m.role === 'system' && m.error ? (
+                  <ErrorRecovery raw={m.error} onSettings={onOpenSettings} onRetry={onRetryLast} />
+                ) : m.role === 'assistant' || m.role === 'system' ? (
                   <CollapsibleMessage text={m.text} streaming={m.streaming}>
                     <MessageBody text={m.text} compact={m.role === 'system'} streaming={m.streaming} renderLive={m.renderLive} resolveCitations={resolveCitations} onOpenDocument={onOpenDocument} onOpenExternalLink={onOpenExternalLink} />
                   </CollapsibleMessage>

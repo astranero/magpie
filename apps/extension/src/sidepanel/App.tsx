@@ -1193,8 +1193,16 @@ loadChatHistory(activeChatId).then(() => {
         // onboarding card. (A synthetic "welcome" system message used to live
         // here, but it lingered above real messages after the first send —
         // optimistic sends append onto whatever's already in the array.)
+        // The worker persists a failed turn as a system message prefixed with
+        // "⚠️ " (so the CHAT_STATE reconcile doesn't wipe it — see the comment
+        // at its saveChatMessage). Re-tag those on load so the recovery block
+        // renders from history too, not just in the brief window before the
+        // reconcile replaced the in-memory error-marked message.
         const hist = (res.messages as any[]).length > 0
-          ? (res.messages as ChatMessage[])
+          ? (res.messages as ChatMessage[]).map(m =>
+              m.role === 'system' && typeof m.text === 'string' && m.text.startsWith('⚠️ ') && !m.error
+                ? { ...m, error: m.text.slice(2).trim() }
+                : m)
           : [];
         return { ...prev, [chatId]: [...hist, ...pendingPlans] };
       });
@@ -1988,6 +1996,19 @@ loadChatHistory(activeChatId).then(() => {
   };
 
   /**
+   * Retry the last question — the recovery action on a failed turn. Finds the
+   * most recent user message and re-runs from it, which drops the failure
+   * marker along with everything after it.
+   */
+  const retryLast = async () => {
+    const list = messages[activeChatId] || [];
+    for (let i = list.length - 1; i >= 0; i--) {
+      if (list[i].role === 'user') { await rerunFrom(list[i].id, list[i].text); return; }
+    }
+    showToast('error', 'Nothing to retry yet.');
+  };
+
+  /**
    * Stream one chat turn over a long-lived port. Resolves when the stream
    * finishes (DONE/ERROR/disconnect). `existingUserMsgId` is set when the user
    * bubble already exists (a queued message being drained) — we just clear its
@@ -2066,11 +2087,13 @@ loadChatHistory(activeChatId).then(() => {
         port.disconnect();
       } else if (m?.type === 'ERROR') {
         finalizeStreamingMessage(currentChatId, assistantId);
+        const rawErr = (m.error as string) || 'Error — check Settings.';
         setMessages(prev => ({
           ...prev,
           [currentChatId]: [...(prev[currentChatId] || []), {
-            id: uid(), role: 'system' as const,
-            text: (m.error as string) || 'Error — check Settings.'
+            // `error` carries the raw string; ChatView runs it through
+            // diagnoseError to show a recovery block with the right button.
+            id: uid(), role: 'system' as const, text: rawErr, error: rawErr,
           }]
         }));
         finish();
@@ -2429,6 +2452,8 @@ loadChatHistory(activeChatId).then(() => {
               }}
               onRegenerate={regenerateAnswer}
               onEditAndRerun={editAndRerun}
+              onOpenSettings={() => setView('settings')}
+              onRetryLast={retryLast}
               researching={researching}
               isActive={view === 'chat'}
               llmEndpointLocal={/^https?:\/\/(localhost|127\.0\.0\.1|0\.0\.0\.0|\[?::1\]?)(:|\/|$)/i.test(customUrl.trim())}

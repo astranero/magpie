@@ -46,6 +46,12 @@ export interface ChatMessage {
   /** A user message waiting in the queue behind an active research run —
    *  shown with a "Queued" badge until the run finishes and it executes. */
   queued?: boolean;
+  /** Marks a system message as a failed turn: the raw error string. The view
+   *  runs it through diagnoseError to show a recovery block instead of a bare
+   *  line. Set both from the live ERROR event and, on load, from the "⚠️ "-
+   *  prefixed system message the worker persists so the failure survives the
+   *  history reconcile. */
+  error?: string;
 }
 
 /**
