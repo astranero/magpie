@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { ChevronDown, Search, Check } from 'lucide-react';
+import { isImeComposing } from '../../lib/ime';
 
 // ─────────────────────────────────────────────
 // ModelSelect — THE model picker
@@ -87,6 +88,7 @@ export const ModelSelect: React.FC<ModelSelectProps> = ({
   const pick = (e: ModelEntry) => { setOpen(false); onSelect(e); };
 
   const onKeyDown = (e: React.KeyboardEvent) => {
+    if (isImeComposing(e)) return;   // searching by a CJK model name
     if (e.key === 'ArrowDown') { e.preventDefault(); setActive(a => Math.min(a + 1, options.length - 1)); }
     else if (e.key === 'ArrowUp') { e.preventDefault(); setActive(a => Math.max(a - 1, 0)); }
     else if (e.key === 'Enter') { e.preventDefault(); if (options[active]) pick(options[active]); }

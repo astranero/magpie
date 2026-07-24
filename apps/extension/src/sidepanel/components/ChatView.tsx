@@ -11,6 +11,7 @@ import { paletteEntries, SlashCommand } from '../../lib/commands';
 import { ErrorBoundary } from './ErrorBoundary';
 import { shouldRestoreScroll } from '../../lib/scroll-restore';
 import { reasoningTail } from '../../lib/reasoning-stream';
+import { isImeComposing } from '../../lib/ime';
 import { stripInvisibleMathOps } from '../../lib/unicode-text';
 import { MagpieEmptyIllustration } from './BrandMark';
 import { ModelSelect } from './ModelSelect';
@@ -421,7 +422,7 @@ const MessageBody: React.FC<MessageBodyProps> = React.memo(({ text: rawText, com
     return (
       <div>
         {/* aria-live=off: the growing token stream must NOT be announced live. */}
-        <div aria-live="off" className={`whitespace-pre-wrap break-words font-sans ${compact ? 'text-xs' : 'text-sm'} text-foreground`}>
+        <div dir="auto" aria-live="off" className={`whitespace-pre-wrap break-words font-sans ${compact ? 'text-xs' : 'text-sm'} text-foreground`}>
           {rawText}
           <span className="inline-block w-2 h-4 ml-0.5 align-middle bg-primary/60 animate-pulse motion-reduce:animate-none" aria-hidden="true" />
         </div>
@@ -440,7 +441,7 @@ const MessageBody: React.FC<MessageBodyProps> = React.memo(({ text: rawText, com
     <div>
       {/* Announced once when the reply settles (populated by the effect above). */}
       <span className="sr-only" aria-live="polite">{announce}</span>
-      <div className={`prose prose-sm dark:prose-invert max-w-none leading-relaxed prose-p:text-foreground prose-li:text-foreground prose-headings:text-foreground prose-strong:text-foreground prose-strong:font-semibold prose-img:rounded-md prose-headings-display prose-a:text-primary prose-a:font-medium prose-code:text-foreground prose-pre:bg-muted/80 prose-pre:text-foreground prose-pre:rounded-md prose-pre:border prose-pre:border-border prose-p:my-2 prose-headings:mt-4 prose-headings:mb-1.5 prose-h2:text-[13px] prose-h3:text-xs prose-ul:my-2 prose-ol:my-2 prose-li:my-0.5 prose-ul:pl-4 prose-ol:pl-4 marker:text-muted-foreground prose-hr:my-3 prose-hr:border-border prose-table:my-2 prose-th:px-2 prose-th:py-1 prose-th:text-foreground prose-td:px-2 prose-td:py-1 prose-td:border-border prose-th:border-border first:prose-headings:mt-0 ${compact ? 'text-xs' : ''}`}>
+      <div dir="auto" className={`prose prose-sm dark:prose-invert max-w-none leading-relaxed prose-p:text-foreground prose-li:text-foreground prose-headings:text-foreground prose-strong:text-foreground prose-strong:font-semibold prose-img:rounded-md prose-headings-display prose-a:text-primary prose-a:font-medium prose-code:text-foreground prose-pre:bg-muted/80 prose-pre:text-foreground prose-pre:rounded-md prose-pre:border prose-pre:border-border prose-p:my-2 prose-headings:mt-4 prose-headings:mb-1.5 prose-h2:text-[13px] prose-h3:text-xs prose-ul:my-2 prose-ol:my-2 prose-li:my-0.5 prose-ul:pl-4 prose-ol:pl-4 marker:text-muted-foreground prose-hr:my-3 prose-hr:border-border prose-table:my-2 prose-th:px-2 prose-th:py-1 prose-th:text-foreground prose-td:px-2 prose-td:py-1 prose-td:border-border prose-th:border-border first:prose-headings:mt-0 ${compact ? 'text-xs' : ''}`}>
         <ReactMarkdown
           remarkPlugins={[remarkGfm, remarkMath]}
           rehypePlugins={[[rehypeKatex, { strict: false, throwOnError: false }]]}
@@ -587,7 +588,9 @@ const MessageEditor: React.FC<{
         ref={ref}
         value={text}
         onChange={e => { setText(e.target.value); setArmed(false); }}
+        dir="auto"
         onKeyDown={e => {
+          if (isImeComposing(e)) return;  // IME candidate confirm
           if (e.key === 'Escape') { e.preventDefault(); onCancel(); }
           if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); submit(); }
         }}
@@ -1356,7 +1359,19 @@ export const ChatView: React.FC<ChatViewProps> = ({
               el.style.height = 'auto';
               el.style.height = `${Math.min(el.scrollHeight, 160)}px`;
             }}
+            // Right-to-left scripts (Arabic, Hebrew, Persian, Urdu) need the
+            // browser to pick direction from the first strong character. Without
+            // dir="auto" the caret, punctuation and text alignment are all wrong.
+            dir="auto"
             onKeyDown={e => {
+              // IME GUARD — must come before every Enter branch below.
+              //
+              // With a Chinese/Japanese/Korean input method, Enter CONFIRMS the
+              // candidate you are choosing. Handled as "send", it ships a
+              // half-composed message and destroys the composition. `keyCode
+              // 229` is the legacy signal some browsers still emit instead of
+              // setting isComposing.
+              if (isImeComposing(e)) return;
               // Slash palette keyboard navigation
               if (input.startsWith('/') && !input.includes(' ')) {
                 const matches = paletteEntries(input, customCommands);
