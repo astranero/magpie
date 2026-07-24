@@ -70,19 +70,38 @@ contacts `openrouter.ai` with a key read from env or the gitignored
    (`DATA_TRAILER` in `deep-researcher.ts`) after the source excerpts,
    re-asserting that the preceding text is untrusted data and instructing
    the model to ignore any instructions embedded in it.
-2. **LLM output → side panel.** Rendered via react-markdown (no
+2. **Fetching a PDF with the user's session (`EXTRACT_PDF`).** When a
+   background fetch of a PDF comes back empty — the usual cause is a host that
+   gates downloads and answers with a verification page — the content script
+   re-fetches the same URL from inside the page, so the request carries the
+   user's cookies.
+
+   The privilege boundary this crosses is worth stating plainly: the extension
+   is asking the page to fetch on its behalf, using credentials the extension
+   itself never sees. It is scoped to (a) a URL the extension already resolved
+   as a PDF, (b) the tab the user has open, (c) an explicit capture the user
+   initiated. It grants no access the user does not already have — if they
+   cannot open the PDF in that tab, neither can this — and it defeats no check;
+   the site's verification has already been satisfied by the user's own session.
+
+   It is NOT a general "fetch anything as the user" channel, and it must not
+   become one. Anything broader (arbitrary URLs, background-initiated,
+   cross-origin) would be a genuine escalation and belongs in this document
+   before it is written.
+
+3. **LLM output → side panel.** Rendered via react-markdown (no
    `dangerouslySetInnerHTML`); `urlTransform` restricts URLs to
    markdown-safe schemes plus `data:image/`. Citation chips only resolve
    against the local chunk store.
-3. **MCP servers.** Registering + enabling a server is the permission grant:
+4. **MCP servers.** Registering + enabling a server is the permission grant:
    research will POST the topic to that URL and index what comes back as a
    source. The URL is constrained: `isAllowedMcpUrl` (`lib/mcp-client.ts`)
    permits `https://` to any host but `http://` only to loopback
    (`localhost`/`127.0.0.1`/`[::1]`) — a non-conforming URL is rejected at
    save and connect time.
-4. **Imported files.** Local `.md`/PDF/images are parsed on-device
+5. **Imported files.** Local `.md`/PDF/images are parsed on-device
    (pdf.js with `isEvalSupported: false`; images inlined as data URLs).
-5. **Companion server (optional, `companion-mcp.js`).** If the user runs it,
+6. **Companion server (optional, `companion-mcp.js`).** If the user runs it,
    it exposes an `execute_command` tool on `localhost:3920` that runs arbitrary
    shell commands (the CLI-LLM route depends on this). It is gated by a shared
    token (v1.2+): the extension generates one (Settings → AI Provider

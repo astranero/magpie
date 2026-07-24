@@ -152,6 +152,25 @@ The base component still defaults to `rounded-none border-2 border-transparent` 
 - Action row: `opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 transition-opacity` (hover-reveal pattern, now also keyboard-reachable via `focus-within`)
 - Per-doc enable/mute toggle is a small pill switch (`rounded-full`), not the larger Settings-style switch described under "Toggle switch" below
 
+### Thinking indicator
+
+Not a static "Thinking…" — that sat unchanged through waits of 30-120 s on a
+reasoning model, which reads as a hang. Three signals in priority order: the
+real phase the worker reports ("Reading the page…", "Understanding the
+question…"), elapsed seconds once past 3, and the tail of the streaming chain of
+thought with a collapsible for the full trace. **Only the phase sits in the live
+region** — a per-second timer and constantly-changing reasoning text would make
+a screen reader chatter continuously.
+
+### Message actions
+
+Assistant rows carry Copy + **Regenerate**; user rows carry **Edit**, which swaps
+the bubble for a textarea. Both appear on hover/focus-within and are disabled
+while a turn streams. Edit confirms in two steps naming the count
+("Discard 3 and re-run?") — the same inline pattern as the workspace delete,
+because discarding is permanent and chat history syncs to Drive. Regenerate drops
+only the answer it replaces, so it needs no confirm.
+
 ### Section / collapsible
 
 - Outer: `border-b border-border/70 last:border-b-0` — a FLUSH ROW, not a card. The old card treatment (`rounded-lg border bg-card shadow-card`) spent scarce width on chrome and made the panel read as a box floating inside the browser; sections now run edge to edge, separated by one hairline, as native sidebars do.

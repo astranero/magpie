@@ -40,10 +40,21 @@ const BOT_PATTERNS: RegExp[] = [
   /performing security/i,
   /DDoS protection/i,
   /one more step/i,
-  /verify (?:that )?you are (?:a )?human/i,
+  // "Verifying you are human" is Cloudflare's CURRENT wording; the original
+  // pattern only matched the imperative "verify", so live challenge pages were
+  // sailing through the gate as content.
+  /verif(?:y|ying) (?:that )?you are (?:a )?human/i,
   /we need to check your browser/i,
   /are you a robot/i,
   /\b(?:re|h)?captcha\b/i,
+  // Added when extraction-quality.ts was folded into this list — these were in
+  // the second implementation and missing here, so the research scrape path had
+  // been letting them through as if they were content.
+  /attention required/i,          // Cloudflare's classic block title
+  /pardon our interruption/i,     // Imperva / Distil
+  /request unsuccessful.*incapsula/i,
+  /enable javascript and cookies to continue/i,
+  /access denied/i,               // short pages only — see PATTERN_CHECK_MAX_WORDS
 ];
 
 const JS_REQUIRED_PATTERNS: RegExp[] = [
@@ -90,6 +101,25 @@ const PATTERN_CHECK_MAX_WORDS = 300;
 
 function matchAny(text: string, patterns: RegExp[]): boolean {
   return patterns.some(p => p.test(text));
+}
+
+/**
+ * True when the text is an anti-bot interstitial rather than page content.
+ *
+ * Split out of checkContentQuality so the extraction paths can ask the same
+ * question without running the whole gate. They need it for a different reason:
+ * the gate REJECTS a scraped URL, while a live tab or a page-context read has
+ * to explain to the user what happened. One pattern list either way — two would
+ * drift the moment a provider changes its wording.
+ *
+ * Short-content guard applies here too: a long article that merely discusses
+ * captchas is not a captcha.
+ */
+export function looksLikeChallengePage(text: string): boolean {
+  const t = (text || '').trim();
+  if (!t) return false;
+  if (countWords(t) > PATTERN_CHECK_MAX_WORDS) return false;
+  return matchAny(t, BOT_PATTERNS) || matchAny(t, JS_REQUIRED_PATTERNS);
 }
 
 export function checkContentQuality(markdown: string, title?: string): GateResult {

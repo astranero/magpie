@@ -133,6 +133,7 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for the full breakdown.
 | [docs/CITATIONS.md](docs/CITATIONS.md) | Anchor grammar |
 | [docs/MCP.md](docs/MCP.md) | MCP server config |
 | [docs/TESTING.md](docs/TESTING.md) | Test suite |
+| [CHANGELOG.md](CHANGELOG.md) | What changed, newest first |
 
 ## Contributing
 

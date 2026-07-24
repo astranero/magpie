@@ -81,5 +81,22 @@ see by construction.
 - Memory-budget E2E (`e2e/memory-budget.spec.ts`): seeds a heavy corpus
   into the real IndexedDB and asserts the global LIST_DOCUMENTS payload
   ships frontmatter-only (the sidepanel-OOM regression guard).
+- Chat controls E2E (`e2e/chat-controls.spec.ts`): regenerate replaces the
+  answer rather than appending, and editing a message discards the turns
+  that followed it in **storage**, not just React state (a reload reads the
+  saved history back). Its own spec file on purpose — Playwright gives each
+  file a fresh persistent context, and these assertions count messages in a
+  chat, so sharing a profile means counting whatever another spec left
+  behind. The mock serialises every completion (`[gen N]`) because a
+  regenerated answer is otherwise textually identical to the one it
+  replaced, and no assertion could tell "replaced" from "did nothing".
 - Not covered yet (known): PDF/image import via UI, page-context, MCP
-  against a live server.
+  against a live server, IME composition (cannot be simulated in
+  Playwright — `lib/ime.ts` is unit-tested and the wiring verified by
+  reading), and the panel's own appearance (no React testing library).
+- Load-sensitive: `debug-page-detection`'s perf assertion has a hard 15 ms
+  budget and `e2e/link-preview` budgets 20 s for a capture whose own
+  comment notes the Jina path takes ~20 s. Both fail intermittently on a
+  busy machine without anything being wrong. Re-run before believing
+  either — and before suspecting your own change, which is the trap they
+  set.

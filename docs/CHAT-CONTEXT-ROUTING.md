@@ -168,6 +168,35 @@ The side panel is **per-tab**, so each window/tab is a separate React instance.
 
 ## Gotchas (do not regress)
 
+- **The language rule is placed FIRST, not just last.** `LANGUAGE_RULE` closes
+  `RESPONSE_STYLE`, i.e. it is the ninth bullet of a long block — small fast
+  models (observed: `gemini-2.5-flash-lite`) drop trailing instructions, and a
+  Finnish question about a Finnish page came back in English. `LANGUAGE_DIRECTIVE`
+  now also LEADS every prompt, so the rule sandwiches the payload the way
+  `DATA_TRAILER` does. Don't "tidy" the duplicate away.
+- **`RESPONSE_STYLE` is module-scoped, and must stay there.** It used to be a
+  local const at the top of the citation branch, which sits AFTER the
+  general-knowledge, web-search and Wikipedia branches return — so those three
+  shipped with no formatting guidance at all and answered in walls of prose while
+  workspace answers were properly structured. Chitchat and meta deliberately keep
+  the bare `LANGUAGE_RULE`: a greeting should not be told to use `##` headings.
+- **A page turn may give an ASSESSMENT.** A listing page cannot contain "is this
+  any good?" by its nature; told only to answer from the page, the model
+  correctly and uselessly reports that the page lacks a quality assessment. The
+  prompt separates "the page lacks a FACT" (say so) from "the question asks for
+  judgement" (combine the page's facts with the model's own knowledge, marking
+  which is which).
+- **Reasoning is a separate channel.** `delta.reasoning_content` /
+  `delta.reasoning` never touch `full`, so a reasoning model's chain of thought
+  cannot reach the saved transcript, the citation pass, or the sentinel/refusal
+  logic that reads `full`. Inline `<think>` blocks are split by a stateful
+  splitter (`lib/reasoning-stream.ts`) because the tags arrive across chunk
+  boundaries.
+- **Every Enter-to-submit handler guards on IME composition FIRST.** With a CJK
+  input method Enter confirms a candidate; guarding only the send branch still
+  lets the palette and list-continue branches steal the keystroke
+  (`lib/ime.ts`).
+
 - **📄 ON = page wins**, but only when the router says the question is about the
   page. Don't blanket-force the page (breaks "is it cold today?") and don't let a
   keyword-matching library doc hijack it (`!usePage` gate on the citation branch).

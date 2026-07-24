@@ -42,39 +42,15 @@ export const MIN_PAGE_CHARS = 4000;
 /** An extraction this small is thin regardless of ratio. */
 export const MIN_EXTRACT_CHARS = 400;
 
-/**
- * Bot-check interstitials. These are pages the operator serves INSTEAD of
- * content — a scraper that treats them as content stores a document whose whole
- * body is "Verifying you are human", and the model then answers from it.
- *
- * Detecting them is not circumventing them. The point is to tell the user what
- * happened so they can open the page themselves, in their own session, where
- * the check has already passed.
- */
-const CHALLENGE_MARKERS = [
-  'just a moment',
-  'checking your browser',
-  'verifying you are human',
-  'enable javascript and cookies to continue',
-  'attention required',
-  'cf-browser-verification',
-  'cf_chl_opt',
-  'ddos protection by',
-  'please verify you are a human',
-  'access denied',
-  'request unsuccessful. incapsula',
-  'pardon our interruption',
-];
-
-/** True when the text is an anti-bot interstitial rather than page content. */
-export function looksLikeChallengePage(text: string): boolean {
-  if (!text) return false;
-  // Challenge pages are SHORT. A long article mentioning "access denied" in
-  // prose must not be mistaken for one.
-  const head = text.slice(0, 4000).toLowerCase();
-  if (text.length > 12000) return false;
-  return CHALLENGE_MARKERS.some(m => head.includes(m));
-}
+// Challenge detection is NOT reimplemented here. lib/quality-gate.ts already
+// carries the pattern list (Cloudflare, PerimeterX, DataDome, JS-required
+// walls) and the short-content guard that stops a long article ABOUT captchas
+// from being mistaken for one. It was written for the research scrape path,
+// which rejects such a URL; these paths need the same question answered for a
+// different reason — to tell the user why a page they are looking at came back
+// empty. Two lists would drift the first time a provider changed its wording.
+import { looksLikeChallengePage } from './quality-gate';
+export { looksLikeChallengePage };
 
 /**
  * Judge an extraction against the page it came from.
