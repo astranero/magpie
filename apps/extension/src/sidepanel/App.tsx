@@ -338,6 +338,9 @@ loadChatHistory(activeChatId).then(() => {
   // Drive
   const [authed, setAuthed] = useState(false);
   const [syncing, setSyncing] = useState(false);
+  // What the sync/import is doing right now. These loop over every document
+  // and used to run in complete silence, which reads as nothing happening.
+  const [syncStatus, setSyncStatus] = useState('');
   const [profile, setProfile] = useState<{ name: string; email: string; picture: string } | null>(null);
 
   // Chat
@@ -620,6 +623,10 @@ loadChatHistory(activeChatId).then(() => {
         let aId = mirrorStreamRef.current[m.chatId];
         if (!aId) { aId = uid(); mirrorStreamRef.current[m.chatId] = aId; setGenerating(prev => ({ ...prev, [m.chatId]: true })); }
         appendMirrorDelta(m.chatId, aId, (m.text as string) || '');
+        return;
+      }
+      if (m.action === 'SYNC_PROGRESS') {
+        setSyncStatus((m.text as string) || '');
         return;
       }
       if (m.action === 'CHAT_FOLLOWUPS') {
@@ -1469,10 +1476,15 @@ loadChatHistory(activeChatId).then(() => {
 
   const syncToDrive = async () => {
     setSyncing(true);
+    setSyncStatus('Uploading to Drive…');
     const res = await msg('SYNC_TO_DRIVE', { interactive: true });
     setSyncing(false);
+    setSyncStatus('');
     if (res.success) {
-      showToast('success', `✓ Synced ${res.synced}/${res.total} documents to Drive`);
+      const n = Number(res.synced) || 0;
+      showToast(n > 0 ? 'success' : 'info',
+        n > 0 ? `✓ Synced ${n}/${res.total} documents to Drive`
+              : 'Nothing to sync — every document is already up to date in Drive.');
       loadDocuments(activeProjectId);
     } else {
       showToast('error', (res.error as string) || 'Sync failed — sign in to Google in Settings');
@@ -1492,10 +1504,20 @@ loadChatHistory(activeChatId).then(() => {
       showToast('error', (resetRes.error as string) || 'Reset failed');
       return;
     }
+    // resetCount is what makes "force" meaningful: it is how many documents
+    // were marked unsynced and will therefore be re-uploaded. Reporting it up
+    // front is the difference between "nothing happened" and "re-uploading 55".
+    const queued = Number(resetRes.resetCount) || 0;
+    setSyncStatus(queued > 0 ? `Re-uploading ${queued} document${queued === 1 ? '' : 's'}…` : 'Checking Drive…');
     const res = await msg('SYNC_TO_DRIVE', { interactive: true });
     setSyncing(false);
+    setSyncStatus('');
     if (res.success) {
-      showToast('success', `✓ Resynced ${res.synced}/${res.total} documents to Drive`);
+      const n = Number(res.synced) || 0;
+      // "✓ Resynced 0/0" read as success while looking like nothing happened.
+      showToast(n > 0 ? 'success' : 'info',
+        n > 0 ? `✓ Resynced ${n}/${res.total} documents to Drive`
+              : 'Nothing to sync — every document is already up to date in Drive.');
       loadDocuments(activeProjectId);
     } else {
       showToast('error', (res.error as string) || 'Sync failed');
@@ -1503,12 +1525,22 @@ loadChatHistory(activeChatId).then(() => {
   };
 
   const importFromDrive = async () => {
+    // The handler requires a projectId (imported docs are linked to a
+    // workspace). This call sent NO payload at all, so every import failed with
+    // "projectId is required for importing" — the id was in scope the whole
+    // time, two lines below in loadDocuments.
+    if (!activeProjectId) { showToast('error', 'Select a workspace first — imported documents are linked to one.'); return; }
     setSyncing(true);
-    const res = await msg('IMPORT_FROM_DRIVE');
+    setSyncStatus('Reading your Drive folder…');
+    const res = await msg('IMPORT_FROM_DRIVE', { projectId: activeProjectId });
     setSyncing(false);
+    setSyncStatus('');
     if (res.success) {
-      showToast('success', `✓ Imported ${res.imported} documents from Drive`);
-      loadDocuments(activeProjectId);
+      const n = Number(res.imported) || 0;
+      showToast(n > 0 ? 'success' : 'info',
+        n > 0 ? `✓ Imported ${n} document${n === 1 ? '' : 's'} from Drive`
+              : 'Nothing new to import — Drive matches your library.');
+      if (n > 0) loadDocuments(activeProjectId);
     } else {
       showToast('error', (res.error as string) || 'Import failed');
     }
@@ -2302,6 +2334,7 @@ loadChatHistory(activeChatId).then(() => {
               globalDocuments={globalDocuments}
               authed={authed}
               syncing={syncing}
+              syncStatus={syncStatus}
               toggleDoc={toggleDoc}
               downloadDoc={downloadDoc}
               deleteDoc={deleteDoc}

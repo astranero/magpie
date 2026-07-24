@@ -16,6 +16,8 @@ interface LoreViewProps {
   globalDocuments: LocalDocument[];
   authed: boolean;
   syncing: boolean;
+  /** Live progress line for a running sync/import. */
+  syncStatus?: string;
   toggleDoc: (id: string, checked: boolean) => void;
   downloadDoc: (doc: LocalDocument) => void;
   deleteDoc: (id: string) => void;
@@ -38,6 +40,7 @@ export const LoreView: React.FC<LoreViewProps> = ({
   globalDocuments,
   authed,
   syncing,
+  syncStatus,
   toggleDoc,
   downloadDoc,
   deleteDoc,
@@ -439,13 +442,23 @@ export const LoreView: React.FC<LoreViewProps> = ({
       </div>
 
       {authed && documents.length > 0 && (
-        <div className="flex items-center justify-between p-3 border-t border-border bg-card shrink-0">
-          <Button variant="ghost" size="sm" className="h-8 text-xs text-muted-foreground" onClick={syncToDrive} disabled={syncing}>
-            {syncing ? 'Syncing' : <><Cloud size={14} className="mr-1.5" /> Sync to Drive</>}
-          </Button>
-          <Button variant="ghost" size="sm" className="h-8 text-xs text-muted-foreground" onClick={importFromDrive} disabled={syncing}>
-            <CloudDownload size={14} className="mr-1.5" /> Import from Drive
-          </Button>
+        <div className="border-t border-border bg-card shrink-0">
+          <div className="flex items-center justify-between p-3">
+            <Button variant="ghost" size="sm" className="h-8 text-xs text-muted-foreground" onClick={syncToDrive} disabled={syncing}>
+              {syncing ? 'Syncing...' : <><Cloud size={14} className="mr-1.5" /> Sync to Drive</>}
+            </Button>
+            <Button variant="ghost" size="sm" className="h-8 text-xs text-muted-foreground" onClick={importFromDrive} disabled={syncing}>
+              <CloudDownload size={14} className="mr-1.5" /> Import from Drive
+            </Button>
+          </div>
+          {/* Which document, out of how many. Uploading 55 files ran for a
+              minute in silence, and a disabled button is not an answer to
+              "is this actually doing anything?". */}
+          {!!syncStatus && (
+            <div className="px-3 pb-2 text-[10px] font-mono text-muted-foreground" aria-live="polite">
+              {syncStatus}
+            </div>
+          )}
         </div>
       )}
 

@@ -4077,6 +4077,13 @@ async function handleSyncToDrive(request?: Record<string, unknown>): Promise<Rec
   let synced = 0;
   const errors: string[] = [];
 
+  // Uploading 55 documents took a minute in complete silence, which reads as
+  // "the button did nothing". Broadcast progress so the panel can say where it
+  // is. Fire-and-forget: no panel open is not an error.
+  const report = (text: string) =>
+    chrome.runtime.sendMessage({ action: 'SYNC_PROGRESS', text }).catch(() => {});
+  report(unsynced.length ? `Uploading 0/${unsynced.length} to Drive…` : 'Checking Drive…');
+
   for (const doc of unsynced) {
     try {
       const fileName = doc.title.replace(/[/\\?%*:|"<>]+/g, '-').substring(0, 120) + '.md';
@@ -4098,6 +4105,7 @@ async function handleSyncToDrive(request?: Record<string, unknown>): Promise<Rec
 
       const driveFileId = await uploadMarkdown(token, targetFolderId, fileName, doc.content);
       await updateDocumentSync(doc.id, true, driveFileId);
+      report(`Uploading ${synced + 1}/${unsynced.length} to Drive…`);
       synced++;
     } catch (err) {
       errors.push(`${doc.title}: ${err instanceof Error ? err.message : String(err)}`);

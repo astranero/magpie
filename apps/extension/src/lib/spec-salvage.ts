@@ -204,7 +204,9 @@ export function dedupeRows(rows: SpecRow[], existingMarkdown = ''): SpecRow[] {
   const seen = new Set<string>();
   const out: SpecRow[] = [];
   for (const r of rows) {
-    const key = `${r.label.toLowerCase()} ${r.value.toLowerCase()}`;
+    // \u0000 as the separator: it cannot occur in page text, so two rows
+    // cannot collide by having a label/value pair that spans the boundary.
+    const key = `${r.label.toLowerCase()}\u0000${r.value.toLowerCase()}`;
     if (seen.has(key)) continue;
     seen.add(key);
     // Both halves already in the extracted text → Readability kept this one.

@@ -597,34 +597,11 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
 
   return (
     <div className="flex-1 overflow-y-auto no-scrollbar">
-      {/* ── Workspace instructions ── */}
-      <Section id="workspace-rules" title="Workspace Instructions" subtitle={`Persistent context for "${workspaceName.length > 48 ? workspaceName.slice(0, 45) + '…' : workspaceName}" — added to every prompt.`}>
-          <textarea
-            value={rulesDraft}
-            onChange={e => setRulesDraft(e.target.value)}
-            onBlur={() => { if (rulesDraft !== workspaceRules) saveWorkspaceRules(rulesDraft); }}
-            placeholder={"Tell Magpie your baseline rules (e.g. stack, formatting preferences, coding rules)."}
-            rows={4}
-            className="w-full rounded-lg border border-border bg-background px-3 py-2 text-xs leading-relaxed resize-y focus:outline-none focus:ring-2 focus:ring-ring"
-          />
-          <p className="text-[10px] text-muted-foreground leading-normal">
-            Applies only to this workspace. Saved automatically.
-          </p>
-      </Section>
-
-      {/* ── GitHub Copilot SSO ── */}
-      <Section id="copilot" title="GitHub Copilot" subtitle="Sign in with your enterprise GitHub account. Set your enterprise URL below if using GHES." defaultOpen={true}>
-        <CopilotSSOSection
-          enterpriseGitHubUrl={enterpriseGitHubUrl}
-          setEnterpriseGitHubUrl={setEnterpriseGitHubUrl}
-          saveSettings={saveSettings}
-          customModel={customModel}
-          copilotModels={copilotModels}
-          activateProviderModel={activateProviderModel}
-        />
-      </Section>
-
-      {/* ── Custom Provider ── */}
+      {/* ── Connect a model ── */}
+      <div className="px-4 pt-4 pb-1">
+        <h2 className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">Connect a model</h2>
+        <p className="text-[10px] text-muted-foreground/80 mt-0.5 leading-snug">Needed once, before anything else works.</p>
+      </div>
       <Section id="provider" title="AI Provider Configuration" subtitle="Configure your AI backend (or use Copilot above).">
           {/* Which backend will actually receive the next request — computed
               from the SAME settings the client reads, so it can't lie. Answers
@@ -833,93 +810,21 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
             <p className="text-[10px] text-muted-foreground font-mono">Used for reading images & scanned PDFs (uses text model if blank).</p>
           </div>
       </Section>
-
-      {/* ── About ── */}
-      <Section id="about" title="About" subtitle="Which build is actually running." defaultOpen={false}>
-        <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-[11px] font-mono">
-          <dt className="text-muted-foreground">Version</dt>
-          <dd>{chrome.runtime?.getManifest?.().version || '—'}</dd>
-          <dt className="text-muted-foreground">Panel build</dt>
-          <dd>{__BUILD_STAMP__}</dd>
-          <dt className="text-muted-foreground">Worker build</dt>
-          <dd>{workerBuild || 'asking…'}</dd>
-        </dl>
-        <p className="text-[10px] text-muted-foreground leading-normal">
-          The panel and the service worker are loaded separately. Reopening the panel
-          picks up panel changes; worker changes need a reload on chrome://extensions.
-          If these two stamps disagree, that is what happened.
-        </p>
+      <Section id="copilot" title="GitHub Copilot" subtitle="Sign in with your enterprise GitHub account. Set your enterprise URL below if using GHES." defaultOpen={true}>
+        <CopilotSSOSection
+          enterpriseGitHubUrl={enterpriseGitHubUrl}
+          setEnterpriseGitHubUrl={setEnterpriseGitHubUrl}
+          saveSettings={saveSettings}
+          customModel={customModel}
+          copilotModels={copilotModels}
+          activateProviderModel={activateProviderModel}
+        />
       </Section>
-
-      {/* ── Appearance ── */}
-      <Section id="appearance" title="Appearance" subtitle="Pick a palette. Village is a warm light theme.">
-        <AppearanceSection />
-      </Section>
-
-      {/* ── Capture Behavior ── */}
-      <Section id="capture" title="Capture" subtitle="Configure page clipping settings.">
-        <div className="flex items-center justify-between gap-3">
-          <div className="min-w-0">
-            <span className="text-xs font-medium">Auto-add to active workspace</span>
-            <p className="text-[10px] text-muted-foreground font-mono mt-0.5 leading-normal">
-              Link new captures to the active workspace automatically.
-            </p>
-          </div>
-          <button
-            type="button"
-            role="switch"
-            aria-checked={autoLinkCaptures}
-            onClick={() => setAutoLinkCaptures(!autoLinkCaptures)}
-            className={`shrink-0 relative inline-flex h-5 w-9 items-center rounded-full transition-colors duration-200 focus:outline-none ${
-              autoLinkCaptures ? 'bg-primary' : 'bg-border'
-            }`}
-            title="Toggle auto-add captures"
-          >
-            <span
-              className={`pointer-events-none block h-4 w-4 rounded-full bg-background shadow-sm transition-transform duration-200 ${
-                autoLinkCaptures ? 'translate-x-[18px]' : 'translate-x-0.5'
-              }`}
-            />
-          </button>
-        </div>
-      </Section>
-
-      {/* ── Keyboard Shortcuts ── */}
-      <Section id="shortcuts" title="Keyboard Shortcuts" subtitle="Quick access keyboard triggers.">
-        <div className="space-y-4">
-          <div className="flex items-center justify-between gap-3">
-            <div className="min-w-0 flex-1">
-              <span className="text-xs font-semibold text-foreground">Toggle Side Panel</span>
-              <p className="text-[10px] text-muted-foreground font-mono mt-0.5 leading-normal">
-                Press <kbd className="px-1.5 py-0.5 rounded bg-muted border border-border text-[9px] font-sans font-bold shadow-sm">Alt + M</kbd> (Mac: <kbd className="px-1.5 py-0.5 rounded bg-muted border border-border text-[9px] font-sans font-bold shadow-sm">Option + M</kbd>).
-              </p>
-            </div>
-            <Button
-              variant="outline"
-              size="sm"
-              className="h-8 text-xs shrink-0 rounded-lg border-primary/20 hover:border-primary/40 hover:bg-primary/5 text-primary font-medium"
-              onClick={() => {
-                if (typeof chrome !== 'undefined' && chrome.tabs) {
-                  chrome.tabs.create({ url: 'chrome://extensions/shortcuts' });
-                }
-              }}
-            >
-              Configure
-            </Button>
-          </div>
-
-          <div className="flex items-center justify-between gap-3 pt-3 border-t border-border/40">
-            <div className="min-w-0 flex-1">
-              <span className="text-xs font-semibold text-foreground">Capture Page Instantly</span>
-              <p className="text-[10px] text-muted-foreground font-mono mt-0.5 leading-normal">
-                Press <kbd className="px-1.5 py-0.5 rounded bg-muted border border-border text-[9px] font-sans font-bold shadow-sm">Alt + C</kbd> (Mac: <kbd className="px-1.5 py-0.5 rounded bg-muted border border-border text-[9px] font-sans font-bold shadow-sm">Option + C</kbd>) on any page to clip it to your workspace with a toast notification.
-              </p>
-            </div>
-          </div>
-        </div>
-      </Section>
-
-      {/* ── Answering behavior ── */}
+      {/* ── How answers are made ── */}
+      <div className="px-4 pt-4 pb-1">
+        <h2 className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">How answers are made</h2>
+        <p className="text-[10px] text-muted-foreground/80 mt-0.5 leading-snug">Where answers come from and how deeply they are researched.</p>
+      </div>
       <Section id="answering" title="Answering" subtitle="Configure response generation sources.">
         <div className="flex items-center justify-between gap-3">
           <div className="min-w-0">
@@ -1047,8 +952,6 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           </p>
         </div>
       </Section>
-
-      {/* ── Research ── */}
       <Section id="research" title="Research" subtitle="Configure deep research parameters.">
         <div className="space-y-1.5">
           <label className="text-xs font-medium">Research depth</label>
@@ -1144,8 +1047,33 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           />
         </div>
       </Section>
-
-      {/* ── Custom Commands ── */}
+      <Section id="research-apis" title="Research APIs" subtitle="API search keys for agent retrieval." defaultOpen={false}>
+        {([
+          ['tavily', 'Tavily', 'tvly-…'],
+          ['brave', 'Brave Search', 'BSA…'],
+          ['serper', 'Serper (Google)', '40-char key'],
+          ['jina', 'Jina (s.jina.ai)', 'jina_…'],
+          ['trustpilot', 'Trustpilot Reviews', 'free key from developers.trustpilot.com'],
+          ['youtube', 'YouTube Comments', 'free Google Cloud API key'],
+          ['redditId', 'Reddit Client ID', 'from reddit.com/prefs/apps (script)'],
+          ['redditSecret', 'Reddit Secret', 'from same Reddit app'],
+        ] as const).map(([id, label, ph]) => (
+          <div key={id} className="space-y-1.5">
+            <label className="text-xs font-medium">{label}</label>
+            <Input
+              type="password"
+              value={searchKeys[id] || ''}
+              onChange={e => setSearchKey(id, e.target.value)}
+              onBlur={persistSearchKeys}
+              placeholder={ph}
+              className="rounded-lg text-xs"
+            />
+          </div>
+        ))}
+        <p className="text-[10px] text-muted-foreground font-mono leading-normal">
+          Preferred over keyless DuckDuckGo scraping. Keys stay local.
+        </p>
+      </Section>
       <Section id="skills" title="Custom Commands" subtitle="Register custom slash prompts." defaultOpen={false}>
         {customSkills.length > 0 && (
           <div className="space-y-2">
@@ -1190,161 +1118,55 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           Commands execute prompt directives over workspace library context.
         </p>
       </Section>
-
-      {/* ── Research APIs ── */}
-      <Section id="research-apis" title="Research APIs" subtitle="API search keys for agent retrieval." defaultOpen={false}>
-        {([
-          ['tavily', 'Tavily', 'tvly-…'],
-          ['brave', 'Brave Search', 'BSA…'],
-          ['serper', 'Serper (Google)', '40-char key'],
-          ['jina', 'Jina (s.jina.ai)', 'jina_…'],
-          ['trustpilot', 'Trustpilot Reviews', 'free key from developers.trustpilot.com'],
-          ['youtube', 'YouTube Comments', 'free Google Cloud API key'],
-          ['redditId', 'Reddit Client ID', 'from reddit.com/prefs/apps (script)'],
-          ['redditSecret', 'Reddit Secret', 'from same Reddit app'],
-        ] as const).map(([id, label, ph]) => (
-          <div key={id} className="space-y-1.5">
-            <label className="text-xs font-medium">{label}</label>
-            <Input
-              type="password"
-              value={searchKeys[id] || ''}
-              onChange={e => setSearchKey(id, e.target.value)}
-              onBlur={persistSearchKeys}
-              placeholder={ph}
-              className="rounded-lg text-xs"
+      {/* ── This workspace ── */}
+      <div className="px-4 pt-4 pb-1">
+        <h2 className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">This workspace</h2>
+        <p className="text-[10px] text-muted-foreground/80 mt-0.5 leading-snug">Applies only to the workspace you have open.</p>
+      </div>
+      <Section id="workspace-rules" title="Workspace Instructions" subtitle={`Persistent context for "${workspaceName.length > 48 ? workspaceName.slice(0, 45) + '…' : workspaceName}" — added to every prompt.`}>
+          <textarea
+            value={rulesDraft}
+            onChange={e => setRulesDraft(e.target.value)}
+            onBlur={() => { if (rulesDraft !== workspaceRules) saveWorkspaceRules(rulesDraft); }}
+            placeholder={"Tell Magpie your baseline rules (e.g. stack, formatting preferences, coding rules)."}
+            rows={4}
+            className="w-full rounded-lg border border-border bg-background px-3 py-2 text-xs leading-relaxed resize-y focus:outline-none focus:ring-2 focus:ring-ring"
+          />
+          <p className="text-[10px] text-muted-foreground leading-normal">
+            Applies only to this workspace. Saved automatically.
+          </p>
+      </Section>
+      <Section id="capture" title="Capture" subtitle="Configure page clipping settings.">
+        <div className="flex items-center justify-between gap-3">
+          <div className="min-w-0">
+            <span className="text-xs font-medium">Auto-add to active workspace</span>
+            <p className="text-[10px] text-muted-foreground font-mono mt-0.5 leading-normal">
+              Link new captures to the active workspace automatically.
+            </p>
+          </div>
+          <button
+            type="button"
+            role="switch"
+            aria-checked={autoLinkCaptures}
+            onClick={() => setAutoLinkCaptures(!autoLinkCaptures)}
+            className={`shrink-0 relative inline-flex h-5 w-9 items-center rounded-full transition-colors duration-200 focus:outline-none ${
+              autoLinkCaptures ? 'bg-primary' : 'bg-border'
+            }`}
+            title="Toggle auto-add captures"
+          >
+            <span
+              className={`pointer-events-none block h-4 w-4 rounded-full bg-background shadow-sm transition-transform duration-200 ${
+                autoLinkCaptures ? 'translate-x-[18px]' : 'translate-x-0.5'
+              }`}
             />
-          </div>
-        ))}
-        <p className="text-[10px] text-muted-foreground font-mono leading-normal">
-          Preferred over keyless DuckDuckGo scraping. Keys stay local.
-        </p>
-      </Section>
-
-      {/* ── MCP Servers ── */}
-      <Section id="mcp" title="MCP Servers" subtitle="Model Context Protocol HTTP servers." defaultOpen={false}>
-        {mcpServers.map(server => (
-          <div key={server.id} className="rounded-md border border-border bg-background p-2 space-y-1.5">
-            <div className="flex items-center gap-2">
-              <div className="flex-1 min-w-0">
-                <div className="text-xs font-bold font-mono truncate">{server.name}</div>
-                <div className="text-[10px] text-muted-foreground font-mono truncate">{server.url}</div>
-              </div>
-              <button
-                type="button"
-                role="switch"
-                aria-checked={server.enabled}
-                title={server.enabled ? 'Enabled' : 'Disabled'}
-                onClick={() => persistMcp(mcpServers.map(x => x.id === server.id ? { ...x, enabled: !x.enabled } : x))}
-                className={`shrink-0 w-10 h-5 border rounded-full transition-colors relative ${server.enabled ? 'bg-primary border-primary' : 'bg-muted border-border'}`}
-              >
-                <span className={`absolute top-0.5 w-3 h-3 rounded-full bg-background transition-all ${server.enabled ? 'right-0.5' : 'left-0.5'}`} />
-              </button>
-              <button
-                type="button"
-                className="shrink-0 text-[10px] font-medium text-muted-foreground hover:text-primary"
-                onClick={() => testMcpServer(server)}
-              >
-                Test
-              </button>
-              <button
-                type="button"
-                className="shrink-0 text-[10px] font-medium text-muted-foreground hover:text-destructive"
-                onClick={() => persistMcp(mcpServers.filter(x => x.id !== server.id))}
-              >
-                Remove
-              </button>
-            </div>
-
-            {/* Health status for servers with a health endpoint */}
-            {server.healthUrl && server.enabled && (
-              <div className="text-[10px] font-mono flex items-center gap-1.5 mt-1.5 mb-1">
-                {mcpHealth[server.id] === undefined ? (
-                  <>
-                    <span className="w-1.5 h-1.5 rounded-full bg-muted-foreground animate-pulse" />
-                    <span className="text-muted-foreground">Checking…</span>
-                  </>
-                ) : mcpHealth[server.id] ? (
-                  <>
-                    <span className="relative flex h-1.5 w-1.5">
-                      <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
-                      <span className="relative inline-flex rounded-full h-1.5 w-1.5 bg-emerald-500"></span>
-                    </span>
-                    <span className="text-emerald-500 font-semibold">Running</span>
-                  </>
-                ) : (
-                  <>
-                    <span className="w-1.5 h-1.5 rounded-full bg-amber-500 animate-pulse" />
-                    <span className="text-amber-500 font-semibold">Not detected:</span>
-                  </>
-                )}
-              </div>
-            )}
-
-            {/* Setup hint with copy-paste commands */}
-            {server.setupHint && (!server.healthUrl || mcpHealth[server.id] === false) && (
-              <div className="rounded bg-muted/50 border border-border p-1.5 space-y-1">
-                {server.setupHint.split('\n').map((line, i) => (
-                  <div key={i} className="flex items-center gap-1 group">
-                    <code className="flex-1 text-[10px] font-mono text-foreground select-all">{line}</code>
-                    <button
-                      type="button"
-                      className={`shrink-0 text-[9px] transition-opacity duration-150 ${copiedCommand === line ? 'opacity-100 text-green-500 font-bold' : 'opacity-0 group-hover:opacity-100 text-muted-foreground hover:text-primary'}`}
-                      title={copiedCommand === line ? 'Copied!' : 'Copy'}
-                      onClick={() => {
-                        navigator.clipboard.writeText(line)
-                          .then(() => {
-                            setCopiedCommand(line);
-                            setTimeout(() => setCopiedCommand(null), 2000);
-                          })
-                          .catch(() => {});
-                      }}
-                    >
-                      {copiedCommand === line ? '✓' : '📋'}
-                    </button>
-                  </div>
-                ))}
-              </div>
-            )}
-
-            {/* Editable auth token */}
-            <div className="space-y-1 pt-1.5">
-              <input
-                type="password"
-                placeholder="Bearer token (optional)"
-                value={mcpTokenEdits[server.id] !== undefined ? mcpTokenEdits[server.id] : (server.authToken || '')}
-                onChange={e => setMcpTokenEdits(prev => ({ ...prev, [server.id]: e.target.value }))}
-                onBlur={() => {
-                  const val = mcpTokenEdits[server.id];
-                  if (val === undefined) return;
-                  persistMcp(mcpServers.map(x => x.id === server.id ? { ...x, authToken: val.trim() || undefined } : x));
-                  setMcpTokenEdits(prev => { const n = { ...prev }; delete n[server.id]; return n; });
-                }}
-                className="w-full rounded border border-border bg-background px-2 py-1 text-[10px] font-mono placeholder:text-muted-foreground focus:outline-none focus:border-primary"
-              />
-            </div>
-
-            {mcpStatus[server.id] && <div className="text-[10px] font-mono text-muted-foreground break-all">{mcpStatus[server.id]}</div>}
-          </div>
-        ))}
-        <div className="flex gap-2">
-          <Input value={mcpName} onChange={e => setMcpName(e.target.value)} placeholder="Name" className="rounded-lg w-1/3 text-xs" />
-          <Input value={mcpUrl} onChange={e => setMcpUrl(e.target.value)} placeholder="http://localhost:3920/mcp" className="rounded-lg flex-1 text-xs" />
+          </button>
         </div>
-        <Input
-          type="password"
-          value={mcpToken}
-          onChange={e => setMcpToken(e.target.value)}
-          placeholder="API key / bearer token (optional)"
-          className="rounded-lg text-xs"
-        />
-        {mcpStatus._new && <p className="text-[10px] text-destructive font-mono">{mcpStatus._new}</p>}
-        <Button variant="secondary" size="sm" onClick={addMcpServer} className="rounded-lg font-medium text-xs">Add server</Button>
-        <p className="text-[10px] text-muted-foreground font-mono leading-normal">
-          Supports HTTP endpoints only. Keys stay local.
-        </p>
       </Section>
-
-      {/* ── Storage ── */}
+      {/* ── Your library ── */}
+      <div className="px-4 pt-4 pb-1">
+        <h2 className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">Your library</h2>
+        <p className="text-[10px] text-muted-foreground/80 mt-0.5 leading-snug">Where documents live and how they sync.</p>
+      </div>
       <Section id="storage" title="Storage" subtitle="Local library & cross-device sync.">
           <div className="flex items-center justify-between gap-3">
             <div className="min-w-0">
@@ -1480,7 +1302,183 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
             </div>
           )}
       </Section>
+      <Section id="mcp" title="MCP Servers" subtitle="Model Context Protocol HTTP servers." defaultOpen={false}>
+        {mcpServers.map(server => (
+          <div key={server.id} className="rounded-md border border-border bg-background p-2 space-y-1.5">
+            <div className="flex items-center gap-2">
+              <div className="flex-1 min-w-0">
+                <div className="text-xs font-bold font-mono truncate">{server.name}</div>
+                <div className="text-[10px] text-muted-foreground font-mono truncate">{server.url}</div>
+              </div>
+              <button
+                type="button"
+                role="switch"
+                aria-checked={server.enabled}
+                title={server.enabled ? 'Enabled' : 'Disabled'}
+                onClick={() => persistMcp(mcpServers.map(x => x.id === server.id ? { ...x, enabled: !x.enabled } : x))}
+                className={`shrink-0 w-10 h-5 border rounded-full transition-colors relative ${server.enabled ? 'bg-primary border-primary' : 'bg-muted border-border'}`}
+              >
+                <span className={`absolute top-0.5 w-3 h-3 rounded-full bg-background transition-all ${server.enabled ? 'right-0.5' : 'left-0.5'}`} />
+              </button>
+              <button
+                type="button"
+                className="shrink-0 text-[10px] font-medium text-muted-foreground hover:text-primary"
+                onClick={() => testMcpServer(server)}
+              >
+                Test
+              </button>
+              <button
+                type="button"
+                className="shrink-0 text-[10px] font-medium text-muted-foreground hover:text-destructive"
+                onClick={() => persistMcp(mcpServers.filter(x => x.id !== server.id))}
+              >
+                Remove
+              </button>
+            </div>
 
+            {/* Health status for servers with a health endpoint */}
+            {server.healthUrl && server.enabled && (
+              <div className="text-[10px] font-mono flex items-center gap-1.5 mt-1.5 mb-1">
+                {mcpHealth[server.id] === undefined ? (
+                  <>
+                    <span className="w-1.5 h-1.5 rounded-full bg-muted-foreground animate-pulse" />
+                    <span className="text-muted-foreground">Checking…</span>
+                  </>
+                ) : mcpHealth[server.id] ? (
+                  <>
+                    <span className="relative flex h-1.5 w-1.5">
+                      <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                      <span className="relative inline-flex rounded-full h-1.5 w-1.5 bg-emerald-500"></span>
+                    </span>
+                    <span className="text-emerald-500 font-semibold">Running</span>
+                  </>
+                ) : (
+                  <>
+                    <span className="w-1.5 h-1.5 rounded-full bg-amber-500 animate-pulse" />
+                    <span className="text-amber-500 font-semibold">Not detected:</span>
+                  </>
+                )}
+              </div>
+            )}
+
+            {/* Setup hint with copy-paste commands */}
+            {server.setupHint && (!server.healthUrl || mcpHealth[server.id] === false) && (
+              <div className="rounded bg-muted/50 border border-border p-1.5 space-y-1">
+                {server.setupHint.split('\n').map((line, i) => (
+                  <div key={i} className="flex items-center gap-1 group">
+                    <code className="flex-1 text-[10px] font-mono text-foreground select-all">{line}</code>
+                    <button
+                      type="button"
+                      className={`shrink-0 text-[9px] transition-opacity duration-150 ${copiedCommand === line ? 'opacity-100 text-green-500 font-bold' : 'opacity-0 group-hover:opacity-100 text-muted-foreground hover:text-primary'}`}
+                      title={copiedCommand === line ? 'Copied!' : 'Copy'}
+                      onClick={() => {
+                        navigator.clipboard.writeText(line)
+                          .then(() => {
+                            setCopiedCommand(line);
+                            setTimeout(() => setCopiedCommand(null), 2000);
+                          })
+                          .catch(() => {});
+                      }}
+                    >
+                      {copiedCommand === line ? '✓' : '📋'}
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {/* Editable auth token */}
+            <div className="space-y-1 pt-1.5">
+              <input
+                type="password"
+                placeholder="Bearer token (optional)"
+                value={mcpTokenEdits[server.id] !== undefined ? mcpTokenEdits[server.id] : (server.authToken || '')}
+                onChange={e => setMcpTokenEdits(prev => ({ ...prev, [server.id]: e.target.value }))}
+                onBlur={() => {
+                  const val = mcpTokenEdits[server.id];
+                  if (val === undefined) return;
+                  persistMcp(mcpServers.map(x => x.id === server.id ? { ...x, authToken: val.trim() || undefined } : x));
+                  setMcpTokenEdits(prev => { const n = { ...prev }; delete n[server.id]; return n; });
+                }}
+                className="w-full rounded border border-border bg-background px-2 py-1 text-[10px] font-mono placeholder:text-muted-foreground focus:outline-none focus:border-primary"
+              />
+            </div>
+
+            {mcpStatus[server.id] && <div className="text-[10px] font-mono text-muted-foreground break-all">{mcpStatus[server.id]}</div>}
+          </div>
+        ))}
+        <div className="flex gap-2">
+          <Input value={mcpName} onChange={e => setMcpName(e.target.value)} placeholder="Name" className="rounded-lg w-1/3 text-xs" />
+          <Input value={mcpUrl} onChange={e => setMcpUrl(e.target.value)} placeholder="http://localhost:3920/mcp" className="rounded-lg flex-1 text-xs" />
+        </div>
+        <Input
+          type="password"
+          value={mcpToken}
+          onChange={e => setMcpToken(e.target.value)}
+          placeholder="API key / bearer token (optional)"
+          className="rounded-lg text-xs"
+        />
+        {mcpStatus._new && <p className="text-[10px] text-destructive font-mono">{mcpStatus._new}</p>}
+        <Button variant="secondary" size="sm" onClick={addMcpServer} className="rounded-lg font-medium text-xs">Add server</Button>
+        <p className="text-[10px] text-muted-foreground font-mono leading-normal">
+          Supports HTTP endpoints only. Keys stay local.
+        </p>
+      </Section>
+      {/* ── The app itself ── */}
+      <div className="px-4 pt-4 pb-1">
+        <h2 className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">The app itself</h2>
+      </div>
+      <Section id="appearance" title="Appearance" subtitle="Pick a palette. Village is a warm light theme.">
+        <AppearanceSection />
+      </Section>
+      <Section id="shortcuts" title="Keyboard Shortcuts" subtitle="Quick access keyboard triggers.">
+        <div className="space-y-4">
+          <div className="flex items-center justify-between gap-3">
+            <div className="min-w-0 flex-1">
+              <span className="text-xs font-semibold text-foreground">Toggle Side Panel</span>
+              <p className="text-[10px] text-muted-foreground font-mono mt-0.5 leading-normal">
+                Press <kbd className="px-1.5 py-0.5 rounded bg-muted border border-border text-[9px] font-sans font-bold shadow-sm">Alt + M</kbd> (Mac: <kbd className="px-1.5 py-0.5 rounded bg-muted border border-border text-[9px] font-sans font-bold shadow-sm">Option + M</kbd>).
+              </p>
+            </div>
+            <Button
+              variant="outline"
+              size="sm"
+              className="h-8 text-xs shrink-0 rounded-lg border-primary/20 hover:border-primary/40 hover:bg-primary/5 text-primary font-medium"
+              onClick={() => {
+                if (typeof chrome !== 'undefined' && chrome.tabs) {
+                  chrome.tabs.create({ url: 'chrome://extensions/shortcuts' });
+                }
+              }}
+            >
+              Configure
+            </Button>
+          </div>
+
+          <div className="flex items-center justify-between gap-3 pt-3 border-t border-border/40">
+            <div className="min-w-0 flex-1">
+              <span className="text-xs font-semibold text-foreground">Capture Page Instantly</span>
+              <p className="text-[10px] text-muted-foreground font-mono mt-0.5 leading-normal">
+                Press <kbd className="px-1.5 py-0.5 rounded bg-muted border border-border text-[9px] font-sans font-bold shadow-sm">Alt + C</kbd> (Mac: <kbd className="px-1.5 py-0.5 rounded bg-muted border border-border text-[9px] font-sans font-bold shadow-sm">Option + C</kbd>) on any page to clip it to your workspace with a toast notification.
+              </p>
+            </div>
+          </div>
+        </div>
+      </Section>
+      <Section id="about" title="About" subtitle="Which build is actually running." defaultOpen={false}>
+        <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-[11px] font-mono">
+          <dt className="text-muted-foreground">Version</dt>
+          <dd>{chrome.runtime?.getManifest?.().version || '—'}</dd>
+          <dt className="text-muted-foreground">Panel build</dt>
+          <dd>{__BUILD_STAMP__}</dd>
+          <dt className="text-muted-foreground">Worker build</dt>
+          <dd>{workerBuild || 'asking…'}</dd>
+        </dl>
+        <p className="text-[10px] text-muted-foreground leading-normal">
+          The panel and the service worker are loaded separately. Reopening the panel
+          picks up panel changes; worker changes need a reload on chrome://extensions.
+          If these two stamps disagree, that is what happened.
+        </p>
+      </Section>
     </div>
   );
 };
