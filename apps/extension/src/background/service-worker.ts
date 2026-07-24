@@ -12,6 +12,7 @@ import {
   saveDocImages, getDocImage, listDocImages
 } from '../lib/db';
 import { chunkDocument, makeDocShortId } from '../lib/chunker';
+import { selectHistory } from '../lib/chat-memory';
 import type { EmbeddedImage } from '../lib/pdf-parser';
 import { buildCitationContext, CITATION_SYSTEM_PROMPT, parseResponseCitations } from '../lib/citations';
 import { buildFrontmatter, hasFrontmatter } from '../lib/frontmatter';
@@ -1622,17 +1623,19 @@ async function buildChatRequest(chatId: string, projectId: string, prompt: strin
       `${tz ? ` Timezone: ${tz}.` : ''}\n--- END USER CONTEXT ---\n\n`
     : '';
 
-  // Build formatted history from the already-fetched history (batched above).
-  const formattedHistory = history
+  // The FULL stripped history. Kept whole because the retrieval path below can
+  // recall an older exchange from it once the query has been resolved; the
+  // early-return branches (chitchat, meta, web) only ever need the tail.
+  const fullHistory = history
     .filter((msg: any) => msg.role === 'user' || msg.role === 'assistant')
     // Strip the deterministic "*Sources:*" footer from saved assistant turns.
     // Fed back verbatim, the model learns the pattern and appends its own copy
     // — which then doubles with the footer the stream layer adds (observed:
     // two identical "Sources:" lines on one answer).
-    .map((msg: any) => ({ role: msg.role, content: stripSourcesFooter(msg.text) }))
-    // Sliding window: keep only the most recent turns so long chats don't
-    // balloon prompt size → slow TTFT.
-    .slice(-MAX_HISTORY_TURNS);
+    .map((msg: any) => ({ role: msg.role, content: stripSourcesFooter(msg.text) }));
+  // Sliding window: keep only the most recent turns so long chats don't
+  // balloon prompt size → slow TTFT.
+  let formattedHistory = fullHistory.slice(-MAX_HISTORY_TURNS);
 
   // Greetings / small talk must NOT run retrieval: it returns weak top-k
   // chunks that trip the strict "I cannot answer from the sources" refusal
@@ -1735,6 +1738,26 @@ async function buildChatRequest(chatId: string, projectId: string, prompt: strin
   // page-section selection, and link scoring all see real signal.
   if (needsIntentResolution(prompt, formattedHistory.length)) onStatus?.('Understanding the question…');
   const effectiveQuery = await resolveQuestionIntent(prompt, formattedHistory, pageContext?.title, signal);
+
+  // MEMORY: a hard tail-slice made turn 1 vanish at turn 17 with no indication,
+  // so a question reaching back got a confident answer from a model that had
+  // never heard the earlier turn. Now the tail stays verbatim and the older
+  // exchanges the RESOLVED query actually touches are recalled alongside it,
+  // plus a mechanically-built ledger of earlier topics. All hard-capped, so the
+  // prompt has a fixed ceiling however long the chat runs — and none of it costs
+  // an LLM call. Applied HERE, not above, because it needs `effectiveQuery`:
+  // "what about the second one?" shares no tokens with anything, its resolved
+  // form does.
+  //
+  // With nothing older above the relevance floor this returns the same tail as
+  // before, so short conversations are untouched.
+  let historyLedger = '';
+  if (fullHistory.length > formattedHistory.length) {
+    const mem = selectHistory(fullHistory, effectiveQuery);
+    formattedHistory = mem.turns;
+    historyLedger = mem.ledger ? `\n--- CONVERSATION SO FAR ---\n${mem.ledger}\n--- END ---\n\n` : '';
+    if (mem.recalled > 0) console.log(`[MEMORY] recalled ${mem.recalled} older exchange(s), ${mem.elided} messages elided`);
+  }
 
   // Intent router: an attached page only wins when the question is actually
   // about it. "is it cold today?" with a docs page open must NOT be forced
@@ -2094,7 +2117,7 @@ chatWebFallback
 
   onStatus?.('Writing the answer…');
   const branch: ChatBranch = grounded ? 'citation' : usePage ? 'page' : webSources.length ? 'web' : 'general';
-  return { systemPrompt: LANGUAGE_DIRECTIVE + rulesBlock + localeBlock + systemPrompt, formattedHistory, grounded, place, branch };
+  return { systemPrompt: LANGUAGE_DIRECTIVE + rulesBlock + localeBlock + historyLedger + systemPrompt, formattedHistory, grounded, place, branch };
 }
 
 // ─────────────────────────────────────────────
