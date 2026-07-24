@@ -39,6 +39,20 @@ describe('div grids — the shape Readability loses', () => {
     expect(md).toContain('| Mittarilukema | 12 500 km |');
   });
 
+  it('handles a value split across two cells (value + unit)', () => {
+    // Requiring EXACTLY two cells per row missed whole tables: real markup
+    // routinely splits "12 500" and "km" into separate elements.
+    const doc = docFrom(`
+      <div class="specs">
+        <div class="row"><span>Mittarilukema</span><span>12 500</span><span>km</span></div>
+        <div class="row"><span>Moottori</span><span>645</span><span>cm³</span></div>
+        <div class="row"><span>Teho</span><span>49</span><span>kW</span></div>
+      </div>`);
+    const md = salvageSpecs(doc);
+    expect(md).toContain('| Mittarilukema | 12 500 km |');
+    expect(md).toContain('| Teho | 49 kW |');
+  });
+
   it('needs at least three pairs — two stray sibling divs are not a spec table', () => {
     const doc = docFrom(`
       <div><div class="row"><span>Label</span><span>Value</span></div>

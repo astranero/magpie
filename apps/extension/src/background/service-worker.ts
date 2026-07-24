@@ -1516,6 +1516,19 @@ const LANGUAGE_RULE =
 // substantive branch now.
 // Answers render in a ~400px side panel; a 500-word tutorial for a
 // definition question is scroll punishment. Calibrate length to the ask.
+// LANGUAGE_RULE lives at the END of RESPONSE_STYLE, as the ninth bullet of a
+// long style block. Small, fast models (observed: gemini-2.5-flash-lite) drop
+// trailing instructions — a Finnish question about a Finnish page came back in
+// English. The codebase already hit this failure class once, with the
+// disclosure line that "was routinely skipped by small models".
+//
+// So the language instruction ALSO leads the prompt, in one short line before
+// anything else. Sandwiching a rule around the payload is the same trick
+// DATA_TRAILER uses, and for the same reason: first and last are the positions
+// a model actually honours.
+const LANGUAGE_DIRECTIVE =
+  `LANGUAGE: reply in the SAME language as the user's latest message. This overrides the language of the page, the sources, and these instructions. Never apologise for or comment on the language.\n\n`;
+
 const RESPONSE_STYLE =
   `\nRESPONSE STYLE — write for a busy reader in a narrow side panel. Prioritise SCANNABILITY:\n` +
   `• Lead with the answer. NO preamble, no "Certainly!/Great question!", no sycophancy, no closing summary or "if you want, I can…" offers.\n` +
@@ -1600,7 +1613,7 @@ async function buildChatRequest(chatId: string, projectId: string, prompt: strin
         : `You are Magpie, a research assistant. The user sent small talk — keep your reply to ONE short, friendly sentence. ` +
           `Do not invite them to do anything, do not mention sources, and do not ask follow-up questions. Never add a "Sources:" line.`) +
       LANGUAGE_RULE;
-    return { systemPrompt, formattedHistory, grounded: false, branch: 'chitchat' };
+    return { systemPrompt: LANGUAGE_DIRECTIVE + systemPrompt, formattedHistory, grounded: false, branch: 'chitchat' };
   }
 
   // Questions about the ASSISTANT itself ("do you support kurdish?", "what can
@@ -1616,7 +1629,7 @@ async function buildChatRequest(chatId: string, projectId: string, prompt: strin
       `(including Kurdish — Sorani and Kurmanji), you answer questions from their captured sources and the page they attach with 📄, ` +
       `you can search the web, and you run deep research via /research <topic>.` +
       LANGUAGE_RULE;
-    return { systemPrompt, formattedHistory, grounded: false, branch: 'meta' };
+    return { systemPrompt: LANGUAGE_DIRECTIVE + systemPrompt, formattedHistory, grounded: false, branch: 'meta' };
   }
 
   // Weather, time, math, trivia, facts — questions that need live data or
@@ -1639,7 +1652,7 @@ async function buildChatRequest(chatId: string, projectId: string, prompt: strin
             `You are a helpful assistant. The excerpts below were pulled from a live web search just now — treat them as your facts. ` +
             `Do not fabricate citations.` + RESPONSE_STYLE +
             `\n--- WEB RESULTS ---\n${web.context}\n--- END WEB RESULTS ---`;
-          return { systemPrompt, formattedHistory, grounded: false, place, branch: 'web' };
+          return { systemPrompt: LANGUAGE_DIRECTIVE + systemPrompt, formattedHistory, grounded: false, place, branch: 'web' };
         }
       } catch (e) {
         if (signal.aborted) throw e;
@@ -1663,7 +1676,7 @@ async function buildChatRequest(chatId: string, projectId: string, prompt: strin
       `still provide the best answer using your general knowledge — do not refuse. ` +
           `you may supplement from your own knowledge.` + RESPONSE_STYLE +
           `\n--- WIKIPEDIA ---\n${wikiContext}\n--- END WIKIPEDIA ---`;
-        return { systemPrompt, formattedHistory, grounded: false, place, branch: 'web' };
+        return { systemPrompt: LANGUAGE_DIRECTIVE + systemPrompt, formattedHistory, grounded: false, place, branch: 'web' };
       }
     } catch (e) {
       if (signal.aborted) throw e;
@@ -1674,7 +1687,7 @@ async function buildChatRequest(chatId: string, projectId: string, prompt: strin
       `If asked about current weather, time, date, or news, provide the best answer you can from what you know. ` +
       `Never say you don't have access to current data or real-time information — just answer based on your training. ` +
       `Be concise — the user wants a quick fact, not an essay.` + RESPONSE_STYLE;
-    return { systemPrompt, formattedHistory, grounded: false, place, branch };
+    return { systemPrompt: LANGUAGE_DIRECTIVE + systemPrompt, formattedHistory, grounded: false, place, branch };
   }
 
   // Follow-up questions get rewritten into standalone ones so retrieval,
@@ -1800,9 +1813,14 @@ async function buildChatRequest(chatId: string, projectId: string, prompt: strin
     // refusal→web net doesn't fire on these either.
     onStatus?.('Reading the page…');
     systemPrompt =
-      `You are a helpful research assistant. Answer using the CURRENT PAGE the user is viewing (provided below); ` +
-      `use your general knowledge only to fill small, obvious gaps. Do NOT invent citations. ` +
-      `If the page doesn't cover the question, say so in one line rather than guessing or padding with unrelated facts. ` +
+      `You are a helpful research assistant. Answer using the CURRENT PAGE the user is viewing (provided below). ` +
+      `The page is your source of FACTS about this specific item. Do NOT invent citations. ` +
+      // A listing page contains specs and a price; it cannot contain "is this
+      // any good?". Told only to answer from the page, the model correctly but
+      // uselessly reported that the page lacks a quality assessment — instead
+      // of reading the specs and saying what it knows about that model.
+      `When the user asks for an ASSESSMENT, comparison or recommendation — "is this any good?", "is it reliable?", "how does it compare?" — the page cannot contain the answer by its nature. Do NOT refuse. Read the page's facts (model, year, mileage, price, specs), then combine them with your own knowledge of that product, market or subject to give a real opinion. Make clear which parts come from the page and which from your general knowledge, and say plainly when something is outside what you know. ` +
+      `Only say "the page doesn't cover this" when the user asked for a FACT the page genuinely lacks. ` +
       `Do NOT end your reply with a "Sources:" line or list of URLs — sources are shown separately by the app.` +
       RESPONSE_STYLE;
   } else if (!pageContext && mentionsPageDeixis(effectiveQuery)) {
@@ -1815,7 +1833,7 @@ async function buildChatRequest(chatId: string, projectId: string, prompt: strin
       `Do NOT guess what the page might be, and do NOT answer from unrelated knowledge.` +
       RESPONSE_STYLE;
     onStatus?.('Writing the answer…');
-    return { systemPrompt: rulesBlock + localeBlock + systemPrompt, formattedHistory, grounded: false, place, branch: 'no-page' };
+    return { systemPrompt: LANGUAGE_DIRECTIVE + rulesBlock + localeBlock + systemPrompt, formattedHistory, grounded: false, place, branch: 'no-page' };
   } else {
     // No workspace match and no open page. Before conceding to stale "general
     // knowledge", escalate to a quick live web search (+ any enabled search
@@ -2035,7 +2053,7 @@ chatWebFallback
 
   onStatus?.('Writing the answer…');
   const branch: ChatBranch = grounded ? 'citation' : usePage ? 'page' : webSources.length ? 'web' : 'general';
-  return { systemPrompt: rulesBlock + localeBlock + systemPrompt, formattedHistory, grounded, place, branch };
+  return { systemPrompt: LANGUAGE_DIRECTIVE + rulesBlock + localeBlock + systemPrompt, formattedHistory, grounded, place, branch };
 }
 
 // ─────────────────────────────────────────────
