@@ -2,6 +2,7 @@ import { Readability } from '@mozilla/readability';
 import TurndownService from 'turndown';
 import { extractMailboxList } from './mailbox';
 import { salvageSpecs, readJsonLdBlocks } from '../lib/spec-salvage';
+import { assessCoverage } from '../lib/extraction-quality';
 
 // ─────────────────────────────────────────────
 // Enhanced Content Script — AI Research Assistant
@@ -626,6 +627,19 @@ async function scrapePage(): Promise<{
 
   // Clean up excessive newlines
   markdown = markdown.replace(/\n{4,}/g, '\n\n\n').trim();
+
+  // Did we actually get the page, or a sliver of it? Readability is a scoring
+  // algorithm and some layout will always score wrong; the guarantee worth
+  // having is that a bad extraction is DETECTED rather than shipped looking
+  // fine. When we kept almost nothing of a substantial page, prefer the full
+  // body text: noisier, but present. A ratio is a fact about the numbers, so
+  // this keeps working on sites nobody has tested.
+  const pageText = (document.body?.innerText || '').trim();
+  const coverage = assessCoverage(markdown, pageText);
+  if (!coverage.ok && !coverage.blocked && pageText.length > markdown.length) {
+    const fullMd = turndownService.turndown(document.body.innerHTML).replace(/\n{4,}/g, '\n\n\n').trim();
+    if (fullMd.length > markdown.length) markdown = fullMd;
+  }
 
   // Readability scores by PROSE density, so a specification grid — dozens of
   // two-word cells, no sentences — scores near zero and is dropped. Nothing

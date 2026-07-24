@@ -1050,14 +1050,48 @@ async function capturePdfUrl(projectId: string | null, tab: chrome.tabs.Tab): Pr
   try {
     body = await pdfUrlToBody(url, imageToText, false, pdfImages);
   } catch (e) {
-    console.warn('Local PDF parse failed, falling back to Jina Reader', e);
+    console.warn('Local PDF parse failed, trying the tab, then Jina Reader', e);
   }
 
-  const textOnly = body.replace(/## Page \d+/g, '').replace(/\*\(no extractable text\)\*/g, '').trim();
+  let textOnly = body.replace(/## Page \d+/g, '').replace(/\*\(no extractable text\)\*/g, '').trim();
+
+  // The background fetch has no session: it is a bare request from the
+  // extension, so a host that gates downloads (ResearchGate, most publishers)
+  // answers with a verification page instead of the PDF.
+  //
+  // The TAB does have a session — the user opened the paper and the site
+  // already let them through. Ask the content script to fetch the same URL from
+  // inside that page, so it carries their cookies. This is the user's own
+  // access being used on their behalf, not a way around the check; if they
+  // cannot open the PDF themselves, this cannot either.
+  if (textOnly.length < 50 && tab.id) {
+    try {
+      const ex: any = await new Promise((resolve) => {
+        chrome.tabs.sendMessage(tab.id!, { action: 'EXTRACT_PDF', url }, (r) => {
+          resolve(chrome.runtime.lastError ? { ok: false, error: chrome.runtime.lastError.message } : r);
+        });
+      });
+      if (ex?.ok && ex.base64) {
+        pdfImages.length = 0;
+        body = await pdfBase64ToBody(ex.base64 as string, imageToText, false, pdfImages);
+        textOnly = body.replace(/## Page \d+/g, '').replace(/\*\(no extractable text\)\*/g, '').trim();
+      }
+    } catch (e) {
+      console.warn('[capture] in-tab PDF fetch failed', e);
+    }
+  }
+
   if (textOnly.length < 50) {
     const md = await fetchViaJina(url);
     if (!md || md.trim().length < 50) {
-      throw new Error('Could not extract text from this PDF (it may be scanned — try Import PDF instead).');
+      // Name the two real causes so the message is actionable. A verification
+      // wall and a scanned page look identical from here — both yield no text —
+      // but the user's next step differs completely.
+      throw new Error(
+        'Could not read this PDF. Either the site asked for verification before serving it — ' +
+        'open the PDF in a tab, let the check pass, then capture — or it is a scanned image, ' +
+        'in which case use Import PDF.'
+      );
     }
     body = md;
     pdfImages.length = 0; // Jina markdown has no extracted figures

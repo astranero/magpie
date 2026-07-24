@@ -1051,10 +1051,20 @@ export function linkifyReportCitations(
 // handled via CLOUDFLARE_GATED → DOI → open-access PDF, which recovers full text.)
 const DEAD_READER_HOSTS = /\/\/([^/]*\.)?linkedin\.com\/|\/\/static\.licdn\.com\/|\/\/([^/]*\.)?aimodels\.fyi\/|\/\/([^/]*\.)?researchgate\.net\/(figure|profile)\//i;
 
+/** A URL that resolves to a PDF, whatever path it is served under. */
+export function looksLikePdfUrl(url: string): boolean {
+  return /\.pdf($|[?#])/i.test(url) || /\/pdf\/|\/pdfdirect\//i.test(url);
+}
+
 export function isJunkUrl(url: string): boolean {
   if (!/^https?:\/\//i.test(url)) return true;
   if (/\.(dtd|xsd|css|js|ico|woff2?|ttf|svg|png|jpe?g|gif|webp)(\?|$)/i.test(url)) return true;
   if (/\/\/(www\.)?(w3\.org|schema\.org|purl\.org|xmlns\.com|ogp\.me)\//i.test(url)) return true;
+  // A PDF is parseable content no matter what path serves it, so it outranks
+  // the dead-host list. ResearchGate publishes full-text PDFs under
+  // /profile/<name>/publication/<id>/links/<hash>.pdf — the /profile/ rule was
+  // written for HTML profile pages and silently discarded the papers too.
+  if (looksLikePdfUrl(url)) return false;
   if (DEAD_READER_HOSTS.test(url)) return true;
   return false;
 }
