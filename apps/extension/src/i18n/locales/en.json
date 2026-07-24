@@ -1,0 +1,59 @@
+{
+  "app": {
+    "name": "Magpie",
+    "tagline": "AI Research Assistant"
+  },
+  "nav": {
+    "chat": "Chat",
+    "lore": "Lore",
+    "config": "Config"
+  },
+  "chat": {
+    "placeholder": "Ask a question, or / for commands…",
+    "placeholderPlan": "Refine the plan, or type \"start\"…",
+    "send": "Send message",
+    "stop": "Stop generation",
+    "you": "You",
+    "system": "System",
+    "assistant": "Magpie Assistant",
+    "noSources": "No matching sources in this workspace — answering from general knowledge.",
+    "searchingSources": "Searching your sources…",
+    "readingPage": "Reading the page…",
+    "searchingWeb": "Searching the web…",
+    "writingAnswer": "Writing the answer…"
+  },
+  "lore": {
+    "capture": "Capture",
+    "capturing": "Capturing…",
+    "search": "Search your lore…",
+    "noDocuments": "No documents yet",
+    "workspace": "Workspace",
+    "globalLore": "Global Lore"
+  },
+  "settings": {
+    "provider": "AI Provider Configuration",
+    "providerSub": "Configure your AI backend (or use Copilot above).",
+    "copilot": "GitHub Copilot",
+    "copilotSub": "Sign in with your enterprise GitHub account.",
+    "copilotConnected": "Connected to GitHub Copilot",
+    "copilotSignIn": "Sign in with GitHub",
+    "copilotSignOut": "Sign out",
+    "answering": "Answering",
+    "research": "Research",
+    "webFallback": "Search the web when nothing matches (chat)",
+    "webFallbackDesc": "Query search engines in chat if your workspace and open page can't answer. /research always searches.",
+    "theme": "Theme",
+    "themeSystem": "System",
+    "themeLight": "Light",
+    "themeDark": "Dark"
+  },
+  "commands": {
+    "usageHint": "Usage: {{usage}}"
+  },
+  "toast": {
+    "deletedPermanently": "Deleted \"{{title}}\" permanently",
+    "exportSuccess": "Exported {{count}} file(s) to {{path}}",
+    "syncSuccess": "Synced {{synced}}/{{total}} documents to Drive",
+    "syncFailed": "Sync failed — sign in to Google in Settings"
+  }
+}

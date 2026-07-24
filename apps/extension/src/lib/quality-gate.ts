@@ -1,0 +1,146 @@
+// ─────────────────────────────────────────────
+// Content Quality Gate — reject bad scrapes before they get indexed
+// ─────────────────────────────────────────────
+// Publishers (ACM, IEEE, Springer…) sit behind Cloudflare; scrapes come back
+// as "Just a moment…" challenge pages, paywalls, login walls, error pages.
+// Indexing those produces garbage documents that later surface as irrelevant
+// citations. Every scraped page passes through checkContentQuality() first.
+
+export interface GateResult {
+  pass: boolean;
+  /** Rejection reason slug, e.g. "anti-bot", "paywall", "thin-content". */
+  reason?: string;
+}
+
+const MIN_CHARS = 200;
+const MIN_WORDS = 50;
+
+/**
+ * Language-aware word count. `split(/\s+/)` sees a whole Japanese/Chinese
+ * article as ~1 "word" (no spaces) — such pages were rejected as thin-content
+ * and could never enter deep research. Intl.Segmenter counts words for every
+ * script (ja/zh via its dictionary, de/fi via spaces + compounds).
+ */
+export function countWords(text: string): number {
+  try {
+    const seg = new Intl.Segmenter(undefined, { granularity: 'word' });
+    let n = 0;
+    for (const s of seg.segment(text)) if ((s as any).isWordLike) n++;
+    return n;
+  } catch {
+    return text.split(/\s+/).filter(Boolean).length;
+  }
+}
+
+/** Anti-bot / challenge interstitials (Cloudflare, PerimeterX, DataDome…). */
+const BOT_PATTERNS: RegExp[] = [
+  /just a moment/i,
+  /security verification/i,
+  /check(?:ing)? your browser/i,
+  /performing security/i,
+  /DDoS protection/i,
+  /one more step/i,
+  /verify (?:that )?you are (?:a )?human/i,
+  /we need to check your browser/i,
+  /are you a robot/i,
+  /\b(?:re|h)?captcha\b/i,
+];
+
+const JS_REQUIRED_PATTERNS: RegExp[] = [
+  /please enable javascript/i,
+  /javascript is (?:required|disabled)/i,
+  /enable js to continue/i,
+];
+
+const PAYWALL_PATTERNS: RegExp[] = [
+  /subscribe to (?:read|continue|view)/i,
+  /purchase (?:access|this article)/i,
+  /subscription required/i,
+  /you(?:'|’)ve reached your (?:article|free) limit/i,
+  /this content is (?:for|available to) (?:subscribers|members)/i,
+];
+
+const LOGIN_PATTERNS: RegExp[] = [
+  /sign in to (?:view|continue|read)/i,
+  /log ?in to continue/i,
+  /access restricted/i,
+  /this (?:content|page) is private/i,
+];
+
+const ERROR_PAGE_PATTERNS: RegExp[] = [
+  /page not found/i,
+  /this page (?:doesn'?t|does not) exist/i,
+  /\b404 error\b/i,
+  /\bHTTP 404\b/i,
+  /too many requests/i,
+  /rate limit exceeded/i,
+  /your IP has been (?:temporarily )?blocked/i,
+  /under maintenance/i,
+  /temporarily unavailable/i,
+  /scheduled maintenance/i,
+  /account (?:has been )?suspended/i,
+];
+
+/**
+ * Interstitials are short — a real article that merely *mentions* "captcha"
+ * or "page not found" shouldn't be rejected. Pattern checks only apply to
+ * short content; long content passes on substance.
+ */
+const PATTERN_CHECK_MAX_WORDS = 300;
+
+function matchAny(text: string, patterns: RegExp[]): boolean {
+  return patterns.some(p => p.test(text));
+}
+
+export function checkContentQuality(markdown: string, title?: string): GateResult {
+  const text = (markdown || '').trim();
+  if (text.length < MIN_CHARS) return { pass: false, reason: 'empty-content' };
+
+  const wordCount = countWords(text);
+  if (wordCount < MIN_WORDS) return { pass: false, reason: 'thin-content' };
+
+  const words = text.split(/\s+/).filter(Boolean);
+
+  // Spaced-out garble: some PDF extractors render each glyph as its own token
+  // ("O k a y , l e t ' s . . ."). Real prose has very few single-char words
+  // (a, I); if most tokens are single characters the text is unusable — reject
+  // so this garbage never becomes a cited source.
+  const singles = words.reduce((n, w) => n + (w.length === 1 ? 1 : 0), 0);
+  if (words.length >= 40 && singles / words.length > 0.4) return { pass: false, reason: 'garbled-spacing' };
+
+  const probe = `${title || ''}\n${text.slice(0, 2000)}`;
+  if (wordCount <= PATTERN_CHECK_MAX_WORDS) {
+    if (matchAny(probe, BOT_PATTERNS)) return { pass: false, reason: 'anti-bot' };
+    if (matchAny(probe, JS_REQUIRED_PATTERNS)) return { pass: false, reason: 'js-required' };
+    if (matchAny(probe, PAYWALL_PATTERNS)) return { pass: false, reason: 'paywall' };
+    if (matchAny(probe, LOGIN_PATTERNS)) return { pass: false, reason: 'login-wall' };
+    if (matchAny(probe, ERROR_PAGE_PATTERNS)) return { pass: false, reason: 'error-page' };
+
+    // Cookie wall: consent text dominating a short page (en/de/fi terms)
+    const cookieHits = (probe.match(/\bcookies?\b|\bcookierichtlinie\b|eväste(?:itä|et)?/gi) || []).length;
+    if (cookieHits >= 3 && wordCount < 150) return { pass: false, reason: 'cookie-wall' };
+  }
+
+  return { pass: true };
+}
+
+/**
+ * OCR/garbage detector for PDF extraction output: real prose is mostly
+ * letters and digits; broken OCR is symbols, box chars, and soup.
+ */
+export function looksLikeOcrGarbage(text: string): boolean {
+  const t = (text || '').trim();
+  if (t.length < 100) return false; // too short to judge — let length gates decide
+  // Unicode-aware: the old Latin/Cyrillic-only class flagged REAL Japanese and
+  // Arabic PDF text as OCR garbage.
+  const alnum = (t.match(/[\p{L}\p{N}]/gu) || []).length;
+  return alnum / t.length < 0.3;
+}
+
+/** Extract a DOI from a URL or text, e.g. dl.acm.org/doi/10.1145/3583133.3596373 */
+export function extractDoi(input: string): string | null {
+  const m = (input || '').match(/\b(10\.\d{4,9}\/[^\s"'<>?#]+)/);
+  if (!m) return null;
+  // Trim trailing punctuation that URL paths pick up
+  return m[1].replace(/[.,;)\]]+$/, '');
+}

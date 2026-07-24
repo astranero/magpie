@@ -1,0 +1,7 @@
+./docs/PLAN-phase-3.md:# Implementation Plan: AI Research Assistant — Phase 3 (Retrieval Quality & Hardening)
+./apps/extension/src/background/service-worker.ts:// Background Service Worker — AI Research Assistant v2
+./apps/extension/src/content/content.ts:// Enhanced Content Script — AI Research Assistant
+./apps/extension/src/lib/chunker.ts:// Semantic Chunker — AI Research Assistant
+./apps/extension/src/lib/db.ts:// IndexedDB Storage Layer — AI Research Assistant
+./apps/extension/src/lib/citations.ts:// Citation Parser — AI Research Assistant
+./apps/extension/src/lib/citations.ts:  `You are a private AI Research Assistant. Answer ONLY using the provided source documents below.\n` +

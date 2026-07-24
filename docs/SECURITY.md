@@ -1,0 +1,118 @@
+# Security & Trust Model
+
+Factual description of the extension's trust boundaries as implemented.
+Open decisions (things this doc deliberately does not settle) are marked ⚖.
+
+## Privilege map
+
+| Context | Privileges | Attack surface |
+|---|---|---|
+| Service worker | All extension APIs, all host permissions | Messages from extension pages/content scripts only |
+| Offscreen document | Fetch (any origin), DOM parsing, WASM models | Input = HTML/PDF bytes handed to parsers |
+| Content script (`<all_urls>`) | Page DOM read | Responds ONLY to `chrome.runtime` messages (`SCRAPE_PAGE`); no `window.postMessage` listener, so the page cannot drive it |
+| `inject.ts` (YouTube) | Page-world read of the YT player object | Read-only expression, returns transcript metadata |
+| Side panel | Extension pages CSP | Renders LLM output as markdown (see below) |
+
+CSP (`extension_pages`): `script-src 'self' 'wasm-unsafe-eval'; object-src 'self'` —
+`wasm-unsafe-eval` exists solely for the ONNX runtime (transformers.js);
+no remote code, no inline script. Web-accessible resources are limited to
+`transformers/*.mjs|wasm` (model runtime assets).
+
+## Data at rest
+
+- **IndexedDB** (documents, chunks, embeddings, chat history): unencrypted,
+  device-local, profile-scoped — standard for extensions.
+- **`chrome.storage.local`**: provider API key (`customKey`), `s2ApiKey`,
+  `searchApiKeys` (Tavily/Brave/Serper), MCP `authToken`s, and the GitHub
+  Copilot SSO credentials (`magpie-copilot-auth`: the GitHub `accessToken` +
+  the short-lived Copilot `sessionToken`) — stored in plaintext. This is the
+  extension-platform norm (no OS keychain access from MV3), and any process
+  that can read the Chrome profile already owns the browser session.
+  ⚖ encrypting at rest buys little without a separate key but could be
+  revisited.
+- Local-folder sync mirrors documents as plaintext `.md` to a user-picked
+  directory — explicit user action grants the handle.
+
+## Network egress inventory
+
+"Local-first" means content, chunks, vectors, and models stay on-device.
+These endpoints ARE contacted:
+
+| Endpoint | When | What leaves the device |
+|---|---|---|
+| User's LLM endpoint (`customUrl`) | Chat, research planning/synthesis, vision OCR, skill creation | Retrieved chunk text, chat history, page content |
+| `r.jina.ai` (Jina Reader) | Research scraping (primary) and DDG-blocked fallback | URLs being scraped (third party sees your research trail) ⚖ |
+| `html.duckduckgo.com`, `news.google.com/rss` | Keyless research discovery | Search queries / topics |
+| `api.semanticscholar.org`, `api.crossref.org`, `huggingface.co` (papers + model weights), `arxiv.org` | Academic agent, model download | Queries, DOIs; nothing user-authored |
+| Tavily/Brave/Serper | Only when the user adds a key | Search queries |
+| User-registered MCP servers | Only when the user enables the server | The research topic (and bearer token, if configured) |
+| Google APIs | Only after interactive OAuth | Synced documents (Drive); the signed-in account's email + profile (`oauth2/v2/userinfo`, to display who's connected) |
+| `github.com` + `api.github.com` — **or the configured GitHub Enterprise host** (`{host}` + `{host}/api/v3`) | Only if the user signs in with GitHub Copilot | Device-code OAuth handshake + access-token→session-token exchange (no user content) |
+| `api.githubcopilot.com` (or the configured Copilot API URL) | Only when Copilot SSO is the active LLM provider | Same as any LLM endpoint below: retrieved chunk text, chat history, page content |
+
+No telemetry, no first-party backend.
+
+Development only (not shipped): the live e2e suite (`apps/extension/e2e/live-*.spec.ts`)
+contacts `openrouter.ai` with a key read from env or the gitignored
+`e2e/.openrouter-key` (`.openrouter-key` in `.gitignore`); suites skip without a key.
+
+## Untrusted-input boundaries
+
+1. **Scraped web content → LLM prompts.** Everything the research pipeline
+   fetches (web pages, PDFs, MCP tool output) is untrusted text that ends up
+   inside LLM context windows. A hostile page can attempt prompt injection
+   against synthesis. Current mitigations: content passes the quality gate
+   (a spam filter, NOT a security control), the citation contract limits
+   the blast radius of fabrication (the model may only cite `<c>` anchors
+   present in context; an anchor that doesn't resolve to a real chunk
+   renders as an inert citation chip with no navigation target, never a
+   live link), and every synthesis call appends a "sandwich defense" trailer
+   (`DATA_TRAILER` in `deep-researcher.ts`) after the source excerpts,
+   re-asserting that the preceding text is untrusted data and instructing
+   the model to ignore any instructions embedded in it.
+2. **LLM output → side panel.** Rendered via react-markdown (no
+   `dangerouslySetInnerHTML`); `urlTransform` restricts URLs to
+   markdown-safe schemes plus `data:image/`. Citation chips only resolve
+   against the local chunk store.
+3. **MCP servers.** Registering + enabling a server is the permission grant:
+   research will POST the topic to that URL and index what comes back as a
+   source. The URL is constrained: `isAllowedMcpUrl` (`lib/mcp-client.ts`)
+   permits `https://` to any host but `http://` only to loopback
+   (`localhost`/`127.0.0.1`/`[::1]`) — a non-conforming URL is rejected at
+   save and connect time.
+4. **Imported files.** Local `.md`/PDF/images are parsed on-device
+   (pdf.js with `isEvalSupported: false`; images inlined as data URLs).
+5. **Companion server (optional, `companion-mcp.js`).** If the user runs it,
+   it exposes an `execute_command` tool on `localhost:3920` that runs arbitrary
+   shell commands (the CLI-LLM route depends on this). It is gated by a shared
+   token (v1.2+): the extension generates one (Settings → AI Provider
+   Configuration → Companion token → *Generate + copy*) and sends it as
+   `Authorization: Bearer …`; the user starts the server with the same
+   `MAGPIE_COMPANION_TOKEN`, and mismatches get `401`. CORS is reflected
+   only for `chrome-extension://` origins, so a web
+   page can't read replies. **Running the companion without a token falls back
+   to the legacy open mode** (it prints a warning) — treat that as granting any
+   local caller shell access.
+
+## Permissions rationale
+
+- `<all_urls>` host permission + content script: capture must work on any
+  page the user is reading. Capture is user-initiated (toolbar/context menu).
+- `unlimitedStorage`: exempts the library from quota eviction.
+- `identity` is **optional** and only requested for Drive sync. The OAuth
+  grant (`manifest.json` `oauth2.scopes`) is `drive.file` (files Magpie
+  itself created — not the whole Drive) plus `userinfo.email` +
+  `userinfo.profile`, used solely to show which Google account is connected.
+
+## ⚖ Open decisions (tracked, not settled here)
+
+- Jina Reader privacy trade-off: opt-out toggle vs status quo.
+
+(Resolved: the MCP URL policy is now enforced as https-anywhere /
+loopback-http-only — see `isAllowedMcpUrl`. The companion `execute_command`
+bridge is now gated by a shared `MAGPIE_COMPANION_TOKEN` with extension-only
+CORS reflection; leaving the token unset keeps the legacy open mode.
+Prompt-injection hardening for research synthesis is now in place — every
+synthesis prompt ends with a "sandwich defense" trailer that delimits the
+scraped source content and explicitly instructs the model to ignore any
+instructions embedded in it — see `DATA_TRAILER` in `deep-researcher.ts`.)

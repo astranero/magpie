@@ -1,0 +1,59 @@
+{
+  "app": {
+    "name": "Magpie",
+    "tagline": "Tekoäly-tutkimusavustaja"
+  },
+  "nav": {
+    "chat": "Keskustelu",
+    "lore": "Tietokanta",
+    "config": "Asetukset"
+  },
+  "chat": {
+    "placeholder": "Kysy jotain, tai / komentoja varten…",
+    "placeholderPlan": "Muokkaa suunnitelmaa tai kirjoita \"start\"…",
+    "send": "Lähetä viesti",
+    "stop": "Pysäytä generointi",
+    "you": "Sinä",
+    "system": "Järjestelmä",
+    "assistant": "Magpie-avustaja",
+    "noSources": "Työtilasta ei löytynyt vastausta — vastataan yleistiedolla.",
+    "searchingSources": "Haetaan lähteistäsi…",
+    "readingPage": "Luetaan sivua…",
+    "searchingWeb": "Haetaan verkosta…",
+    "writingAnswer": "Kirjoitetaan vastausta…"
+  },
+  "lore": {
+    "capture": "Kaappaa",
+    "capturing": "Kaapataan…",
+    "search": "Hae aarteistasi…",
+    "noDocuments": "Ei dokumentteja vielä",
+    "workspace": "Työtila",
+    "globalLore": "Globaali tietokanta"
+  },
+  "settings": {
+    "provider": "Tekoälypalvelun asetukset",
+    "providerSub": "Määritä tekoälypalvelu (tai käytä Copilotia yllä).",
+    "copilot": "GitHub Copilot",
+    "copilotSub": "Kirjaudu enterprise GitHub-tililläsi.",
+    "copilotConnected": "Yhdistetty GitHub Copilotiin",
+    "copilotSignIn": "Kirjaudu GitHubilla",
+    "copilotSignOut": "Kirjaudu ulos",
+    "answering": "Vastaaminen",
+    "research": "Tutkimus",
+    "webFallback": "Hae verkosta kun työtilasta ei löydy (keskustelu)",
+    "webFallbackDesc": "Käyttää hakukoneita keskustelussa jos työtila ja avoin sivu eivät vastaa. /research hakee aina.",
+    "theme": "Teema",
+    "themeSystem": "Järjestelmä",
+    "themeLight": "Vaalea",
+    "themeDark": "Tumma"
+  },
+  "commands": {
+    "usageHint": "Käyttö: {{usage}}"
+  },
+  "toast": {
+    "deletedPermanently": "Poistettu \"{{title}}\" pysyvästi",
+    "exportSuccess": "Viety {{count}} tiedosto(a) kansioon {{path}}",
+    "syncSuccess": "Synkronoitu {{synced}}/{{total}} dokumenttia Driveen",
+    "syncFailed": "Synkronointi epäonnistui — kirjaudu Googleen Asetuksissa"
+  }
+}

@@ -1,0 +1,353 @@
+@import "tw-animate-css";
+@import "shadcn/tailwind.css";
+@import "@fontsource-variable/geist";
+@import "katex/dist/katex.min.css";
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  /* ── "Magpie plumage" theme ────────────────────────────────────────
+     Colors from the bird, not from aged library paper: cool feather-
+     white ground, blue-black plumage ink, iridescent teal-blue as the
+     primary (wing sheen), violet sheen as the signature rule, amber as
+     the shiny-treasure marker. Structure keeps the catalog DNA — mono
+     metadata, serif content, one dark ink surface for the field log.
+     Light is the default; .dark is the plumage at night.             */
+  :root {
+    --background: 210 33% 98%;       /* feather white, cool cast */
+    --foreground: 226 30% 13%;       /* blue-black plumage */
+
+    --card: 0 0% 100%;
+    --card-foreground: 226 30% 13%;
+
+    --popover: 0 0% 100%;
+    --popover-foreground: 226 30% 13%;
+
+    --primary: 200 85% 34%;          /* wing-sheen teal-blue */
+    --primary-foreground: 210 40% 98%;
+
+    --secondary: 215 25% 94%;
+    --secondary-foreground: 226 30% 16%;
+
+    --muted: 215 22% 94%;
+    --muted-foreground: 222 14% 44%;
+
+    --accent: 212 28% 93%;
+    --accent-foreground: 226 30% 13%;
+
+    --destructive: 0 72% 46%;
+    --destructive-foreground: 210 40% 98%;
+
+    --border: 216 18% 88%;
+    --input: 216 18% 88%;
+    --ring: 200 85% 34%;
+
+    --radius: 0.375rem;
+
+    /* Theme extras */
+    --rule: 262 65% 56%;             /* violet sheen — the signature rule */
+    --highlight: 41 96% 50%;         /* amber: the shiny thing */
+    --ink-panel: 228 30% 10%;        /* dark ink surface (research log) */
+    --ink-panel-fg: 210 25% 92%;
+
+    --chart-1: 12 76% 61%;
+    --chart-2: 173 58% 39%;
+    --chart-3: 197 37% 24%;
+    --chart-4: 43 74% 66%;
+    --chart-5: 27 87% 67%;
+
+    --sidebar: 0 0% 98%;
+    --sidebar-foreground: 240 5.3% 26.1%;
+    --sidebar-primary: 240 5.9% 10%;
+    --sidebar-primary-foreground: 0 0% 98%;
+    --sidebar-accent: 240 4.8% 95.9%;
+    --sidebar-accent-foreground: 240 5.9% 10%;
+    --sidebar-border: 220 13% 91%;
+    --sidebar-ring: 217.2 91.2% 59.8%;
+  }
+  .theme {
+    --font-heading: var(--font-sans);
+    --font-sans: 'Geist Variable', sans-serif;
+  }
+  /* Dark plumage: applied by the small script in main.tsx (follows
+     prefers-color-scheme, overridable via the Theme setting). */
+  .dark {
+    /* Plumage at night: deep blue-black, never pure black */
+    --background: 228 24% 8%;
+    --foreground: 210 20% 92%;
+    --card: 228 20% 11%;
+    --card-foreground: 210 20% 92%;
+    --popover: 228 20% 11%;
+    --popover-foreground: 210 20% 92%;
+    --primary: 197 75% 58%;
+    --primary-foreground: 228 30% 10%;
+    --secondary: 226 16% 17%;
+    --secondary-foreground: 210 20% 92%;
+    --muted: 226 16% 17%;
+    --muted-foreground: 217 12% 62%;
+    --accent: 226 16% 19%;
+    --accent-foreground: 210 20% 92%;
+    --destructive: 0 66% 60%;
+    --destructive-foreground: 210 40% 98%;
+    --border: 226 14% 22%;
+    --input: 226 14% 22%;
+    --ring: 197 75% 58%;
+    --rule: 262 70% 68%;
+    --highlight: 42 92% 58%;
+    --ink-panel: 230 30% 6%;
+    --ink-panel-fg: 210 25% 90%;
+    --chart-1: 220 70% 50%;
+    --chart-2: 160 60% 45%;
+    --chart-3: 30 80% 55%;
+    --chart-4: 280 65% 60%;
+    --chart-5: 340 75% 55%;
+    --sidebar: 240 5.9% 10%;
+    --sidebar-foreground: 240 4.8% 95.9%;
+    --sidebar-primary: 224.3 76.3% 48%;
+    --sidebar-primary-foreground: 0 0% 100%;
+    --sidebar-accent: 240 3.7% 15.9%;
+    --sidebar-accent-foreground: 240 4.8% 95.9%;
+    --sidebar-border: 240 3.7% 15.9%;
+    --sidebar-ring: 217.2 91.2% 59.8%;
+  }
+  /* ── "Village" theme ───────────────────────────────────────────────
+     A warm storybook counterpart to the plumage palette: sun-warmed
+     plaster instead of feather white, soft ink-brown instead of
+     blue-black, and colors lifted off a flower-covered lane — moss
+     green as the primary (ivy and window boxes), dusty rose as the
+     signature rule (geraniums), terracotta as the treasure marker
+     (roof tiles and clay pots). Rounder corners, softer shadows, a
+     serif display voice.
+
+     Lives AFTER .dark on purpose — both are single-class selectors, so
+     source order is what settles a tie. It is a light theme; picking it
+     means .dark is off.                                              */
+  .village {
+    --background: 38 42% 95%;        /* sun-warmed plaster */
+    --foreground: 25 24% 18%;        /* soft ink brown, never pure black */
+
+    --card: 40 50% 97%;
+    --card-foreground: 25 24% 18%;
+
+    --popover: 40 50% 97%;
+    --popover-foreground: 25 24% 18%;
+
+    --primary: 145 26% 34%;          /* moss green — ivy on the wall */
+    --primary-foreground: 40 45% 97%;
+
+    --secondary: 38 30% 90%;
+    --secondary-foreground: 25 24% 20%;
+
+    --muted: 38 28% 90%;
+    --muted-foreground: 28 14% 38%;  /* 38%, not 42%: keeps 4.9:1 on plaster (WCAG AA) */
+
+    --accent: 40 34% 91%;
+    --accent-foreground: 25 24% 18%;
+
+    --destructive: 4 62% 47%;
+    --destructive-foreground: 40 45% 97%;
+
+    --border: 34 26% 83%;
+    --input: 34 26% 83%;
+    --ring: 145 26% 34%;
+
+    --radius: 0.625rem;              /* rounder — nothing here is sharp */
+
+    --rule: 345 48% 62%;             /* geranium pink — the signature rule */
+    --highlight: 18 64% 50%;         /* terracotta: roof tile, clay pot */
+    --ink-panel: 160 20% 12%;        /* the cat in the doorway */
+    --ink-panel-fg: 38 30% 88%;
+
+    --chart-1: 18 64% 55%;
+    --chart-2: 145 26% 40%;
+    --chart-3: 345 48% 62%;
+    --chart-4: 42 62% 58%;
+    --chart-5: 200 28% 46%;
+
+    --sidebar: 38 42% 96%;
+    --sidebar-foreground: 25 24% 24%;
+    --sidebar-primary: 145 26% 34%;
+    --sidebar-primary-foreground: 40 45% 97%;
+    --sidebar-accent: 38 30% 91%;
+    --sidebar-accent-foreground: 25 24% 18%;
+    --sidebar-border: 34 26% 83%;
+    --sidebar-ring: 145 26% 34%;
+  }
+  /* Plaster, not flat paint: two very soft washes so large empty areas
+     have somewhere for the eye to rest. Gradients only — no asset, no
+     request, no repaint cost beyond the initial composite. */
+  .village body {
+    background-image:
+      radial-gradient(ellipse 80% 55% at 12% 0%, hsl(42 55% 90% / 0.55), transparent 70%),
+      radial-gradient(ellipse 70% 50% at 92% 8%, hsl(145 30% 86% / 0.35), transparent 72%);
+    background-attachment: fixed;
+  }
+
+  * {
+    @apply border-border outline-ring/50;
+  }
+  body {
+    @apply bg-background text-foreground;
+    font-feature-settings: "rlig" 1, "calt" 1;
+    margin: 0;
+    padding: 0;
+    overflow: hidden; /* Prevent global scrollbar */
+  }
+  html {
+    @apply font-sans;
+  }
+  #root {
+    @apply h-screen w-full flex flex-col overflow-hidden;
+  }
+}
+
+/* Scrollbar hide — scoped to utility class only.
+   The global * rule has been removed: hiding scrollbars on every element
+   breaks keyboard scrollability on overflow regions and fails WCAG 2.1 SC 1.4.13. */
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+@layer utilities {
+  /* Signature: the iridescent sheen hairline — teal into violet, like light
+     across a magpie's wing. Used once, under the app header. */
+  .card-rule {
+    position: relative;
+  }
+  .card-rule::after {
+    content: '';
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: -1px;
+    height: 2px;
+    background: linear-gradient(90deg, hsl(var(--primary)), hsl(var(--rule)) 60%, hsl(var(--rule) / 0.4));
+    pointer-events: none;
+  }
+
+  /* Soft feather shadow — replaces the old hard 4px offset blocks */
+  .shadow-card {
+    box-shadow: 0 1px 2px hsl(226 30% 13% / 0.05), 0 2px 8px hsl(226 30% 13% / 0.07);
+  }
+  .dark .shadow-card {
+    box-shadow: 0 1px 2px hsl(230 60% 3% / 0.5), 0 2px 10px hsl(230 60% 3% / 0.45);
+  }
+
+  /* Sleek modern display voice for report headings and empty-state notes */
+  .font-display {
+    font-family: 'Geist Variable', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+    letter-spacing: -0.02em;
+  }
+
+  /* Village speaks in a serif — a system stack, so it costs no webfont.
+     Applies to both display slots (headings here, prose headings below). */
+  .village .font-display,
+  .village .prose-headings-display :is(h1, h2, h3, h4) {
+    font-family: 'Iowan Old Style', 'Palatino Linotype', Palatino, 'Book Antiqua', Georgia, serif;
+    letter-spacing: 0;
+  }
+  .village .shadow-card {
+    box-shadow: 0 1px 2px hsl(25 30% 20% / 0.06), 0 3px 10px hsl(25 30% 20% / 0.08);
+  }
+
+  /* Dark ink surface (deep-research log, code-like panels) */
+  .ink-panel {
+    background-color: hsl(var(--ink-panel));
+    color: hsl(var(--ink-panel-fg));
+  }
+  .text-highlight {
+    color: hsl(var(--highlight));
+  }
+  .border-highlight {
+    border-color: hsl(var(--highlight));
+  }
+
+  /* Quiet hairline for card headers — neutral; the gradient sheen belongs
+     to the app bar alone. */
+  .card-rule-thin {
+    border-bottom: 1px solid hsl(var(--border));
+  }
+
+  /* Typeset headings for chat reports: premium modern sans-serif, ink-colored,
+     with the top-level heading carrying the catalog violet rule underneath. */
+  .prose-headings-display :is(h1, h2, h3, h4) {
+    font-family: 'Geist Variable', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+    font-weight: 700;
+    letter-spacing: -0.015em;
+    text-transform: none;
+  }
+  .prose-headings-display h2 {
+    padding-bottom: 0.25rem;
+    border-bottom: 1px solid hsl(var(--rule) / 0.4);
+  }
+
+  /* Lists: branded, denser, cleaner. The typography plugin's default markers
+     are a faint gray and the rows sit loose — tighten them and color the
+     bullets/numbers with the magpie teal so lists read as intentional. */
+  .prose {
+    --tw-prose-bullets: hsl(var(--primary));
+    --tw-prose-counters: hsl(var(--primary));
+    /* Tailwind Typography defaults every fenced block to slate-800, even in
+       light mode. Use Magpie's surfaces instead so code belongs to the page
+       rather than looking like an unrelated black terminal. */
+    --tw-prose-pre-code: hsl(var(--foreground));
+    --tw-prose-pre-bg: hsl(var(--muted));
+  }
+  .dark .prose,
+  .prose.dark\:prose-invert {
+    --tw-prose-invert-bullets: hsl(var(--primary));
+    --tw-prose-invert-counters: hsl(var(--primary));
+    --tw-prose-invert-pre-code: hsl(var(--foreground));
+    --tw-prose-invert-pre-bg: hsl(var(--muted));
+  }
+  .prose pre {
+    box-shadow: inset 3px 0 0 hsl(var(--primary) / 0.45);
+  }
+  .prose :is(ul, ol) {
+    margin-top: 0.45em;
+    margin-bottom: 0.45em;
+    padding-left: 1.35em;
+  }
+  .prose li {
+    margin-top: 0.18em;
+    margin-bottom: 0.18em;
+    padding-left: 0.15em;
+  }
+  .prose li::marker {
+    font-weight: 600;   /* firmer bullet/number */
+  }
+  /* Tight paragraphs inside list items (multi-line bullets don't balloon). */
+  .prose li > p {
+    margin-top: 0.2em;
+    margin-bottom: 0.2em;
+  }
+  /* Task lists: drop the redundant bullet next to the checkbox, align, and
+     tint the box with the brand color. */
+  .prose .contains-task-list {
+    list-style: none;
+    padding-left: 0.2em;
+  }
+  .prose .contains-task-list li {
+    padding-left: 0;
+  }
+  .prose input[type="checkbox"] {
+    accent-color: hsl(var(--primary));
+    margin-right: 0.5em;
+    transform: translateY(1px);
+  }
+}
+
+/* A11y: every interactive element gets a visible keyboard-focus ring — custom
+   <button>s (citation chips, plan cards, toggles) previously had none unless
+   they opted in. :focus-visible keeps mouse clicks ring-free. */
+button:focus-visible,
+a:focus-visible,
+[role="switch"]:focus-visible {
+  outline: 2px solid hsl(var(--ring));
+  outline-offset: 1px;
+}
