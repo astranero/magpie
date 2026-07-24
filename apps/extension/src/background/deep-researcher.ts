@@ -19,6 +19,7 @@ import { getMcpServers, McpConnection, isSearchLikeTool, argsForQuery } from '..
 import { searchWithProviders, jinaWebSearch, getSearchApiKeys, SearchHit } from '../lib/search-providers';
 import { searchFreeAPIs } from '../lib/free-apis';
 import { rankPapers, webDomainAuthority } from '../lib/paper-rank';
+import { openAlexWorkToPaper, parsePubMedArticles, parsePubMedIds } from '../lib/academic-sources';
 import { semaphore } from '../lib/semaphore';
 import { crumb } from '../lib/crash-log';
 import {
@@ -57,7 +58,7 @@ let activeSourceMode: ResearchSourceMode = 'auto';
 /**
  * Where a run is allowed to gather from. 'auto' is the classic mix (web +
  * academic + news + MCP); 'academic' (/academic) is a papers-only corpus —
- * Semantic Scholar / CrossRef / arXiv / HuggingFace, nothing else.
+ * Semantic Scholar / OpenAlex / PubMed / CrossRef / arXiv / HuggingFace, nothing else.
  */
 export type ResearchSourceMode = 'auto' | 'academic';
 
@@ -405,7 +406,7 @@ const BLOCKED_DOMAINS = /duckduckgo\.com|youtube\.com|google\.com|pinterest\.com
 /**
  * High-quality domains get prioritized in results ordering.
  */
-const HIGH_QUALITY_DOMAINS = /arxiv\.org|nature\.com|science\.org|acm\.org|ieee\.org|springer\.com|wiley\.com|nih\.gov|gov\.\w+|edu$|\.ac\.|nytimes\.com|wired\.com|arstechnica\.com|hbr\.org|mckinsey\.com|mit\.edu|stanford\.edu|anthropic\.com|openai\.com|deepmind\.com|blog\.google|huggingface\.co|docs\./;
+const HIGH_QUALITY_DOMAINS = /arxiv\.org|nature\.com|science\.org|acm\.org|ieee\.org|springer\.com|wiley\.com|nih\.gov|gov\.\w+|edu$|\.ac\.|nytimes\.com|wired\.com|arstechnica\.com|hbr\.org|mckinsey\.com|mit\.edu|stanford\.edu|anthropic\.com|openai\.com|deepmind\.com|blog\.google|huggingface\.co|openalex\.org|pubmed\.ncbi\.nlm\.nih\.gov|github\.com|readthedocs\.io|docs\./;
 
 /**
  * Search the web without opening tabs, via DuckDuckGo's static HTML endpoint.
@@ -792,6 +793,8 @@ export async function generateSearchQueries(topic: string, llmChatFn: (sys: stri
 - Primary sources and official documentation
 
 Avoid queries that would return social media, forums, or content farms. Include "site:" operators when targeting specific authoritative domains would be beneficial.
+
+If the topic is TECHNICAL (a software library, tool, framework, API, protocol, language, or engineering practice), spend 2-3 of the queries reaching the primary sources for it: the project's own documentation and the code itself. Use targeted operators like \`site:github.com <tool>\`, \`<tool> site:readthedocs.io\`, \`<tool> "official docs"\`, or the project's own docs domain. These are the sources a practitioner trusts over a blog write-up.
 
 LANGUAGE: if the topic is not in English, write MOST queries in the topic's own language (local sources are the best sources), but keep 1-2 queries in English for the English-dominant academic literature. Never translate the topic away from the user's language entirely.
 
@@ -1498,6 +1501,64 @@ async function searchHuggingFacePapers(query: string, signal?: AbortSignal): Pro
   }).filter((p: AcademicPaper) => p.abstract);
 }
 
+/**
+ * OpenAlex works search — 250M+ works across every field, free, no key. The
+ * broadest discovery source; abstracts arrive as an inverted index that
+ * academic-sources reconstructs. Sorted by citations so the strongest come
+ * first within the cap.
+ */
+async function searchOpenAlex(query: string, rows: number, signal?: AbortSignal): Promise<AcademicPaper[]> {
+  if (rows <= 0) return [];
+  const url = `https://api.openalex.org/works?search=${encodeURIComponent(query)}`
+    + `&filter=has_abstract:true&sort=cited_by_count:desc&per-page=${Math.min(rows, 25)}`
+    + `&select=id,doi,display_name,publication_year,cited_by_count,abstract_inverted_index,authorships,primary_location,host_venue`;
+  const res = await fetch(url, { signal: apiSignal(signal), headers: { 'Accept': 'application/json' } });
+  if (!res.ok) throw new Error(`OpenAlex ${res.status}`);
+  const data = await res.json();
+  const works: any[] = Array.isArray(data?.results) ? data.results : [];
+  const out: AcademicPaper[] = [];
+  for (const w of works) {
+    const p = openAlexWorkToPaper(w);
+    if (!p) continue;
+    out.push({
+      title: p.title, abstract: p.abstract, year: p.year, authors: p.authors,
+      venue: p.venue, doi: p.doi, citations: p.citations,
+      url: p.doi ? `https://doi.org/${p.doi}` : (typeof w.id === 'string' ? w.id : ''),
+    });
+  }
+  return out;
+}
+
+/**
+ * PubMed (NCBI E-utilities) — the authoritative biomedical index, free, keyless
+ * (3 req/s). Two calls: esearch for PMIDs, efetch for the abstracts. Returns []
+ * for a non-biomedical query, which is exactly what we want — it costs one cheap
+ * esearch that finds nothing and never pollutes a non-medical run.
+ */
+async function searchPubMed(query: string, rows: number, signal?: AbortSignal): Promise<AcademicPaper[]> {
+  if (rows <= 0) return [];
+  const base = 'https://eutils.ncbi.nlm.nih.gov/entrez/eutils';
+  const esearch = await fetch(
+    `${base}/esearch.fcgi?db=pubmed&retmode=json&sort=relevance&retmax=${Math.min(rows, 20)}&term=${encodeURIComponent(query)}`,
+    { signal: apiSignal(signal) },
+  );
+  if (!esearch.ok) throw new Error(`PubMed esearch ${esearch.status}`);
+  const ids = parsePubMedIds(await esearch.json());
+  if (ids.length === 0) return [];
+
+  const efetch = await fetch(
+    `${base}/efetch.fcgi?db=pubmed&retmode=xml&id=${ids.join(',')}`,
+    { signal: apiSignal(signal) },
+  );
+  if (!efetch.ok) throw new Error(`PubMed efetch ${efetch.status}`);
+  const xml = await efetch.text();
+  return parsePubMedArticles(xml).map(p => ({
+    title: p.title, abstract: p.abstract, year: p.year, authors: p.authors,
+    venue: p.venue, doi: p.doi, citations: undefined,
+    url: p.doi ? `https://doi.org/${p.doi}` : (p.pmid ? `https://pubmed.ncbi.nlm.nih.gov/${p.pmid}/` : ''),
+  }));
+}
+
 // ── arXiv full-text fetching ──
 
 /**
@@ -1649,6 +1710,28 @@ async function runAcademicAgent(
         onProgress(`[ACADEMIC] CrossRef unavailable (${e.message}) — continuing`);
       }
     }
+
+    // OpenAlex — broadest coverage, always on with a small budget even in quick
+    // mode; deeper modes get the fuller CrossRef budget.
+    if (signal?.aborted) throwIfAborted(signal);
+    onProgress(`[ACADEMIC] Searching OpenAlex${qLabel}`);
+    try {
+      papers.push(...await searchOpenAlex(q, Math.max(activeLimits.crossrefRows, 6), signal));
+    } catch (e: any) {
+      onProgress(`[ACADEMIC] OpenAlex unavailable (${e.message}) — continuing`);
+    }
+
+    // PubMed — biomedical only, and naturally returns nothing for other topics,
+    // so it is safe to always try; costs one cheap esearch on a miss.
+    if (signal?.aborted) throwIfAborted(signal);
+    onProgress(`[ACADEMIC] Searching PubMed${qLabel}`);
+    try {
+      const pm = await searchPubMed(q, Math.max(activeLimits.crossrefRows, 8), signal);
+      if (pm.length) onProgress(`[ACADEMIC] PubMed: ${pm.length} biomedical result(s)`);
+      papers.push(...pm);
+    } catch (e: any) {
+      onProgress(`[ACADEMIC] PubMed unavailable (${e.message}) — continuing`);
+    }
   }
 
   const sources: SourceRecord[] = [...cachedSources];
@@ -1728,6 +1811,30 @@ async function runAcademicAgent(
         onProgress(`[ACADEMIC] ✓ Full text captured${wasClean ? ' (cleaned)' : ''}: "${p.title.slice(0, 60)}"`);
       } else {
         onProgress(`[ACADEMIC] ✗ PDF unavailable, using abstract: "${p.title.slice(0, 60)}"`);
+      }
+    } else if (!arxivId && (p.doi || extractDoi(p.url)) && activeAcademicDepth === 'full') {
+      // Non-arXiv paper: most of the published literature. An abstract-only
+      // source lets the report cite what a paper ADVERTISED, not what it FOUND.
+      // OpenAlex resolves a legally open-access PDF for a large share of DOIs
+      // (the same recovery already used for Cloudflare-gated web refs); parse it
+      // for the real text when there is one, else fall back to the abstract.
+      const doi = (p.doi || extractDoi(p.url))!;
+      onProgress(`[ACADEMIC] Seeking open-access full text: "${p.title.slice(0, 60)}"`);
+      try {
+        const oa = await resolveOpenAccessPdfUrl(doi, signal);
+        if (oa?.pdfUrl) {
+          const body = await pdfUrlToBody(oa.pdfUrl, undefined, true);
+          const clean = body.replace(/## Page \d+\n\n\*\(no extractable text\)\*/g, '').trim();
+          if (clean.length > 200) {
+            const cleaned = llmChatFn && isGarbledPdf(body) ? await cleanPdfText(body, llmChatFn).catch(() => body) : body;
+            md = `${headerLine}\n\n${abstractSection}\n\n## Full Paper\n\n${cleaned}`;
+            onProgress(`[ACADEMIC] ✓ Open-access full text captured: "${p.title.slice(0, 60)}"`);
+          }
+        } else {
+          onProgress(`[ACADEMIC] ✗ No open-access PDF, using abstract: "${p.title.slice(0, 60)}"`);
+        }
+      } catch {
+        onProgress(`[ACADEMIC] ✗ Full-text fetch failed, using abstract: "${p.title.slice(0, 60)}"`);
       }
     }
 
@@ -2033,7 +2140,7 @@ export async function runDeepResearch(
     onProgress(`[PLANNING] Research depth: ${depth} (up to ${activeLimits.rounds} adaptive stages)`);
   }
   if (sourceMode === 'academic') {
-    onProgress('[PLANNING] Academic mode: papers only (Semantic Scholar · CrossRef · arXiv · HuggingFace) — no web or news agents');
+    onProgress('[PLANNING] Academic mode: papers only (Semantic Scholar · OpenAlex · PubMed · CrossRef · arXiv · HuggingFace) — no web or news agents');
   }
   if (activeQuality === 'high') onProgress('[PLANNING] Source quality: high-authority only');
   if (activeAcademicDepth === 'abstract') onProgress('[PLANNING] Academic papers: abstracts only');
