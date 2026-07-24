@@ -308,6 +308,25 @@
   .prose pre {
     box-shadow: inset 3px 0 0 hsl(var(--primary) / 0.45);
   }
+
+  /* A 400px panel is narrower than most tables and many code lines. Without an
+     explicit scroller the widest cell stretches the whole message bubble and
+     the reader ends up scrolling the PAGE sideways to finish a sentence.
+     Confine the overflow to the block that causes it. */
+  .prose table {
+    display: block;
+    width: 100%;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+  .prose pre {
+    overflow-x: auto;
+  }
+  /* Long URLs and unbroken identifiers are the other horizontal-overflow
+     source; wrap them rather than widening the column. */
+  .prose :is(p, li, td, th) {
+    overflow-wrap: anywhere;
+  }
   .prose :is(ul, ol) {
     margin-top: 0.45em;
     margin-bottom: 0.45em;

@@ -1506,6 +1506,27 @@ const LANGUAGE_RULE =
   ` ALWAYS write your answer in the language of the user's latest message — or the language they explicitly ask for — ` +
   `even when the sources, page, or these instructions are in another language. Never claim you cannot chat in a language you can write.`;
 
+// Declared at MODULE scope, not inside buildChatRequest. It used to be a local
+// const declared at the top of the citation branch — which sits AFTER the
+// general-knowledge, web-search and Wikipedia branches have already returned.
+// Those three shipped with no formatting guidance at all ("Answer concisely in
+// natural language"), so everyday non-workspace answers came back as walls of
+// prose while workspace answers were properly structured. Same rules for every
+// substantive branch now.
+// Answers render in a ~400px side panel; a 500-word tutorial for a
+// definition question is scroll punishment. Calibrate length to the ask.
+const RESPONSE_STYLE =
+  `\nRESPONSE STYLE — write for a busy reader in a narrow side panel. Prioritise SCANNABILITY:\n` +
+  `• Lead with the answer. NO preamble, no "Certainly!/Great question!", no sycophancy, no closing summary or "if you want, I can…" offers.\n` +
+  `• Use REAL Markdown, always: '## ' for section headings (not bold-as-heading, not plain lines), '- ' for bullet lists, '1. ' for ordered steps, '**bold**' for the key term at the start of a bullet, and Markdown tables for comparisons. Put a blank line between every heading, paragraph and list.\n` +
+  `• Keep paragraphs to 1-3 short sentences. Break anything longer into bullets. Never write a wall of text.\n` +
+  `• Plain, concrete language — "it's 19°C, feels like 13°", not "the temperature is considered cold". Define a term in a half-sentence the first time; don't assume nor over-explain.\n` +
+  `• Match length to the ask: a definition = 2-4 sentences; a list question = a tight bulleted list; a comparison = a table. Answer only what was asked.\n` +
+  `• FAIL FAST: if the sources/page don't contain what's needed, say so in ONE line — never guess persuasively.\n` +
+  `• When fixing an error, name the ROOT CAUSE before the fix.\n` +
+  `• Do NOT end with a "Sources:" line or a list of URLs — the app shows sources separately.\n` +
+  `•${LANGUAGE_RULE}`;
+
 async function buildChatRequest(chatId: string, projectId: string, prompt: string, signal: AbortSignal, pageContext?: PageContext | null, onStatus?: (s: string) => void): Promise<{ systemPrompt: string; formattedHistory: Array<{ role: string; content: string }>; grounded: boolean; place?: string; branch: ChatBranch }> {
   // BATCH: workspace docs, project rules, locale, history, web-fallback — five
   // separate async sources that previously ran as five sequential awaits. Run
@@ -1615,7 +1636,7 @@ async function buildChatRequest(chatId: string, projectId: string, prompt: strin
         if (web?.context) {
           const systemPrompt = rulesBlock +
             `You are a helpful assistant. The excerpts below were pulled from a live web search just now — treat them as your facts. ` +
-            `Answer concisely in natural language. Do not fabricate citations.` + LANGUAGE_RULE +
+            `Do not fabricate citations.` + RESPONSE_STYLE +
             `\n--- WEB RESULTS ---\n${web.context}\n--- END WEB RESULTS ---`;
           return { systemPrompt, formattedHistory, grounded: false, place, branch: 'web' };
         }
@@ -1639,7 +1660,7 @@ async function buildChatRequest(chatId: string, projectId: string, prompt: strin
           `You are a helpful assistant. The following information was retrieved from Wikipedia — treat it as factual. ` +
           `If Wikipedia covers the general concept but the user asked about current conditions (weather, time, news), ` +
       `still provide the best answer using your general knowledge — do not refuse. ` +
-          `you may supplement from your own knowledge. Answer concisely.` + LANGUAGE_RULE +
+          `you may supplement from your own knowledge.` + RESPONSE_STYLE +
           `\n--- WIKIPEDIA ---\n${wikiContext}\n--- END WIKIPEDIA ---`;
         return { systemPrompt, formattedHistory, grounded: false, place, branch: 'web' };
       }
@@ -1651,7 +1672,7 @@ async function buildChatRequest(chatId: string, projectId: string, prompt: strin
       `You are a helpful AI assistant. Answer using your general knowledge. ` +
       `If asked about current weather, time, date, or news, provide the best answer you can from what you know. ` +
       `Never say you don't have access to current data or real-time information — just answer based on your training. ` +
-      `Be concise — the user wants a quick fact, not an essay.` + LANGUAGE_RULE;
+      `Be concise — the user wants a quick fact, not an essay.` + RESPONSE_STYLE;
     return { systemPrompt, formattedHistory, grounded: false, place, branch };
   }
 
@@ -1727,19 +1748,7 @@ async function buildChatRequest(chatId: string, projectId: string, prompt: strin
 
   let systemPrompt: string;
 
-  // Answers render in a ~400px side panel; a 500-word tutorial for a
-  // definition question is scroll punishment. Calibrate length to the ask.
-  const RESPONSE_STYLE =
-    `\nRESPONSE STYLE — write for a busy reader in a narrow side panel. Prioritise SCANNABILITY:\n` +
-    `• Lead with the answer. NO preamble, no "Certainly!/Great question!", no sycophancy, no closing summary or "if you want, I can…" offers.\n` +
-    `• Use REAL Markdown, always: '## ' for section headings (not bold-as-heading, not plain lines), '- ' for bullet lists, '1. ' for ordered steps, '**bold**' for the key term at the start of a bullet, and Markdown tables for comparisons. Put a blank line between every heading, paragraph and list.\n` +
-    `• Keep paragraphs to 1-3 short sentences. Break anything longer into bullets. Never write a wall of text.\n` +
-    `• Plain, concrete language — "it's 19°C, feels like 13°", not "the temperature is considered cold". Define a term in a half-sentence the first time; don't assume nor over-explain.\n` +
-    `• Match length to the ask: a definition = 2-4 sentences; a list question = a tight bulleted list; a comparison = a table. Answer only what was asked.\n` +
-    `• FAIL FAST: if the sources/page don't contain what's needed, say so in ONE line — never guess persuasively.\n` +
-    `• When fixing an error, name the ROOT CAUSE before the fix.\n` +
-    `• Do NOT end with a "Sources:" line or a list of URLs — the app shows sources separately.\n` +
-    `•${LANGUAGE_RULE}`;
+
 
   // Web-search fallback sources (below) surface as clickable footer links.
   let webSources: Array<{ title: string; url: string }> = [];
@@ -2895,7 +2904,7 @@ chrome.runtime.onConnect.addListener((port) => {
             `You are a friendly, knowledgeable assistant. The excerpts below are from a live web search run just now — treat them as your facts. ` +
             `Answer like a sharp, helpful friend: lead with the direct answer in natural, plain language, then just enough detail. ` +
             `Don't clutter the prose with [W#] tags — the sources are shown as links below. Use only what the excerpts support; if they don't answer it, say so plainly.` +
-            LANGUAGE_RULE +
+            RESPONSE_STYLE +
             `\n--- WEB RESULTS ---\n${web.context}\n--- END WEB RESULTS ---`;
           await chatWithCustomStream(webSys, [], prompt, localController.signal, emitDelta);
         }
