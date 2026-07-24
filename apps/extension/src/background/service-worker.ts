@@ -3846,6 +3846,21 @@ async function resumePendingResearch(): Promise<void> {
       status: `[RESUME] Interrupted research detected — resuming from checkpoint (attempt ${attemptCount})…`
     }).catch(() => {});
     await appendJobLog(`[RESUME] Interrupted research detected — resuming from checkpoint (attempt ${attemptCount})…`).catch(() => {});
+
+    // Say so IN THE CHAT, once, on the first resume. Without this a resumed run
+    // is indistinguishable from a command that started itself — the run
+    // reattaches to the /deepresearch line the user typed before the worker
+    // died, so it reads as "I never asked for this". Only at attempt 1 so it
+    // isn't repeated across the several resumes a long run legitimately needs.
+    if (attemptCount === 1 && job.chatId) {
+      await saveChatMessage({
+        chatId: job.chatId,
+        role: 'system',
+        text: `↻ Resuming your earlier research on “${job.effectiveTopic || job.topic}”. Chrome restarts the extension's background worker about every 5 minutes, which interrupts long runs — Magpie picks them back up from where they stopped. If you didn't mean to continue this, press Stop in the field log.`,
+        timestamp: new Date().toISOString(),
+        provider: 'custom',
+      }).catch(() => {});
+    }
     await executeResearch({
       projectId: job.projectId,
       chatId: job.chatId,
