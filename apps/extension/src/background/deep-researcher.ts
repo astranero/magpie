@@ -1,5 +1,6 @@
 import { saveDocument, linkDocumentToProject, listDocuments, getChunkByAnchor } from '../lib/db';
 import { verifyFaithfulness } from '../lib/faithfulness';
+import { checkFigures } from '../lib/figure-check';
 import { sendToOffscreen } from '../lib/offscreen-client';
 import { chunkDocument, makeDocShortId } from '../lib/chunker';
 import { buildFrontmatter } from '../lib/frontmatter';
@@ -2441,6 +2442,20 @@ async function faithfulnessPass(synthesis: string, onProgress: (s: string) => vo
       onProgress(`[FAITHFULNESS] check skipped — flagged ${fr.dropped}/${fr.total} (over-broad, likely miscalibrated); keeping all citations`);
     } else if (fr.total > 0) {
       onProgress(`[FAITHFULNESS] all ${fr.total} citations verified`);
+    }
+    // FIGURES: relevance-grade faithfulness above cannot see a wrong NUMBER
+    // pulled from the right chunk — the chunk IS about the claim. Numbers need no
+    // model, so this is a pure string check. Reported, never redacted: a figure
+    // can legitimately be rounded, converted or summed out of its source, and
+    // deleting on that basis would corrupt correct prose.
+    const fig = await checkFigures(synthesis, async (a) =>
+      (await getChunkByAnchor(a).catch(() => null))?.text ?? null);
+    if (fig.unverified.length > 0) {
+      const worst = fig.unverified.slice(0, 5).map(u => u.figure).join(', ');
+      onProgress(`[FIGURES] ${fig.checked - fig.unverified.length}/${fig.checked} figures found in their cited source — could not confirm: ${worst}`);
+      crumb('eval', 'figures unverified', { checked: fig.checked, unverified: fig.unverified.length, sample: worst });
+    } else if (fig.checked > 0) {
+      onProgress(`[FIGURES] all ${fig.checked} figures found in their cited sources`);
     }
   } catch { /* verifier unavailable — keep the report as-is */ }
   return synthesis;
