@@ -9,7 +9,7 @@ import { getJob, updateJob, getPage, savePage, listPages } from '../lib/research
 import { pdfUrlToBody, recreateOffscreen } from '../lib/pdf-parser';
 import { splitReportSections, joinReportSections, sectionMatchesFlag, revisionKeptCitations, countCitations } from '../lib/report-sections';
 import { checkContentQuality, extractDoi } from '../lib/quality-gate';
-import { splitCapstone, trimTruncatedTail, stripUnresolvableAnchors, dropDuplicateTables } from '../lib/report-repair';
+import { splitCapstone, trimTruncatedTail, stripUnresolvableAnchors, dropDuplicateTables, stripStubCodeBlocks, flagBrokenFormula } from '../lib/report-repair';
 import { isAcademicQuery } from '../lib/query-intent';
 import { getResearchLimits, getResearchDepth, getSynthesisCharBudget, getSourceQuality, getAcademicDepth, RESEARCH_LIMITS, ResearchLimits, SourceQuality, AcademicDepth } from '../lib/research-limits';
 import { getReportLengthSpec } from '../lib/research-limits';
@@ -150,9 +150,15 @@ const REPORT_VOICE =
   `- Concrete subjects and verbs: "Streaming cuts perceived latency 40% [a]" beats "It can be observed that streaming may improve latency".\n` +
   `- Vary sentence length; kill filler transitions; every sentence must carry information a reader would pay for.\n` +
   `- State numbers, names, and mechanisms — not vague plurals ("several studies", "various approaches") when the sources name them.\n` +
-  `TECHNICAL FORMATTING — code must survive rendering:\n` +
+  `HONESTY — a claim's form must match its evidence:\n` +
+  `- A number or rating is DATA only if a source measured it. Give the figure with its [anchor]. Your own qualitative call ("low reliability", "high risk") must READ as a judgment — never a benchmarked-looking score or an F1/accuracy/percentage the sources did not report. Do not invent precision.\n` +
+  `- State each thesis and each named concept ONCE, where it lands hardest. Do not restate the same claim in near-identical words across sections.\n` +
+  `- Open the report with one concrete, specific case — a named incident, example, or result — then build the abstractions back to it. Never open with a generic framing paragraph.\n` +
+  `TECHNICAL FORMATTING — code and math must survive rendering:\n` +
   `- Every identifier, command, flag, config key, or API name gets inline backticks: \`vi.mock\`, \`proxy_buffering off\`.\n` +
   `- Any code longer than a fragment goes in a fenced block with a language tag. Never write code as prose.\n` +
+  `- Include a code block ONLY when it is (a) the exact thing under discussion a reader can paste and check — a real API call, config, or error message from a source — or (b) a complete, runnable illustration of a mechanism. NEVER a stub or a comment that gestures at logic ("# DFS traversal logic here", "// implementation omitted"). If a source (especially a paper) shows real code or pseudocode worth including, reproduce it in full; if you would only be sketching, write prose instead.\n` +
+  `- For a formula, PREFER plain words ("flag a cycle when its frequency exceeds the mean by more than k standard deviations"). If you use math notation, every symbol must be present and defined — never ship an equation with a missing variable. A half-written formula is worse than a sentence.\n` +
   `- NEVER put code inside a markdown table cell — pipes and backticks corrupt the table and it renders as an unreadable pipe-soup. To compare code variants, write consecutive fenced blocks, each preceded by a one-line bold label ("**Incorrect:**", "**Correct:**").\n` +
   `- Tables are for short scalar values only: names, numbers, one-phrase verdicts. If a cell needs a sentence or a snippet, the content belongs in prose or a fenced block, not a table.\n`;
 
@@ -1895,7 +1901,7 @@ export function assembleReportBody(
   // Duplicate tables survive the retrieval guard because selectBriefExcerpts
   // feeds brief text that may already contain one. Dropped here, where every
   // synthesis path converges.
-  const linkedSynthesis = dropDuplicateTables(stripUnresolvableAnchors(linked));
+  const linkedSynthesis = flagBrokenFormula(stripStubCodeBlocks(dropDuplicateTables(stripUnresolvableAnchors(linked))));
 
   // ## Sources lists ONLY what the prose actually cited, in citation order — so
   // [[n]] still aligns with line n. A source count that equals the citations is
@@ -3131,7 +3137,7 @@ LENGTH & DEPTH — target ${lengthSpec.total} words, and treat BOTH ends of that
 
 STRUCTURE — adapt it to the subject; do NOT use a rigid template:
 - Do NOT write a top-level title / H1 (no "# Professional Report: …", no "Report on …") — the document already has a title, and a second one renders as an ugly double header. Start directly with the body.
-- Open with a strong 1–2 paragraph executive overview that frames the whole finding (no "Abstract:" label — write it as authoritative prose).
+- Open with a "**Key findings**" line and 3-5 one-sentence bullets (each ending with its [anchor_id]), THEN a 1–2 paragraph executive overview that frames the whole finding (no "Abstract:" label — authoritative prose). The reader must be able to grasp the thesis without reading further.
 - Organise the body into 4–8 sections with DESCRIPTIVE, topic-specific headings that name the actual finding (e.g. "Demand and Pain Points", "Willingness to Pay", "Competitive Landscape") — NOT generic labels like "Introduction / Section 1 / Discussion". Cover every sub-question, but through headings that fit the material:
 ${subQuestions.map((q, i) => `   ${i + 1}. ${q}`).join('\n')}
 - Use ### sub-headings within sections to break up long analysis.
@@ -3332,7 +3338,7 @@ ${RESEARCH_CITATION_RULES}`;
     const capSys =
       `You are finishing the definitive report on: "${topic}". The body sections are WRITTEN — do not rewrite them.
 Produce EXACTLY three blocks separated by these delimiter lines, copied VERBATIM — do not expand, rename, or translate them (they are parsed, not read):
-(block 1) A 1-2 paragraph executive overview of the whole report — authoritative prose, NO heading, no "Abstract:" label.
+(block 1) FIRST a "**Key findings**" line followed by 3-5 one-sentence bullets — each the single most important takeaway a reader must not miss, each ending with its [anchor_id]. THEN a 1-2 paragraph executive overview. No other heading, no "Abstract:" label. A report this dense is unreadable without a scannable summary up top.
 ---CONTRADICTIONS---
 (block 2) A "## Contradictions & Open Questions" section: where sources disagree (and which side is stronger), which load-bearing claims rest on a single source, what remains unverified.
 ---VERDICT---

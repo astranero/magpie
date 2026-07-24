@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { splitCapstone, trimTruncatedTail, stripUnresolvableAnchors, dropDuplicateTables } from '../report-repair';
+import { splitCapstone, trimTruncatedTail, stripUnresolvableAnchors, dropDuplicateTables, stripStubCodeBlocks, flagBrokenFormula } from '../report-repair';
 
 describe('splitCapstone', () => {
   it('splits on the exact delimiters', () => {
@@ -197,5 +197,69 @@ describe('dropDuplicateTables', () => {
     expect(dropDuplicateTables(FIRST)).toBe(FIRST);
     expect(dropDuplicateTables('no tables here')).toBe('no tables here');
     expect(dropDuplicateTables('')).toBe('');
+  });
+});
+
+describe('stripStubCodeBlocks', () => {
+  it('drops a fenced block that only gestures at logic', () => {
+    const t = 'Detect cycles:\n\n```python\n# DFS traversal logic to detect cyclic back-edges\n```\n\nDone.';
+    const out = stripStubCodeBlocks(t);
+    expect(out).not.toContain('DFS traversal logic');
+    expect(out).not.toContain('```');
+  });
+
+  it('drops a comment-plus-ellipsis stub', () => {
+    const t = '```js\n// implementation omitted\n...\n```';
+    expect(stripStubCodeBlocks(t).trim()).toBe('');
+  });
+
+  it('KEEPS a block with even one real line of code', () => {
+    const t = '```python\n# find cycles\nvisited = set()\n```';
+    expect(stripStubCodeBlocks(t)).toContain('visited = set()');
+  });
+
+  it('keeps a real error/output block (the checkable kind)', () => {
+    const t = '```\nValidationError: 1 validation error\npath_not_file\n```';
+    expect(stripStubCodeBlocks(t)).toContain('path_not_file');
+  });
+
+  it('leaves pure `...` with no gesture alone (could be real elision)', () => {
+    const t = '```\n...\n```';
+    expect(stripStubCodeBlocks(t)).toContain('...');
+  });
+
+  it('is empty-safe', () => {
+    expect(stripStubCodeBlocks('')).toBe('');
+  });
+});
+
+describe('flagBrokenFormula', () => {
+  it('marks a sentence whose variable dropped out of a rendering gap', () => {
+    const out = flagBrokenFormula('Where  is a tunable parameter controlling sensitivity.');
+    expect(out).toContain('[symbol omitted]');
+    expect(out).not.toMatch(/Where {2,}is/);
+  });
+
+  it('handles "Let  represent a directed graph where  is the set of tasks"', () => {
+    const out = flagBrokenFormula('Let  represent a directed graph where  is the set of tasks.');
+    expect(out.match(/\[symbol omitted\]/g)?.length).toBe(2);
+  });
+
+  it('replaces an empty inline-math span', () => {
+    expect(flagBrokenFormula('The threshold $ $ is tuned.')).toContain('[formula omitted — see source]');
+  });
+
+  it('leaves a complete formula untouched', () => {
+    const t = 'Flag a cycle when its frequency exceeds the mean by k standard deviations.';
+    expect(flagBrokenFormula(t)).toBe(t);
+  });
+
+  it('does not fire on a normal single space', () => {
+    const t = 'Where x is a tunable parameter.';
+    expect(flagBrokenFormula(t)).toBe(t);
+  });
+
+  it('is empty-safe', () => {
+    expect(flagBrokenFormula('')).toBe('');
   });
 });

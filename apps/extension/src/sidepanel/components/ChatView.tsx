@@ -132,6 +132,14 @@ const FieldLog: React.FC<{ log: string[]; onStop: () => void }> = ({ log, onStop
   const LabelIcon = PHASE_ICON[act.latestLabel] || Loader2;
   const activeIdx = PHASE_ORDER.indexOf(act.phase as ResearchPhase);
 
+  // The raw log is oldest-first; the line you open it to see is the newest, at
+  // the bottom. Pin to the bottom on open and on every new line so the latest
+  // state shows without scrolling.
+  const rawRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (showRaw && rawRef.current) rawRef.current.scrollTop = rawRef.current.scrollHeight;
+  }, [showRaw, log.length]);
+
   return (
     <div className="w-full max-w-[95%] rounded-xl ink-panel shadow-card overflow-hidden animate-in fade-in motion-reduce:animate-none">
       <div className="flex items-center gap-2 px-3.5 py-2 border-b border-white/10">
@@ -221,7 +229,7 @@ const FieldLog: React.FC<{ log: string[]; onStop: () => void }> = ({ log, onStop
               {log.length} steps
             </button>
             {showRaw && (
-              <div className="mt-1.5 max-h-40 overflow-y-auto no-scrollbar space-y-0.5">
+              <div ref={rawRef} className="mt-1.5 max-h-40 overflow-y-auto no-scrollbar space-y-0.5">
                 {log.map((line, i) => (
                   <div key={i} className="text-[10px] font-mono leading-relaxed opacity-45 break-words">{line}</div>
                 ))}

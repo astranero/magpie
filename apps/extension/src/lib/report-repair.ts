@@ -216,3 +216,76 @@ export function dropDuplicateTables(text: string): string {
     .join('\n')
     .replace(/\n{3,}/g, '\n\n');
 }
+
+// ─────────────────────────────────────────────
+// Stub code blocks — remove code that only gestures at logic
+// ─────────────────────────────────────────────
+// A study of a real report caught a four-line "DFS stub" whose whole body was
+// `# DFS traversal logic to detect cyclic back-edges` — it looks like code,
+// signals "engineering happened", and shows nothing. The prompt now forbids it;
+// this guarantees it. A fenced block is dropped ONLY when its body carries no
+// real statement: nothing but comments, ellipses, `pass`, and a phrase that
+// gestures at omitted work. Anything with an actual line of code is kept —
+// conservative by design, because a wrongly-dropped real snippet is worse than
+// a surviving stub.
+
+const GESTURE = /\b(logic|implementation|algorithm|traversal|code|details?|rest of|goes here|omitted|todo|tbd|pseudo-?code|and so on|etc\.)\b/i;
+
+function isStubBody(body: string): boolean {
+  const lines = body.split('\n').map(l => l.trim()).filter(Boolean);
+  if (lines.length === 0) return false;
+  let sawGesture = false;
+  for (const l of lines) {
+    const isComment = /^(#|\/\/|\/\*|\*|--|;)/.test(l);
+    const isFiller = /^(\.\.\.|…|pass|\{\s*\}|\{|\})$/.test(l);
+    if (isComment || isFiller) {
+      if (GESTURE.test(l)) sawGesture = true;
+      continue;
+    }
+    return false;   // a real, non-comment, non-filler line → not a stub
+  }
+  // Only a stub if every line was comment/filler AND at least one gestured at
+  // work that isn't there. A block of pure `...` with no gesture is left alone.
+  return sawGesture;
+}
+
+/**
+ * Drop fenced code blocks whose body is nothing but a comment gesturing at
+ * logic that isn't shown. Real code — even one line of it — is always kept.
+ */
+export function stripStubCodeBlocks(text: string): string {
+  const src = text || '';
+  // Match a fenced block: ```lang\n ... \n```
+  return src.replace(/```[^\n]*\n([\s\S]*?)```/g, (full, body: string) =>
+    isStubBody(body) ? '' : full,
+  ).replace(/\n{3,}/g, '\n\n');
+}
+
+// ─────────────────────────────────────────────
+// Broken formulas — a half-rendered equation is worse than none
+// ─────────────────────────────────────────────
+// Rich-text math (LaTeX, superscripts) that didn't survive to plain text leaves
+// holes: "Where  is a tunable parameter", "Let  represent a directed graph
+// where  is the set of tasks" — the variables dropped out, leaving a doubled
+// space where a symbol should be. The reader sees a sentence that references a
+// variable that isn't there. Rather than guess the math, replace the maimed
+// clause's gap with a marker so the report degrades honestly.
+
+/**
+ * Repair a sentence that lost its math variable to a rendering gap. Targets the
+ * specific shape seen live — "Where/Let/where/is <space><space> is/represent…" —
+ * and an empty `$…$`/`\( \)` span. Conservative: only acts on a clearly-empty
+ * slot, never rewrites real math.
+ */
+export function flagBrokenFormula(text: string): string {
+  let out = text || '';
+  // Empty inline-math spans: $  $, \(  \), $$  $$ with only whitespace inside.
+  out = out.replace(/\$\$?\s*\$\$?/g, '[formula omitted — see source]');
+  out = out.replace(/\\\(\s*\\\)/g, '[formula omitted — see source]');
+  // A dropped variable after Where/Let/and/where leaves "Word␣␣is/represent/be".
+  out = out.replace(
+    /\b(Where|Let|And|where|let)\s{2,}(is|are|be|represents?|denotes?)\b/g,
+    '$1 [symbol omitted] $2',
+  );
+  return out;
+}
