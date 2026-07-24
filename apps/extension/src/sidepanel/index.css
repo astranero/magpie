@@ -1,6 +1,14 @@
 @import "tw-animate-css";
 @import "shadcn/tailwind.css";
 @import "@fontsource-variable/geist";
+/* Ghibli type — real bundled webfonts so it looks the same on every machine,
+   not a system stack that falls back to whatever is installed. Caveat is
+   hand-lettering (the big brand/empty-state title, like a painted village
+   sign); Klee One is a warm storybook serif (headings). Latin subsets only. */
+@import "@fontsource/caveat/latin-600.css";
+@import "@fontsource/caveat/latin-700.css";
+@import "@fontsource/klee-one/latin-400.css";
+@import "@fontsource/klee-one/latin-600.css";
 @import "katex/dist/katex.min.css";
 @tailwind base;
 @tailwind components;
@@ -357,18 +365,21 @@
      Each theme below re-voices this so the four palettes read as four
      distinct type identities — geometric / grotesque / humanist / serif —
      all from system fonts, no webfont. */
+  /* Light + dark share the BUNDLED Geist — a modern neo-grotesque that renders
+     identically everywhere (the earlier system stacks weren't installed on most
+     machines and collapsed to the same fallback, which is why the themes looked
+     the same). They read as the "modern" pair; Village (serif) and Ghibli
+     (hand-lettered) are the illustrated pair. Dark tightens for a cooler,
+     more technical night feel. */
   .font-display {
-    font-family: 'Avenir Next', 'Segoe UI Variable Display', 'Segoe UI', system-ui, -apple-system, sans-serif;
+    font-family: 'Geist Variable', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
     letter-spacing: -0.01em;
   }
-
-  /* Dark ("plumage at night"): a tighter neo-grotesque — cooler, more
-     technical than the light theme's humanist. */
   .dark .font-display,
   .dark .prose-headings-display :is(h1, h2, h3, h4) {
-    font-family: 'Inter', 'Helvetica Neue', 'Segoe UI', Arial, sans-serif;
-    letter-spacing: -0.02em;
-    font-weight: 650;
+    font-family: 'Geist Variable', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+    letter-spacing: -0.03em;
+    font-weight: 640;
   }
 
   /* Village speaks in a serif — a system stack, so it costs no webfont.
@@ -382,22 +393,31 @@
     box-shadow: 0 1px 2px hsl(25 30% 20% / 0.06), 0 3px 10px hsl(25 30% 20% / 0.08);
   }
 
-  /* Ghibli speaks in a soft humanist voice — airy and open, distinct from
-     Village's cozy book serif. Display slots get a warm humanist sans; the
-     body picks up a matching stack below. System fonts only, so no webfont.
-     'Optima'/'Palatino' on Mac, 'Candara'/'Constantia' on Windows, then a
-     graceful fallback. */
-  .ghibli .font-display,
-  .ghibli .prose-headings-display :is(h1, h2, h3, h4) {
-    font-family: 'Optima', 'Palatino Linotype', 'Candara', 'Gill Sans', 'Gill Sans MT', 'Segoe UI', sans-serif;
-    letter-spacing: 0.005em;
-    font-weight: 600;
+  /* Ghibli type — BUNDLED webfonts (imported at the top of this file), so it
+     looks identical on every machine instead of falling back to whatever
+     happens to be installed. This is why the themes used to look the same: the
+     old system stacks (Optima/Avenir) aren't on most machines and collapsed to
+     the default. */
+  /* The big display strings — the empty-state title, brand headings — are
+     hand-lettered, like the painted sign in a Ghibli village. */
+  .ghibli .font-display {
+    font-family: 'Caveat', 'Bradley Hand', 'Segoe Print', cursive;
+    font-weight: 700;
+    letter-spacing: 0.01em;
   }
-  /* Body copy in the scene themes reads warmer than the default Geist. Ghibli:
-     humanist. (Village keeps its default body; its serif is on headings.) */
+  /* Report / markdown headings stay READABLE — a warm storybook serif
+     (handwriting-influenced) rather than the cursive, which would be hard to
+     scan at h3/h4. */
+  .ghibli .prose-headings-display :is(h1, h2, h3, h4) {
+    font-family: 'Klee One', 'Iowan Old Style', Georgia, serif;
+    font-weight: 600;
+    letter-spacing: 0;
+  }
+  /* Body copy in the same storybook serif — cozy to read, unmistakably not the
+     other themes. */
   .ghibli body,
   .ghibli .prose {
-    font-family: 'Avenir Next', 'Segoe UI', 'Optima', system-ui, -apple-system, sans-serif;
+    font-family: 'Klee One', 'Iowan Old Style', 'Palatino Linotype', Georgia, serif;
   }
   .ghibli .shadow-card {
     box-shadow: 0 1px 2px hsl(205 40% 25% / 0.06), 0 3px 12px hsl(205 40% 25% / 0.10);
