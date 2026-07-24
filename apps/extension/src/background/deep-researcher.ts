@@ -8,6 +8,7 @@ import { getJob, updateJob, getPage, savePage, listPages } from '../lib/research
 import { pdfUrlToBody, recreateOffscreen } from '../lib/pdf-parser';
 import { splitReportSections, joinReportSections, sectionMatchesFlag, revisionKeptCitations, countCitations } from '../lib/report-sections';
 import { checkContentQuality, extractDoi } from '../lib/quality-gate';
+import { splitCapstone, trimTruncatedTail } from '../lib/report-repair';
 import { isAcademicQuery } from '../lib/query-intent';
 import { getResearchLimits, getResearchDepth, getSynthesisCharBudget, getSourceQuality, getAcademicDepth, RESEARCH_LIMITS, ResearchLimits, SourceQuality, AcademicDepth } from '../lib/research-limits';
 import { getReportLengthSpec } from '../lib/research-limits';
@@ -1806,8 +1807,12 @@ export function assembleReportBody(
   sources: SourceRecord[]
 ): { body: string; cited: SourceRecord[]; ordered: SourceRecord[] } {
   // Strip a leading H1 first so the doc title isn't doubled by the model's own.
+  // Final net: every path lands here — sectioned, single-merge, and the
+  // revision passes — so a truncated tail from ANY of them is cleaned once,
+  // right before the Sources list is appended. Cheap, and it means a new
+  // synthesis path cannot reintroduce visible debris by forgetting to trim.
   const { text: linkedSynthesis, cited } = linkifyReportCitations(
-    stripStageBriefPseudoCitations(stripLeadingTitle(synthesis, topic)), sources);
+    trimTruncatedTail(stripStageBriefPseudoCitations(stripLeadingTitle(synthesis, topic))), sources);
   const unique = dedupeSourceRecords(sources).filter(r => r.url || r.title);
   const citedKeys = new Set(cited.map(r => r.docId || r.url));
   const ordered = [...cited, ...unique.filter(r => !citedKeys.has(r.docId || r.url))];
@@ -3046,7 +3051,10 @@ export function normalizeSection(out: string, heading: string): string | null {
   const lead = /^##\s+([^\n]*)\n+/.exec(text);
   if (lead) text = text.slice(lead[0].length).trim();
   text = `## ${heading}\n\n${text}`;
-  return stripModelBibliography(text);
+  // Generation can stop mid-structure — one section ended on a table header
+  // with no delimiter row, which renders as a stray line of pipes. The cause is
+  // an output cap upstream, but shipping the debris is a choice.
+  return trimTruncatedTail(stripModelBibliography(text));
 }
 
 /**
@@ -3184,7 +3192,7 @@ ${RESEARCH_CITATION_RULES}`;
   try {
     const capSys =
       `You are finishing the definitive report on: "${topic}". The body sections are WRITTEN — do not rewrite them.
-Produce EXACTLY three blocks separated by these delimiter lines:
+Produce EXACTLY three blocks separated by these delimiter lines, copied VERBATIM — do not expand, rename, or translate them (they are parsed, not read):
 (block 1) A 1-2 paragraph executive overview of the whole report — authoritative prose, NO heading, no "Abstract:" label.
 ---CONTRADICTIONS---
 (block 2) A "## Contradictions & Open Questions" section: where sources disagree (and which side is stronger), which load-bearing claims rest on a single source, what remains unverified.
@@ -3202,20 +3210,21 @@ ${RESEARCH_LANGUAGE_RULE}`;
       30_000
     );
 
-    let exec = '', contradictions = '', verdict = '';
-    if (cap.includes('---CONTRADICTIONS---')) {
-      const [a, rest] = cap.split('---CONTRADICTIONS---');
-      const [b, c] = (rest || '').split('---VERDICT---');
-      exec = a.trim(); contradictions = (b || '').trim(); verdict = (c || '').trim();
-    } else {
-      // Tolerate a dropped delimiter: split on the headings themselves.
-      const ci = cap.search(/##\s*Contradictions/i);
-      const vi = cap.search(/##\s*Verdict/i);
-      exec = (ci > 0 ? cap.slice(0, ci) : cap).trim();
-      contradictions = ci >= 0 ? cap.slice(ci, vi > ci ? vi : undefined).trim() : '';
-      verdict = vi >= 0 ? cap.slice(vi).trim() : '';
+    // Delimiter parsing lives in lib/report-repair.ts and classifies a fence by
+    // the KEYWORD it contains. The previous exact-match version broke on a model
+    // that wrote `---CONTRADICTIONS & OPEN QUESTIONS---`: the split found
+    // nothing, the heading fallback found nothing (the fence replaced the
+    // heading), and the WHOLE capstone became the executive overview — raw
+    // fence lines at the top of the report and no Verdict at the bottom.
+    let { exec, contradictions, verdict } = splitCapstone(cap);
+    exec = trimTruncatedTail(exec.replace(/^#+\s+[^\n]*\n+/, '').trim()); // no heading on the opener
+    // Canonical headings, so a paraphrased fence can never reach the reader.
+    if (contradictions && !/^#{1,3}\s/.test(contradictions)) {
+      contradictions = `## Contradictions & Open Questions\n\n${contradictions}`;
     }
-    exec = exec.replace(/^#+\s+[^\n]*\n+/, '').trim(); // no heading on the opener
+    if (verdict && !/^#{1,3}\s/.test(verdict)) verdict = `## Verdict\n\n${verdict}`;
+    contradictions = trimTruncatedTail(contradictions);
+    verdict = trimTruncatedTail(verdict);
     const parts = [exec, body, contradictions, verdict].filter(Boolean);
     crumb('synth', 'sectioned done', { sections: written.length, failed, words: parts.join(' ').split(/\s+/).length });
     return parts.join('\n\n');
