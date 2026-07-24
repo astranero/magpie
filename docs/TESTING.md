@@ -94,9 +94,18 @@ see by construction.
   against a live server, IME composition (cannot be simulated in
   Playwright — `lib/ime.ts` is unit-tested and the wiring verified by
   reading), and the panel's own appearance (no React testing library).
-- Load-sensitive: `debug-page-detection`'s perf assertion has a hard 15 ms
-  budget and `e2e/link-preview` budgets 20 s for a capture whose own
-  comment notes the Jina path takes ~20 s. Both fail intermittently on a
-  busy machine without anything being wrong. Re-run before believing
-  either — and before suspecting your own change, which is the trap they
-  set.
+- `debug-page-detection`'s perf assertion is now OPT-IN. Run it with
+  `PERF=1 npx vitest run`; the default suite skips it. Vitest executes
+  files in parallel workers, so the detector competes for CPU with
+  whatever else is running, and three successive attempts at a
+  load-tolerant statistic all still failed on a clean tree — an absolute
+  15 ms budget (measured 15-17 ms with nothing changed), a best-of-two
+  ratio (2.1x alone, 4.6x under load), and a median of fifteen pairs
+  (failed one run in three). A test that is red on an unmodified
+  checkout trains you to skim past red, so it is gated rather than
+  tuned again. Its comment records the measured curve.
+- Still load-sensitive: `e2e/link-preview` budgets 20 s for a capture
+  whose own comment notes the Jina path takes ~20 s. It fails
+  intermittently on a busy machine without anything being wrong. Re-run
+  before believing it — and before suspecting your own change, which is
+  the trap it sets.
