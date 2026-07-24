@@ -1768,7 +1768,11 @@ async function runAcademicAgent(
   if (activeQuality === 'high') {
     const nowYear = new Date().getFullYear();
     const before = deduped.length;
-    const kept = deduped.filter(p => (p.citations ?? 0) >= 10 || Number(p.year) >= nowYear - 1);
+    // UNKNOWN citations (PubMed-only papers carry none) are not the same as
+    // ZERO. Dropping a paper because we didn't fetch its citation count would
+    // silently exclude landmark biomedical work; keep it and let ranking sort
+    // it. Only a KNOWN-low, non-recent paper is filtered.
+    const kept = deduped.filter(p => p.citations === undefined || p.citations >= 10 || Number(p.year) >= nowYear - 1);
     // Only apply the floor when it doesn't starve the agent
     if (kept.length >= 5) {
       deduped.length = 0;
