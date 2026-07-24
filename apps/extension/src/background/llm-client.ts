@@ -131,6 +131,12 @@ export async function chatWithCustomStream(
    * don't pass it get exactly today's behaviour — the reasoning is discarded.
    */
   onReasoningRaw?: (delta: string) => void,
+  /**
+   * OpenAI-style content parts for the user turn, e.g. text + an image. When
+   * given, replaces `userPrompt` as the user message content so a vision model
+   * can read the attachment. `userPrompt` is still used for the fallback text.
+   */
+  userContent?: Array<{ type: 'text'; text: string } | { type: 'image_url'; image_url: { url: string } }>,
 ): Promise<void> {
   // F1: coalesce SSE tokens to reduce IPC/render pressure.
   const FLUSH_MS = 40;
@@ -208,7 +214,7 @@ export async function chatWithCustomStream(
       messages: [
         { role: 'system', content: systemPrompt },
         ...history,
-        { role: 'user', content: userPrompt }
+        { role: 'user', content: userContent && userContent.length ? userContent : userPrompt }
       ],
       temperature: 0.2,
       stream: true
@@ -291,6 +297,78 @@ export interface ToolCall { id: string; name: string; args: any }
 function safeParseArgs(raw: unknown): any {
   if (typeof raw !== 'string') return raw ?? {};
   try { return JSON.parse(raw); } catch { return {}; }
+}
+
+/**
+ * A turn that may return images (image-generation models).
+ *
+ * NON-streaming on purpose: providers deliver generated images in the final
+ * message, not as SSE deltas, and the `modalities` hint is rejected by
+ * providers that don't do image output — so this path is only ever taken when
+ * the user turned image output ON, never for normal chat.
+ *
+ * Parses both shapes seen in the wild: a `message.images[]` array (OpenRouter)
+ * and `image_url` content parts. Returns the text and every image data-URL; if
+ * the model returned no image, `images` is empty and the turn is just its text.
+ */
+export async function chatWithImages(
+  systemPrompt: string,
+  history: any[],
+  userContent: Array<{ type: 'text'; text: string } | { type: 'image_url'; image_url: { url: string } }>,
+  signal: AbortSignal,
+  modelOverride?: string,
+): Promise<{ text: string; images: string[] }> {
+  const { apiKey, endpoint, model: defaultModel, isCopilot } = await getProviderSettings();
+  const model = modelOverride || defaultModel;
+  if (!endpoint) throw new Error('Custom endpoint missing.');
+  const headers = buildProviderHeaders(apiKey, !!isCopilot);
+
+  const res = await fetch(endpoint, {
+    method: 'POST',
+    headers,
+    signal,
+    body: JSON.stringify({
+      model,
+      messages: [
+        { role: 'system', content: systemPrompt },
+        ...history,
+        { role: 'user', content: userContent },
+      ],
+      // The hint that asks for image output. Only sent on this opted-in path.
+      modalities: ['image', 'text'],
+      temperature: 0.7,
+    }),
+  });
+  if (!res.ok) {
+    const errText = await res.text().catch(() => '');
+    throw new Error(formatProviderError(res.status, errText));
+  }
+
+  const data = await res.json();
+  const msg = data.choices?.[0]?.message ?? {};
+  const images: string[] = [];
+
+  // Shape 1: a top-level images array (OpenRouter image models).
+  for (const im of (Array.isArray(msg.images) ? msg.images : [])) {
+    const url = typeof im === 'string' ? im : im?.image_url?.url ?? im?.url;
+    if (typeof url === 'string' && url.startsWith('data:image/')) images.push(url);
+  }
+
+  // Shape 2: image_url content parts. `content` may be a string or an array.
+  let text = '';
+  if (typeof msg.content === 'string') {
+    text = msg.content;
+  } else if (Array.isArray(msg.content)) {
+    for (const part of msg.content) {
+      if (part?.type === 'text' && typeof part.text === 'string') text += part.text;
+      else if (part?.type === 'image_url') {
+        const url = part.image_url?.url;
+        if (typeof url === 'string' && url.startsWith('data:image/')) images.push(url);
+      }
+    }
+  }
+
+  return { text: text.trim(), images };
 }
 
 /**

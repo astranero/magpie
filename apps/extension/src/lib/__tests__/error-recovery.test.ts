@@ -65,6 +65,20 @@ describe('diagnoseError', () => {
     expect(diagnoseError('Cancelled').action).toBe('none');
   });
 
+  it('names an image-input failure and routes to a vision model', () => {
+    for (const raw of [
+      "This model does not support image input.",
+      'Vision is not supported by this model',
+      "400: modality 'image' not supported",
+      'Unsupported media type (415)',
+      'image_url is not accepted by model gpt-4-text',
+    ]) {
+      const d = diagnoseError(raw);
+      expect(d.action, raw).toBe('settings');
+      expect(d.actionLabel, raw).toMatch(/vision/i);
+    }
+  });
+
   it('falls through to retry for anything unrecognised', () => {
     const d = diagnoseError('some brand new error nobody has seen');
     expect(d.action).toBe('retry');

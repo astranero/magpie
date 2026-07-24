@@ -52,6 +52,9 @@ export interface ChatMessage {
    *  prefixed system message the worker persists so the failure survives the
    *  history reconcile. */
   error?: string;
+  /** Images on this turn as data URLs: the user's attachment or images the
+   *  model generated. Rendered as thumbnails under the bubble. */
+  images?: string[];
 }
 
 /**

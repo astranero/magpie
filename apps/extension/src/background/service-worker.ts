@@ -32,7 +32,7 @@ import { replaceChunksForDoc } from '../lib/db';
 import { pdfUrlToBody, pdfOpfsToBody, pdfBase64ToBody, ensureOffscreen as ensureOffscreenDoc, recreateOffscreen } from '../lib/pdf-parser';
 import { setEnsureOffscreen, setRecreateOffscreen, sendToOffscreen } from '../lib/offscreen-client';
 import { crumb, dumpCrashLog, installCrashHandlers, installCrumbReceiver } from '../lib/crash-log';
-import { getProviderSettings, buildProviderHeaders, chatWithCustom, chatWithCustomStream, handleFetchCustomModels, chatWithTools, ToolDef } from './llm-client';
+import { getProviderSettings, buildProviderHeaders, chatWithCustom, chatWithCustomStream, chatWithImages, handleFetchCustomModels, chatWithTools, ToolDef } from './llm-client';
 import { handleSearchLibrary, handleRecallDocs } from './library-handlers';
 import { handleLinkDocument, handleUnlinkDocument, handleListDocuments, handleGetDocument, handleDeleteDocument, handleGetDocumentCount, handleUpdateDocumentSelection } from './document-handlers';
 import { handleCreateProject, handleListProjects, handleGetProject, handleUpdateProject, handleDeleteProject, handleCreateChat, handleListChats, handleDeleteChat, handleUpdateChat } from './project-handlers';
@@ -2818,6 +2818,10 @@ chrome.runtime.onConnect.addListener((port) => {
     const chatId = req.chatId as string;
     const projectId = req.projectId as string;
     const systemPromptOverride = req.systemPromptOverride as string | undefined;
+    // An attached image (already downscaled in the panel) for this turn, and
+    // whether the user opted into image output. Both are per-turn.
+    const imageDataUrl = typeof req.imageDataUrl === 'string' ? req.imageDataUrl : undefined;
+    const allowImageOutput = !!req.allowImageOutput;
     if (!prompt || !chatId || !projectId) {
       safePost({ type: 'ERROR', error: 'prompt, chatId and projectId are required' });
       return;
@@ -2828,6 +2832,9 @@ chrome.runtime.onConnect.addListener((port) => {
     abortControllers.set(chatId, controller);
     const localController = controller;
     let full = '';
+    // Images the model generated this turn (feature: image output). Attached to
+    // the saved assistant message and sent on DONE so the local panel shows them.
+    let generatedImages: string[] = [];
 
     // Emit a token to the initiating port AND broadcast it so other sidepanel
     // instances of the same chat render the answer LIVE (not just spinner → final
@@ -2899,7 +2906,8 @@ chrome.runtime.onConnect.addListener((port) => {
         role: 'user',
         text: prompt,
         timestamp: new Date().toISOString(),
-        provider: 'custom'
+        provider: 'custom',
+        ...(imageDataUrl ? { images: [imageDataUrl] } : {}),
       });
 
       // Tell OTHER sidepanel instances a question is in flight for this chat so
@@ -2950,8 +2958,13 @@ chrome.runtime.onConnect.addListener((port) => {
       const cmdTemplate = storage.cliCommandTemplate || CLI_TEMPLATE_AUTO;
       const companionUrl = storage.localMcpCompanionUrl || DEFAULT_COMPANION_MCP_URL;
 
+      // The local CLI takes text only. An attached image, or an image-output
+      // request, must go straight to the provider — never route it through the
+      // CLI, which would silently drop the image.
       let useCli = false;
-      if (routeChat === 'enabled' || routeChat === true) {
+      if (imageDataUrl || allowImageOutput) {
+        useCli = false;
+      } else if (routeChat === 'enabled' || routeChat === true) {
         useCli = true;
       } else if (routeChat === 'auto') {
         try {
@@ -2989,10 +3002,29 @@ chrome.runtime.onConnect.addListener((port) => {
       }
 
       if (!cliSuccess) {
-        await chatWithCustomStream(
-          systemPrompt, formattedHistory, prompt, localController.signal, emitAnswerDelta,
-          undefined, emitReasoning,
-        );
+        // Route by what the turn needs. Vision model override: an attachment
+        // goes to the configured vision model when there is one, else the
+        // default (many are multimodal). Same `.trim()` guard imageToText uses
+        // for the whitespace-only sentinel.
+        const { visionModel } = await getProviderSettings();
+        const visionOverride = imageDataUrl ? (visionModel?.trim() || undefined) : undefined;
+        const userContent = imageDataUrl
+          ? [{ type: 'text' as const, text: prompt }, { type: 'image_url' as const, image_url: { url: imageDataUrl } }]
+          : undefined;
+
+        if (allowImageOutput) {
+          // Non-streaming: image models return the picture in the final message.
+          const uc = userContent ?? [{ type: 'text' as const, text: prompt }];
+          const out = await chatWithImages(systemPrompt, formattedHistory, uc, localController.signal, visionOverride);
+          generatedImages = out.images;
+          if (out.text) emitAnswerDelta(out.text);
+          else if (out.images.length) emitAnswerDelta('*(image generated)*');
+        } else {
+          await chatWithCustomStream(
+            systemPrompt, formattedHistory, prompt, localController.signal, emitAnswerDelta,
+            visionOverride, emitReasoning, userContent,
+          );
+        }
       }
 
       // RELIABLE NET: the score gate can still let a workspace-grounded turn
@@ -3057,17 +3089,18 @@ chrome.runtime.onConnect.addListener((port) => {
       }
 
 
-      if (full.trim()) {
+      if (full.trim() || generatedImages.length) {
         const { model: usedModel } = await getProviderSettings();
         await saveChatMessage({
           chatId,
           role: 'assistant',
           text: full,
           timestamp: new Date().toISOString(),
-          provider: usedModel || 'custom'
+          provider: usedModel || 'custom',
+          ...(generatedImages.length ? { images: generatedImages } : {}),
         });
       }
-      safePost({ type: 'DONE', fullText: full });
+      safePost({ type: 'DONE', fullText: full, images: generatedImages });
 
       // FOLLOW-UPS — after DONE, so they never delay the answer. A separate
       // call rather than a tail instruction on the answer prompt: the codebase

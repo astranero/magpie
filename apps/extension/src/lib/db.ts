@@ -95,6 +95,11 @@ export interface ChatMessage {
   citations?: CitationRef[];
   timestamp: string;
   provider?: string;
+  /** Images on this turn as data URLs: the user's attachment, or images the
+   *  model generated. Local-only — chat is not uploaded to Drive — and bounded
+   *  by the downscale applied before an attachment is stored. IndexedDB records
+   *  are schemaless, so this needs no store-version bump. */
+  images?: string[];
 }
 
 export interface CitationRef {

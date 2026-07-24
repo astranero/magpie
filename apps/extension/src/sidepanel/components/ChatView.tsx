@@ -5,7 +5,7 @@ import remarkGfm from 'remark-gfm';
 import remarkMath from 'remark-math';
 import rehypeKatex from 'rehype-katex';
 import { LocalDocument, ChatMessage, ResearchPlan, ResolvedCitation } from '../types';
-import { Send, StopCircle, Sparkles, ChevronDown, ChevronUp, Loader2, Microscope, Search, BookOpen, User, Copy, Check, Paperclip, FileText, RotateCcw, Pencil, Globe, Newspaper, Plug, PenLine, ShieldCheck, CheckCircle2, XCircle } from 'lucide-react';
+import { Send, StopCircle, Sparkles, ChevronDown, ChevronUp, Loader2, Microscope, Search, BookOpen, User, Copy, Check, Paperclip, FileText, RotateCcw, Pencil, Globe, Newspaper, Plug, PenLine, ShieldCheck, CheckCircle2, XCircle, Image as ImageIcon } from 'lucide-react';
 import { parseResearchActivity, PHASE_ORDER, PHASE_LABEL, type ResearchPhase } from '../../lib/research-activity';
 import { diagnoseError } from '../../lib/error-recovery';
 import { continueList } from '../../lib/list-continue';
@@ -51,6 +51,15 @@ interface ChatViewProps {
   onOpenSettings?: () => void;
   /** Re-run the last question — the recovery action for a transient failure. */
   onRetryLast?: () => void;
+  /** The image attached to the next send (downscaled data URL), or null. */
+  pendingImage?: string | null;
+  /** User picked an image file to attach. */
+  onAttachImage?: (file: File) => void;
+  /** Remove the pending attachment. */
+  onClearImage?: () => void;
+  /** Whether the model may return images this turn. */
+  imageOutput?: boolean;
+  onImageOutputChange?: (v: boolean) => void;
   researching: Record<string, boolean>;
   researchLogs: Record<string, string[]>;
   documents: LocalDocument[];
@@ -986,9 +995,11 @@ const ModelRefreshFooter: React.FC<{ onRefresh?: () => Promise<void> }> = ({ onR
 const AddContextButton: React.FC<{
   onUploadMarkdown: () => void;
   onUploadPdf: () => void;
-}> = ({ onUploadMarkdown, onUploadPdf }) => {
+  onAttachImage?: (file: File) => void;
+}> = ({ onUploadMarkdown, onUploadPdf, onAttachImage }) => {
   const [isOpen, setIsOpen] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
+  const imageInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     const handleOutsideClick = (e: MouseEvent) => {
@@ -1049,7 +1060,38 @@ const AddContextButton: React.FC<{
               <div className="text-[10px] text-muted-foreground mt-0.5 leading-normal">Import structured notes, outlines, or text.</div>
             </div>
           </button>
+
+          {onAttachImage && (
+            <button
+              type="button"
+              onClick={() => { imageInputRef.current?.click(); }}
+              className="w-full text-left p-2 rounded-lg hover:bg-accent text-foreground flex items-start gap-3 transition-colors group"
+            >
+              <div className="h-8 w-8 rounded-lg bg-emerald-500/10 text-emerald-600 flex items-center justify-center shrink-0 group-hover:bg-emerald-500/20 transition-colors">
+                <ImageIcon size={16} />
+              </div>
+              <div className="min-w-0 flex-1">
+                <div className="text-xs font-semibold">Attach image</div>
+                <div className="text-[10px] text-muted-foreground mt-0.5 leading-normal">Send with your message. Needs a vision model.</div>
+              </div>
+            </button>
+          )}
         </div>
+      )}
+
+      {onAttachImage && (
+        <input
+          ref={imageInputRef}
+          type="file"
+          accept="image/*"
+          className="hidden"
+          onChange={e => {
+            const file = e.target.files?.[0];
+            if (file) onAttachImage(file);
+            e.target.value = '';       // allow re-picking the same file
+            setIsOpen(false);
+          }}
+        />
       )}
     </div>
   );
@@ -1078,6 +1120,11 @@ export const ChatView: React.FC<ChatViewProps> = ({
   onEditAndRerun,
   onOpenSettings,
   onRetryLast,
+  pendingImage,
+  onAttachImage,
+  onClearImage,
+  imageOutput,
+  onImageOutputChange,
   researching,
   researchLogs,
   documents,
@@ -1399,6 +1446,22 @@ export const ChatView: React.FC<ChatViewProps> = ({
               </ErrorBoundary>
             </div>
 
+            {/* Images on this turn — the user's attachment or ones the model
+                generated. Click to open full-size in a new tab. */}
+            {m.images && m.images.length > 0 && (
+              <div className="flex flex-wrap gap-2 mt-1.5 px-1">
+                {m.images.map((src, i) => (
+                  <a key={i} href={src} target="_blank" rel="noopener noreferrer" className="block">
+                    <img
+                      src={src}
+                      alt={m.role === 'user' ? 'Attached image' : 'Generated image'}
+                      className="max-h-48 max-w-[85%] rounded-lg border border-border object-contain"
+                    />
+                  </a>
+                ))}
+              </div>
+            )}
+
             {/* Action row for the user's own messages */}
             {m.role === 'user' && !m.queued && editingId !== m.id && onEditAndRerun && (
               <div className="flex items-center gap-2 px-1 mt-0.5 opacity-0 hover:opacity-100 focus-within:opacity-100 transition-opacity">
@@ -1496,9 +1559,9 @@ export const ChatView: React.FC<ChatViewProps> = ({
             The router already decides this well; the control exists so the
             decision is visible and can be overruled, which is what a silent
             router earns. */}
-        {onSourceModeChange && (
+        {(onSourceModeChange || onImageOutputChange) && (
           <div className="flex items-center gap-0.5 px-1 pb-1" role="radiogroup" aria-label="Answer source">
-            {([
+            {onSourceModeChange && ([
               ['auto', 'Auto', 'Let Magpie decide'],
               ['sources', 'Sources', 'Only my saved sources'],
               ['web', 'Web', 'Search the web'],
@@ -1520,6 +1583,41 @@ export const ChatView: React.FC<ChatViewProps> = ({
                 {label}
               </button>
             ))}
+            {/* Image output: off by default. Only when on does the turn ask the
+                provider for images (a param some providers reject), so normal
+                chat is never at risk. */}
+            {onImageOutputChange && (
+              <button
+                type="button"
+                role="switch"
+                aria-checked={!!imageOutput}
+                title="Let the model return images (needs an image-capable model)"
+                onClick={() => onImageOutputChange(!imageOutput)}
+                className={`ml-auto flex items-center gap-1 text-[10px] font-medium px-2 py-0.5 rounded-full transition-colors ${
+                  imageOutput ? 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-400' : 'text-muted-foreground hover:text-foreground hover:bg-accent'
+                }`}
+              >
+                <ImageIcon size={11} /> Images
+              </button>
+            )}
+          </div>
+        )}
+
+        {/* Pending attachment: a thumbnail chip above the pill, removable. */}
+        {pendingImage && (
+          <div className="px-1 pb-1.5">
+            <div className="inline-flex items-center gap-2 rounded-lg border border-border bg-card p-1 pr-2 shadow-sm">
+              <img src={pendingImage} alt="Attachment preview" className="h-9 w-9 rounded object-cover" />
+              <span className="text-[10px] text-muted-foreground">Image attached</span>
+              <button
+                type="button"
+                onClick={() => onClearImage?.()}
+                aria-label="Remove attachment"
+                className="rounded p-0.5 text-muted-foreground hover:bg-accent hover:text-foreground"
+              >
+                <XCircle size={13} />
+              </button>
+            </div>
           </div>
         )}
 
@@ -1567,6 +1665,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
           <AddContextButton
             onUploadMarkdown={onUploadMarkdown!}
             onUploadPdf={onUploadPdf!}
+            onAttachImage={onAttachImage}
           />
 
           <textarea

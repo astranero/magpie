@@ -201,3 +201,29 @@ test('Enter continues a list instead of sending; empty item ends it', async () =
   await expect(answersIn(page)).toHaveCount(answersBefore + 1, { timeout: 15000 });
   await page.close();
 });
+
+test('an attached image shows a chip, rides the send, then clears', async () => {
+  const page = await context.newPage();
+  await openChat(page);
+
+  const px = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
+  await page.getByRole('button', { name: /add files/i }).click();
+  await page.locator('input[type="file"][accept="image/*"]').setInputFiles({
+    name: 'shot.png', mimeType: 'image/png', buffer: Buffer.from(px, 'base64'),
+  });
+  // Chip appears.
+  await expect(page.getByText('Image attached')).toBeVisible({ timeout: 8000 });
+
+  const answersBefore = await answersIn(page).count();
+  const input = page.getByPlaceholder(/Ask a question/i);
+  await input.fill('What is in this image?');
+  await input.press('Enter');
+
+  // The turn goes through (mock answers), and the chip is gone — the image
+  // rides one send only.
+  await expect(answersIn(page)).toHaveCount(answersBefore + 1, { timeout: 15000 });
+  await expect(page.getByText('Image attached')).toHaveCount(0);
+  // The user bubble shows the attachment it was sent with.
+  await expect(page.getByRole('img', { name: /attached image/i }).first()).toBeVisible();
+  await page.close();
+});

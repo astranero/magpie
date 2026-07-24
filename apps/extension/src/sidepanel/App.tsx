@@ -81,6 +81,41 @@ function sameStrings(a: string[], b: string[]): boolean {
   return a.length === b.length && a.every((value, index) => value === b[index]);
 }
 
+/**
+ * Downscale an image file to a JPEG data URL, longest edge capped.
+ *
+ * Vision models are billed by image tokens and the result is stored in an
+ * IndexedDB row, so a 12-megapixel phone photo is downscaled before either.
+ * 1024px is enough to read a screenshot; the constant is the one knob to raise
+ * if fine text matters more than size. Falls back to the original data URL if
+ * the canvas path fails (e.g. a format the browser won't decode).
+ */
+const MAX_IMAGE_EDGE = 1024;
+function downscaleImage(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error('Could not read the image file.'));
+    reader.onload = () => {
+      const dataUrl = String(reader.result || '');
+      const img = new Image();
+      img.onerror = () => resolve(dataUrl);   // undecodable → send as-is, let the model decide
+      img.onload = () => {
+        const scale = Math.min(1, MAX_IMAGE_EDGE / Math.max(img.width, img.height));
+        if (scale >= 1) { resolve(dataUrl); return; }   // already small enough
+        const canvas = document.createElement('canvas');
+        canvas.width = Math.round(img.width * scale);
+        canvas.height = Math.round(img.height * scale);
+        const ctx = canvas.getContext('2d');
+        if (!ctx) { resolve(dataUrl); return; }
+        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+        resolve(canvas.toDataURL('image/jpeg', 0.8));
+      };
+      img.src = dataUrl;
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
 export default function App() {
   // Chat is the first-run default; after that the panel reopens on whatever
   // view it was closed in (restored below — 'document' is transient, so its
@@ -364,6 +399,15 @@ loadChatHistory(activeChatId).then(() => {
   const [followUps, setFollowUps] = useState<Record<string, string[]>>({});
   // Where answers may come from. 'auto' is the router deciding, as before.
   const [sourceMode, setSourceMode] = useState<'auto' | 'sources' | 'web' | 'general'>('auto');
+  // An image attached to the NEXT send (data URL, already downscaled), and
+  // whether the user opted into image output. Read via refs in `send` for the
+  // same stale-closure reason inputRef exists.
+  const [pendingImage, setPendingImage] = useState<string | null>(null);
+  const pendingImageRef = useRef<string | null>(null);
+  useEffect(() => { pendingImageRef.current = pendingImage; }, [pendingImage]);
+  const [imageOutput, setImageOutput] = useState(false);
+  const imageOutputRef = useRef(false);
+  useEffect(() => { imageOutputRef.current = imageOutput; }, [imageOutput]);
   const [researching, setResearching] = useState<Record<string, boolean>>({});
   const [researchLogs, setResearchLogs] = useState<Record<string, string[]>>({});
   const msgEnd = useRef<HTMLDivElement>(null);
@@ -1237,6 +1281,7 @@ loadChatHistory(activeChatId).then(() => {
           setAutoLinkCaptures(r.autoLinkCaptures !== false); // default ON
           setIncludePageContext(r.includePageContext !== false); // default ON
           if (r.chatSourceMode) setSourceMode(r.chatSourceMode as any);
+          if (typeof r.chatImageOutput === 'boolean') setImageOutput(r.chatImageOutput);
           setSyncResearchSources(r.syncResearchSources === true); // default OFF
           if (typeof r.routeChatThroughCli === 'boolean') {
             setRouteChatThroughCli(r.routeChatThroughCli ? 'enabled' : 'disabled');
@@ -1942,7 +1987,11 @@ loadChatHistory(activeChatId).then(() => {
     }
 
     maybeAutoNameProject(messageText).catch(() => {});
-    await runChatStream(currentChatId, currentProjectId, messageText, forcePageContext);
+    // Consume the pending image and image-output preference for this send only.
+    const imageDataUrl = pendingImageRef.current || undefined;
+    const allowImageOutput = imageOutputRef.current;
+    if (imageDataUrl) setPendingImage(null);
+    await runChatStream(currentChatId, currentProjectId, messageText, forcePageContext, undefined, { imageDataUrl, allowImageOutput });
   };
 
   /**
@@ -2016,9 +2065,12 @@ loadChatHistory(activeChatId).then(() => {
    */
   const runChatStream = (
     currentChatId: string, currentProjectId: string, messageText: string,
-    forcePageContext: boolean, existingUserMsgId?: string
+    forcePageContext: boolean, existingUserMsgId?: string,
+    opts?: { imageDataUrl?: string; allowImageOutput?: boolean }
   ): Promise<void> => new Promise<void>((resolve) => {
     const assistantId = uid();
+    const imageDataUrl = opts?.imageDataUrl;
+    const allowImageOutput = opts?.allowImageOutput;
 
     if (existingUserMsgId) {
       setMessages(prev => {
@@ -2034,7 +2086,8 @@ loadChatHistory(activeChatId).then(() => {
         ...prev,
         [currentChatId]: [...(prev[currentChatId] || []), {
           id: uid(), role: 'user' as const,
-          text: forcePageContext ? `[📄 Current Page] ${messageText}` : messageText
+          text: forcePageContext ? `[📄 Current Page] ${messageText}` : messageText,
+          ...(imageDataUrl ? { images: [imageDataUrl] } : {}),
         }]
       }));
     }
@@ -2082,6 +2135,20 @@ loadChatHistory(activeChatId).then(() => {
         setThinkingStatus(prev => prev[currentChatId] ? { ...prev, [currentChatId]: '' } : prev);
         pushDelta(currentChatId, assistantId, m.text);
       } else if (m?.type === 'DONE') {
+        // Generated images arrive whole at the end (non-streaming path) —
+        // attach them to the finalized assistant message so the local panel
+        // shows them without waiting for a history reload.
+        const imgs = Array.isArray(m.images) ? (m.images as string[]) : [];
+        if (imgs.length) {
+          setMessages(prev => {
+            const list = prev[currentChatId] || [];
+            const idx = list.findIndex(x => x.id === assistantId);
+            if (idx === -1) return prev;
+            const copy = [...list];
+            copy[idx] = { ...copy[idx], images: imgs };
+            return { ...prev, [currentChatId]: copy };
+          });
+        }
         finalizeStreamingMessage(currentChatId, assistantId);
         finish();
         port.disconnect();
@@ -2109,7 +2176,9 @@ loadChatHistory(activeChatId).then(() => {
       chatId: currentChatId,
       projectId: currentProjectId,
       includePageContext: includePageContext || forcePageContext,
-      sourceMode
+      sourceMode,
+      ...(imageDataUrl ? { imageDataUrl } : {}),
+      ...(allowImageOutput ? { allowImageOutput: true } : {}),
     });
   });
 
@@ -2454,6 +2523,17 @@ loadChatHistory(activeChatId).then(() => {
               onEditAndRerun={editAndRerun}
               onOpenSettings={() => setView('settings')}
               onRetryLast={retryLast}
+              pendingImage={pendingImage}
+              onAttachImage={async (file) => {
+                try { setPendingImage(await downscaleImage(file)); }
+                catch { showToast('error', 'Could not read that image.'); }
+              }}
+              onClearImage={() => setPendingImage(null)}
+              imageOutput={imageOutput}
+              onImageOutputChange={(v) => {
+                setImageOutput(v);
+                try { chrome.storage.local.set({ chatImageOutput: v }); } catch { /* private mode */ }
+              }}
               researching={researching}
               isActive={view === 'chat'}
               llmEndpointLocal={/^https?:\/\/(localhost|127\.0\.0\.1|0\.0\.0\.0|\[?::1\]?)(:|\/|$)/i.test(customUrl.trim())}

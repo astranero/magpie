@@ -75,6 +75,15 @@ export function diagnoseError(raw: string | null | undefined): Diagnosis {
   if (has(s, '429', 'rate-limit', 'rate limit', 'too many requests'))
     return retry('The provider rate-limited the request.');
 
+  // The model was sent an image it cannot read. The user asked to be TOLD this
+  // rather than have it silently fall back, so it routes to Settings to pick a
+  // vision model. Checked before the generic model/415 cases below so the
+  // message names the actual problem.
+  if (has(s, 'vision', 'multimodal', 'modalit') ||
+      (has(s, 'image') && has(s, 'not support', 'unsupported', 'cannot', "can't", 'invalid', '415', 'unable')) ||
+      has(s, 'image_url', 'unsupported media type', '415'))
+    return settings("This model can't read images.", 'Pick a vision model');
+
   // Wrong or unavailable model: a Settings fix (pick another model).
   if ((has(s, 'model') && has(s, 'not found', 'does not exist', 'no such', 'unavailable', 'decommission', 'invalid model')) || has(s, 'unknown model'))
     return settings('That model is not available.', 'Pick a model');
