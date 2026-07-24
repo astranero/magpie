@@ -76,6 +76,21 @@ export const MagpieEmptyIllustration: React.FC<MarkProps> = ({ size = 72, classN
       <circle cx="24" cy="18" r="17" />
       <circle className="magpie-mark-sun" cx="35" cy="9" r="4.5" />
     </g>
+    {/* Storybook scene dressing — a soft cloud and a distant companion bird
+        drifting across the sky. Shown only under the scene palettes; this is
+        what turns the flat mark into a little Ghibli vignette. */}
+    <g className="magpie-mark-scene">
+      <ellipse cx="11" cy="11" rx="6" ry="2.3" />
+      <ellipse cx="14.5" cy="9.6" rx="3.4" ry="2.1" />
+      <path
+        d="M29.5 12.5 Q31 11 32.5 12.5 Q34 11 35.5 12.5"
+        fill="none"
+        className="stroke-current"
+        strokeWidth="0.9"
+        strokeLinecap="round"
+        opacity="0.55"
+      />
+    </g>
     {/* Card */}
     <rect x="4" y="27" width="40" height="16" rx="2" className="stroke-current opacity-50" strokeWidth="1.6" />
     <line x1="8" y1="32" x2="40" y2="32" stroke="hsl(var(--rule) / 0.8)" strokeWidth="1.6" strokeLinecap="round" />

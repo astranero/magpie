@@ -16,7 +16,6 @@ import { ErrorBoundary } from './ErrorBoundary';
 import { shouldRestoreScroll } from '../../lib/scroll-restore';
 import { reasoningTail } from '../../lib/reasoning-stream';
 import { FlyingMagpie } from './FlyingMagpie';
-import { useScene } from '../hooks/useScene';
 import { isImeComposing } from '../../lib/ime';
 import { stripInvisibleMathOps } from '../../lib/unicode-text';
 import { MagpieEmptyIllustration } from './BrandMark';
@@ -131,7 +130,6 @@ const FieldLog: React.FC<{ log: string[]; onStop: () => void }> = ({ log, onStop
   const act = useMemo(() => parseResearchActivity(log), [log]);
   const LabelIcon = PHASE_ICON[act.latestLabel] || Loader2;
   const activeIdx = PHASE_ORDER.indexOf(act.phase as ResearchPhase);
-  const scene = useScene();
 
   // The raw log is oldest-first; the line you open it to see is the newest, at
   // the bottom. Pin to the bottom on open and on every new line so the latest
@@ -144,7 +142,9 @@ const FieldLog: React.FC<{ log: string[]; onStop: () => void }> = ({ log, onStop
   return (
     <div className="w-full max-w-[95%] rounded-xl ink-panel shadow-card overflow-hidden animate-in fade-in motion-reduce:animate-none">
       <div className="flex items-center gap-2 px-3.5 py-2 border-b border-white/10">
-        <Loader2 size={12} className="animate-spin motion-reduce:animate-none text-highlight shrink-0" aria-hidden="true" />
+        {/* The magpie flaps here while research runs — the "flying magpie while
+            researching". Inked light for the dark panel by the ink-panel rules. */}
+        <FlyingMagpie size={20} className="shrink-0" />
         <span className="text-xs font-medium opacity-80 flex-1">Field log — chat stays open</span>
         <button
           type="button"
@@ -155,16 +155,6 @@ const FieldLog: React.FC<{ log: string[]; onStop: () => void }> = ({ log, onStop
           Stop
         </button>
       </div>
-
-      {/* The flock crosses the sky while research runs — under the scene
-          palettes (Ghibli/Village), which are the ones that have a sky. This
-          is the "flying magpie while researching" the field log earns; the
-          same band the thinking indicator uses, so both read as one weather. */}
-      {scene && (
-        <div className="relative h-11 border-b border-white/10 magpie-band">
-          <FlyingMagpie />
-        </div>
-      )}
 
       <div className="px-3.5 py-3 space-y-3">
         {/* Phase rail: the four stops, the reached ones lit. */}
@@ -861,7 +851,6 @@ const MessageEditor: React.FC<{
 const ThinkingIndicator: React.FC<{ phase?: string; reasoning: string }> = ({ phase, reasoning }) => {
   const [elapsed, setElapsed] = useState(0);
   const [open, setOpen] = useState(false);
-  const scene = useScene();
   useEffect(() => {
     const started = Date.now();
     const t = setInterval(() => setElapsed(Math.floor((Date.now() - started) / 1000)), 1000);
@@ -874,22 +863,10 @@ const ThinkingIndicator: React.FC<{ phase?: string; reasoning: string }> = ({ ph
   return (
     <div className="flex justify-start">
       <div className="max-w-[85%] min-w-0 rounded-lg rounded-bl-sm border bg-card border-border text-card-foreground text-sm shadow-card overflow-hidden">
-        {/* A strip of sky with the flock crossing it, under the scene palettes
-            only — .dark and plain light have no sky for a bird to cross, and a
-            silhouette on a flat card reads as a rendering fault rather than as
-            weather. Waits for 2s so a fast answer does not flash it. */}
-        {scene && elapsed >= 2 && (
-          <div className="relative h-11 border-b border-border/50 magpie-band">
-            <FlyingMagpie />
-          </div>
-        )}
         <div className="px-4 py-3">
         <div className="flex items-center gap-2">
-          <div className="flex space-x-1" aria-hidden="true">
-            <div className="w-1.5 h-1.5 rounded-full bg-primary animate-pulse motion-reduce:animate-none" style={{ animationDelay: '0ms' }} />
-            <div className="w-1.5 h-1.5 rounded-full bg-primary animate-pulse motion-reduce:animate-none" style={{ animationDelay: '150ms' }} />
-            <div className="w-1.5 h-1.5 rounded-full bg-primary animate-pulse motion-reduce:animate-none" style={{ animationDelay: '300ms' }} />
-          </div>
+          {/* The little magpie, flapping on the left while it thinks. */}
+          <FlyingMagpie size={22} className="-ml-0.5" />
           {/* Only the phase is announced. The timer ticks every second and the
               reasoning tail changes constantly — in a live region either would
               make a screen reader chatter continuously. */}

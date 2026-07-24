@@ -31,10 +31,41 @@ import { DriveImportDialog, DriveFile } from '@/sidepanel/components/DriveImport
 // Lazy-load view components — they're heavy (markdown renderer, KaTeX, icons)
 // and only one view is visible at a time. Code-splitting shaves ~600 KB from
 // the initial sidepanel bundle.
-const LoreView = lazy(() => import('./components/LoreView').then(m => ({ default: m.LoreView })));
-const ChatView = lazy(() => import('./components/ChatView').then(m => ({ default: m.ChatView })));
-const SettingsView = lazy(() => import('./components/SettingsView').then(m => ({ default: m.SettingsView })));
-const DocumentView = lazy(() => import('./components/DocumentView').then(m => ({ default: m.DocumentView })));
+//
+// A panel left open across a rebuild references chunk hashes that no longer
+// exist, so the next lazy import throws "Failed to fetch dynamically imported
+// module: …SettingsView-<oldhash>.js" and the view hard-crashes. That is the
+// recurring stale-chunk error. `reloadableImport` self-heals it: on a
+// dynamic-import failure it reloads the panel ONCE (a sessionStorage guard
+// prevents a reload loop if the failure is something other than a stale chunk),
+// which fetches the current index that references the current hashes.
+const CHUNK_RELOAD_KEY = 'magpie-chunk-reload';
+function reloadableImport<T>(factory: () => Promise<T>): Promise<T> {
+  return factory().then((mod) => {
+    // A clean import means the guard did its job (or was never needed): clear
+    // it so a LATER stale build can heal too — one reload per stale build, not
+    // one per session.
+    try { sessionStorage.removeItem(CHUNK_RELOAD_KEY); } catch { /* ignore */ }
+    return mod;
+  }).catch((err) => {
+    let already = false;
+    try { already = sessionStorage.getItem(CHUNK_RELOAD_KEY) === '1'; } catch { /* private mode */ }
+    if (!already && typeof location !== 'undefined') {
+      try { sessionStorage.setItem(CHUNK_RELOAD_KEY, '1'); } catch { /* ignore */ }
+      location.reload();
+      // Never resolve — the reload replaces this document before React renders.
+      return new Promise<T>(() => {});
+    }
+    // Second failure without a successful load in between → genuinely broken,
+    // not a stale chunk. Let the ErrorBoundary show it instead of looping.
+    throw err;
+  });
+}
+
+const LoreView = lazy(() => reloadableImport(() => import('./components/LoreView').then(m => ({ default: m.LoreView }))));
+const ChatView = lazy(() => reloadableImport(() => import('./components/ChatView').then(m => ({ default: m.ChatView }))));
+const SettingsView = lazy(() => reloadableImport(() => import('./components/SettingsView').then(m => ({ default: m.SettingsView }))));
+const DocumentView = lazy(() => reloadableImport(() => import('./components/DocumentView').then(m => ({ default: m.DocumentView }))));
 
 import { findPromptCommand, buildHelpText, loadCustomSkills, SlashCommand } from '../lib/commands';
 import { contentHasTag } from '../lib/frontmatter';

@@ -249,64 +249,43 @@
   .village .magpie-mark-sun { fill: hsl(18 64% 62% / 0.55); }
   .ghibli .magpie-mark-sky circle { fill: hsl(203 62% 86%); }
   .ghibli .magpie-mark-sun { fill: hsl(43 82% 62% / 0.8); }
+  /* Storybook scene dressing (cloud + distant bird), scene palettes only. */
+  .magpie-mark-scene { display: none; }
+  .village .magpie-mark-scene, .ghibli .magpie-mark-scene { display: block; }
+  .village .magpie-mark-scene ellipse { fill: hsl(40 55% 97% / 0.9); }
+  .ghibli .magpie-mark-scene ellipse { fill: hsl(0 0% 100% / 0.9); }
 
-  /* The strip the flock crosses. Each scene paints its own sky, so the band
-     belongs to the palette rather than to the component. */
-  .magpie-band { background: linear-gradient(hsl(var(--muted) / 0.5), transparent); }
-  .village .magpie-band {
-    background: linear-gradient(hsl(42 60% 88% / 0.9), hsl(145 30% 88% / 0.35));
-  }
-  .ghibli .magpie-band {
-    background:
-      radial-gradient(ellipse 40% 70% at 22% 60%, hsl(0 0% 100% / 0.9), transparent 70%),
-      radial-gradient(ellipse 34% 60% at 74% 40%, hsl(0 0% 100% / 0.75), transparent 72%),
-      linear-gradient(hsl(203 66% 80%), hsl(196 60% 90%));
-  }
+  /* ── The little magpie that flaps while it thinks (see FlyingMagpie.tsx) ──
+     A small side-profile bird beside the status text. Only the wing rotates
+     and the body bobs a pixel, both transform-only, so the compositor runs it
+     off the main thread — no stutter under a saturated stream or sync. */
+  .magpie-body { fill: hsl(var(--foreground) / 0.82); }
+  .magpie-wing { fill: hsl(var(--foreground) / 0.68); }
+  .magpie-leg  { color: hsl(var(--foreground) / 0.7); }
+  /* On the dark research field log, ink the bird light instead. */
+  .ink-panel .magpie-body { fill: hsl(var(--ink-panel-fg) / 0.9); }
+  .ink-panel .magpie-wing { fill: hsl(var(--ink-panel-fg) / 0.72); }
+  .ink-panel .magpie-leg  { color: hsl(var(--ink-panel-fg) / 0.7); }
 
-  /* ── The magpie crossing the sky (see FlyingMagpie.tsx) ──
-     Only transform and opacity animate, so the compositor handles it and a
-     saturated main thread does not make the bird stutter. */
-  @keyframes magpie-fly {
-    0%   { transform: translate3d(-22%, 0, 0) rotate(-3deg); opacity: 0; }
-    8%   { opacity: 1; }
-    50%  { transform: translate3d(50%, var(--fly-rise, -10px), 0) rotate(2deg); }
-    92%  { opacity: 1; }
-    100% { transform: translate3d(122%, 0, 0) rotate(-2deg); opacity: 0; }
-  }
-  @keyframes magpie-beat-near {
+  @keyframes magpie-flap {
     0%, 100% { transform: rotate(0deg); }
-    50%      { transform: rotate(38deg); }
+    50%      { transform: rotate(-46deg); }
   }
-  @keyframes magpie-beat-far {
-    0%, 100% { transform: rotate(6deg); }
-    50%      { transform: rotate(-26deg); }
+  @keyframes magpie-bob {
+    0%, 100% { transform: translateY(0); }
+    50%      { transform: translateY(-1px); }
   }
-  .magpie-flier {
-    position: absolute;
-    left: 0;
-    top: var(--fly-top, 20%);
-    will-change: transform, opacity;
-    animation: magpie-fly var(--fly-dur, 15s) linear var(--fly-delay, 0s) infinite;
+  .magpie-flap {
+    /* Pivot at the shoulder so the wing beats, not shears. */
+    transform-origin: 20px 14px;
+    animation: magpie-flap 0.42s ease-in-out infinite;
   }
-  .magpie-body { fill: hsl(var(--foreground) / 0.72); }
-  .magpie-wing {
-    fill: hsl(var(--foreground) / 0.62);
-    /* Pivot at the shoulder, not the box centre, or the wings shear. */
-    transform-origin: 20px 12px;
-  }
-  .magpie-wing-near { animation: magpie-beat-near 0.62s ease-in-out infinite; }
-  .magpie-wing-far  { animation: magpie-beat-far  0.62s ease-in-out infinite; }
+  .magpie-thinker svg { animation: magpie-bob 0.84s ease-in-out infinite; }
 
-  /* Asked not to animate: keep the silhouette, drop the movement. Parked
-     mid-panel rather than at the offscreen 0% keyframe, which would render
-     an empty sky and look like a bug. */
+  /* Asked not to animate: fold the wing to a resting angle, stop the bob. */
   @media (prefers-reduced-motion: reduce) {
-    .magpie-flier {
-      animation: none;
-      transform: translate3d(46%, 0, 0);
-      opacity: 0.85;
-    }
-    .magpie-wing-near, .magpie-wing-far { animation: none; }
+    .magpie-flap { animation: none; transform: rotate(-14deg); }
+    .magpie-thinker svg { animation: none; }
   }
 
   /* Plaster, not flat paint: two very soft washes so large empty areas
@@ -373,10 +352,23 @@
     box-shadow: 0 1px 2px hsl(230 60% 3% / 0.5), 0 2px 10px hsl(230 60% 3% / 0.45);
   }
 
-  /* Sleek modern display voice for report headings and empty-state notes */
+  /* Sleek modern display voice for report headings and empty-state notes.
+     The default (light "plumage") theme: a clean geometric-humanist stack.
+     Each theme below re-voices this so the four palettes read as four
+     distinct type identities — geometric / grotesque / humanist / serif —
+     all from system fonts, no webfont. */
   .font-display {
-    font-family: 'Geist Variable', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+    font-family: 'Avenir Next', 'Segoe UI Variable Display', 'Segoe UI', system-ui, -apple-system, sans-serif;
+    letter-spacing: -0.01em;
+  }
+
+  /* Dark ("plumage at night"): a tighter neo-grotesque — cooler, more
+     technical than the light theme's humanist. */
+  .dark .font-display,
+  .dark .prose-headings-display :is(h1, h2, h3, h4) {
+    font-family: 'Inter', 'Helvetica Neue', 'Segoe UI', Arial, sans-serif;
     letter-spacing: -0.02em;
+    font-weight: 650;
   }
 
   /* Village speaks in a serif — a system stack, so it costs no webfont.
