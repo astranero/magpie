@@ -8,7 +8,7 @@ import { getJob, updateJob, getPage, savePage, listPages } from '../lib/research
 import { pdfUrlToBody, recreateOffscreen } from '../lib/pdf-parser';
 import { splitReportSections, joinReportSections, sectionMatchesFlag, revisionKeptCitations, countCitations } from '../lib/report-sections';
 import { checkContentQuality, extractDoi } from '../lib/quality-gate';
-import { splitCapstone, trimTruncatedTail } from '../lib/report-repair';
+import { splitCapstone, trimTruncatedTail, stripUnresolvableAnchors } from '../lib/report-repair';
 import { isAcademicQuery } from '../lib/query-intent';
 import { getResearchLimits, getResearchDepth, getSynthesisCharBudget, getSourceQuality, getAcademicDepth, RESEARCH_LIMITS, ResearchLimits, SourceQuality, AcademicDepth } from '../lib/research-limits';
 import { getReportLengthSpec } from '../lib/research-limits';
@@ -1811,8 +1811,11 @@ export function assembleReportBody(
   // revision passes — so a truncated tail from ANY of them is cleaned once,
   // right before the Sources list is appended. Cheap, and it means a new
   // synthesis path cannot reintroduce visible debris by forgetting to trim.
-  const { text: linkedSynthesis, cited } = linkifyReportCitations(
+  const { text: linked, cited } = linkifyReportCitations(
     trimTruncatedTail(stripStageBriefPseudoCitations(stripLeadingTitle(synthesis, topic))), sources);
+  // AFTER linkify: anything still shaped like a bare doc id was never a
+  // resolvable anchor, so it can only render as noise.
+  const linkedSynthesis = stripUnresolvableAnchors(linked);
   const unique = dedupeSourceRecords(sources).filter(r => r.url || r.title);
   const citedKeys = new Set(cited.map(r => r.docId || r.url));
   const ordered = [...cited, ...unique.filter(r => !citedKeys.has(r.docId || r.url))];

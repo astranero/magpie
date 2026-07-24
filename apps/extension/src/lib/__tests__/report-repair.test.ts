@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { splitCapstone, trimTruncatedTail } from '../report-repair';
+import { splitCapstone, trimTruncatedTail, stripUnresolvableAnchors } from '../report-repair';
 
 describe('splitCapstone', () => {
   it('splits on the exact delimiters', () => {
@@ -106,5 +106,35 @@ describe('trimTruncatedTail', () => {
 
   it('handles empty input', () => {
     expect(trimTruncatedTail('')).toBe('');
+  });
+});
+
+describe('stripUnresolvableAnchors', () => {
+  it('removes the bare doc-id anchor that shipped in a live report', () => {
+    // `[d7c0864]` has no .sN.pM, so it cannot address a chunk under any
+    // circumstances — it rendered as literal noise.
+    const text = 'Rich context and validation are key enablers [d7c0864].';
+    expect(stripUnresolvableAnchors(text)).toBe('Rich context and validation are key enablers.');
+  });
+
+  it('KEEPS a well-formed anchor even when unresolved', () => {
+    // linkify leaves these deliberately: the renderer resolves them against the
+    // chunk store at display time and may find them.
+    const text = 'A claim [d3ab01.s1.p2].';
+    expect(stripUnresolvableAnchors(text)).toBe(text);
+  });
+
+  it('KEEPS already-linkified citations', () => {
+    const text = 'A claim [[1](#cite:d3ab01.s1.p2)].';
+    expect(stripUnresolvableAnchors(text)).toBe(text);
+  });
+
+  it('does not touch ordinary brackets', () => {
+    const text = 'See [note], item [1], and source [W3].';
+    expect(stripUnresolvableAnchors(text)).toBe(text);
+  });
+
+  it('handles empty input', () => {
+    expect(stripUnresolvableAnchors('')).toBe('');
   });
 });

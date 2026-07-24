@@ -120,3 +120,28 @@ export function trimTruncatedTail(text: string): string {
 
   return lines.join('\n').replace(/\s+$/, '');
 }
+
+
+/**
+ * Remove anchor-shaped brackets that can never resolve.
+ *
+ * A real citation anchor is `d<6 hex>.s<n>.p<n>` — the doc short id
+ * (`makeDocShortId` = 'd' + first 6 chars of the uuid) plus a section and
+ * paragraph. `linkifyReportCitations` deliberately leaves an UNRESOLVED but
+ * well-formed anchor alone, because the renderer looks it up in the chunk store
+ * at display time and may well find it.
+ *
+ * A bare `[d7c0864]` is different: no section, no paragraph, so it cannot
+ * address a chunk under any circumstances. One shipped in a live report and
+ * rendered as literal noise the reader could neither click nor act on — the
+ * model had invented a doc id and stopped there.
+ *
+ * Matched narrowly on purpose: `d` + 5-8 hex digits and nothing else. `[note]`,
+ * `[1]` and `[W3]` are untouched.
+ */
+export function stripUnresolvableAnchors(text: string): string {
+  return (text || '')
+    // Drop a preceding space too, so removal doesn't leave "word  ." gaps.
+    .replace(/ ?\[d[0-9a-f]{5,8}\]/gi, '')
+    .replace(/ +([.,;:])/g, '$1');
+}
