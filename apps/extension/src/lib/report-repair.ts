@@ -145,3 +145,74 @@ export function stripUnresolvableAnchors(text: string): string {
     .replace(/ ?\[d[0-9a-f]{5,8}\]/gi, '')
     .replace(/ +([.,;:])/g, '$1');
 }
+
+
+/**
+ * A table's identity: its header cells, normalised. Numbers are what get
+ * corrupted, so identity must NOT include them.
+ */
+function tableSignature(headerRow: string): string {
+  return headerRow
+    .split('|').map(c => c.trim().toLowerCase()).filter(Boolean)
+    .join('|');
+}
+
+interface FoundTable { start: number; end: number; signature: string; cols: number }
+
+/** Locate every markdown table: a header row, a delimiter row, then body rows. */
+function findTables(lines: string[]): FoundTable[] {
+  const out: FoundTable[] = [];
+  for (let i = 0; i < lines.length - 1; i++) {
+    if (!isTableRow(lines[i]) || isTableDelimiter(lines[i])) continue;
+    if (!isTableDelimiter(lines[i + 1])) continue;
+    let end = i + 2;
+    while (end < lines.length && isTableRow(lines[end])) end++;
+    const sig = tableSignature(lines[i]);
+    out.push({ start: i, end, signature: sig, cols: sig.split('|').length });
+    i = end - 1;
+  }
+  return out;
+}
+
+/**
+ * Drop a table that repeats one already present earlier in the report.
+ *
+ * Sectioned synthesis lets a chunk feed TWO sections, so the same source table
+ * can be written twice — and the second rendering is reconstructed rather than
+ * copied. Observed live: an interaction-mode table appeared in two sections, and
+ * in the second the ENGAGEMENT column had been written into the USABILITY
+ * column, so Text/Complex read 73.6 where the source says 63.85.
+ *
+ * A duplicated table is redundant. A duplicated table with different numbers is
+ * worse than either copy alone: the reader cannot tell which is right, and a
+ * cited report that contradicts itself on a figure has lost the thing it was
+ * for. The first copy is kept — it is written by the section that retrieved the
+ * chunk with the strongest match.
+ *
+ * Identity is the header row only, never the numbers, so a corrupted copy is
+ * still recognised as the same table. Guarded against collapsing genuinely
+ * different tables: at least 3 columns and a header with real words, so a
+ * generic `| Metric | Value |` pair is left alone.
+ */
+export function dropDuplicateTables(text: string): string {
+  const lines = (text || '').split('\n');
+  const tables = findTables(lines);
+  if (tables.length < 2) return text;
+
+  const seen = new Set<string>();
+  const cut: Array<[number, number]> = [];
+  for (const t of tables) {
+    const specific = t.cols >= 3 && t.signature.replace(/[^a-z]/g, '').length >= 12;
+    if (!specific) continue;
+    if (seen.has(t.signature)) cut.push([t.start, t.end]);
+    else seen.add(t.signature);
+  }
+  if (!cut.length) return text;
+
+  const drop = new Set<number>();
+  for (const [a, b] of cut) for (let i = a; i < b; i++) drop.add(i);
+  return lines
+    .filter((_, i) => !drop.has(i))
+    .join('\n')
+    .replace(/\n{3,}/g, '\n\n');
+}

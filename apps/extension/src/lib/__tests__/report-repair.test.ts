@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { splitCapstone, trimTruncatedTail, stripUnresolvableAnchors } from '../report-repair';
+import { splitCapstone, trimTruncatedTail, stripUnresolvableAnchors, dropDuplicateTables } from '../report-repair';
 
 describe('splitCapstone', () => {
   it('splits on the exact delimiters', () => {
@@ -136,5 +136,66 @@ describe('stripUnresolvableAnchors', () => {
 
   it('handles empty input', () => {
     expect(stripUnresolvableAnchors('')).toBe('');
+  });
+});
+
+describe('dropDuplicateTables', () => {
+  // Both tables below are copied from a live report. Sectioned synthesis lets a
+  // chunk feed two sections, so the same source table was written twice — and
+  // the second rendering RECONSTRUCTED it: the engagement column was written
+  // into the usability column, so Text/Complex reads 73.6 where the first (and
+  // the source) says 63.85. A report that contradicts itself on a figure has
+  // lost the thing it was for.
+  const FIRST = [
+    '| Interaction Mode | Task Complexity | Usability Score (Mean ± SD) | Engagement Score (Mean ± SD) |',
+    '| --- | --- | --- | --- |',
+    '| Text | Complex | 63.85 ± 14.09 | 73.6 ± 7.53 |',
+    '| Menu | Complex | 43.39 ± 12.46 | 77.1 ± 3.13 |',
+  ].join('\n');
+  const CORRUPTED = [
+    '| Interaction Mode | Task Complexity | Usability Score (Mean ± SD) | Engagement Score (Mean ± SD) |',
+    '| --- | --- | --- | --- |',
+    '| Text-based | Complex | 73.6 ± 7.53 | 73.6 ± 7.53 |',
+    '| Menu-based | Complex | 77.1 ± 3.13 | 77.1 ± 3.13 |',
+  ].join('\n');
+
+  it('drops the second rendering and keeps the first', () => {
+    const out = dropDuplicateTables(`## A\n\n${FIRST}\n\n## B\n\n${CORRUPTED}`);
+    expect(out).toContain('63.85 ± 14.09');       // the correct figure survives
+    expect(out).not.toContain('| Text-based | Complex | 73.6');  // the corruption is gone
+    expect(out.match(/Interaction Mode/g) || []).toHaveLength(1);
+  });
+
+  it('identifies a table by its HEADER, never its numbers', () => {
+    // The whole point: the copies disagree, so row matching would miss them.
+    expect(FIRST).not.toContain('73.6 ± 7.53 | 73.6');
+    const out = dropDuplicateTables(`${FIRST}\n\n${CORRUPTED}`);
+    // Count delimiter ROWS, not regex hits: `| --- | --- |` matches twice.
+    const delimiterRows = out.split('\n').filter(l => /^\|[\s|-]+\|$/.test(l.trim()));
+    expect(delimiterRows).toHaveLength(1);
+  });
+
+  it('keeps two tables with genuinely different headers', () => {
+    const other = [
+      '| Provider | Latency (ms) | Cost per 1k | Notes |',
+      '| --- | --- | --- | --- |',
+      '| A | 120 | 0.01 | fast |',
+    ].join('\n');
+    const out = dropDuplicateTables(`${FIRST}\n\n${other}`);
+    expect(out).toContain('Interaction Mode');
+    expect(out).toContain('Provider');
+  });
+
+  it('leaves a generic two-column table alone — too weak a signature', () => {
+    // `| Metric | Value |` legitimately recurs; collapsing those would lose data.
+    const t = '| Metric | Value |\n| --- | --- |\n| a | 1 |';
+    const out = dropDuplicateTables(`${t}\n\ntext\n\n${t}`);
+    expect(out.match(/Metric/g) || []).toHaveLength(2);
+  });
+
+  it('passes text through untouched when there is at most one table', () => {
+    expect(dropDuplicateTables(FIRST)).toBe(FIRST);
+    expect(dropDuplicateTables('no tables here')).toBe('no tables here');
+    expect(dropDuplicateTables('')).toBe('');
   });
 });

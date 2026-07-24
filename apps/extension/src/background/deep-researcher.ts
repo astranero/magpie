@@ -8,7 +8,7 @@ import { getJob, updateJob, getPage, savePage, listPages } from '../lib/research
 import { pdfUrlToBody, recreateOffscreen } from '../lib/pdf-parser';
 import { splitReportSections, joinReportSections, sectionMatchesFlag, revisionKeptCitations, countCitations } from '../lib/report-sections';
 import { checkContentQuality, extractDoi } from '../lib/quality-gate';
-import { splitCapstone, trimTruncatedTail, stripUnresolvableAnchors } from '../lib/report-repair';
+import { splitCapstone, trimTruncatedTail, stripUnresolvableAnchors, dropDuplicateTables } from '../lib/report-repair';
 import { isAcademicQuery } from '../lib/query-intent';
 import { getResearchLimits, getResearchDepth, getSynthesisCharBudget, getSourceQuality, getAcademicDepth, RESEARCH_LIMITS, ResearchLimits, SourceQuality, AcademicDepth } from '../lib/research-limits';
 import { getReportLengthSpec } from '../lib/research-limits';
@@ -1815,7 +1815,10 @@ export function assembleReportBody(
     trimTruncatedTail(stripStageBriefPseudoCitations(stripLeadingTitle(synthesis, topic))), sources);
   // AFTER linkify: anything still shaped like a bare doc id was never a
   // resolvable anchor, so it can only render as noise.
-  const linkedSynthesis = stripUnresolvableAnchors(linked);
+  // Duplicate tables survive the retrieval guard because selectBriefExcerpts
+  // feeds brief text that may already contain one. Dropped here, where every
+  // synthesis path converges.
+  const linkedSynthesis = dropDuplicateTables(stripUnresolvableAnchors(linked));
   const unique = dedupeSourceRecords(sources).filter(r => r.url || r.title);
   const citedKeys = new Set(cited.map(r => r.docId || r.url));
   const ordered = [...cited, ...unique.filter(r => !citedKeys.has(r.docId || r.url))];
@@ -3112,8 +3115,15 @@ async function synthesizeSectionedPaper(
 
     // Targeted retrieval: this section's material from ALL gathered sources.
     const query = `${s.heading} ${s.keyTerms.join(' ')}`.trim() || topic;
+    // A chunk may feed TWO sections — prose reuse is harmless, since each
+    // section paraphrases it for its own argument. A chunk carrying a TABLE is
+    // different: the second section re-renders the table from context rather
+    // than copying it, and gets it wrong. Observed live — the same
+    // interaction-mode table appeared in two sections, and in the second the
+    // engagement column had been written into the usability column. So a
+    // table-bearing chunk is allowed exactly once.
     const chunks = (await searchSessionChunks(projectId, query, 12, allDocIds, { qualityBoost, hyde: true, llmChatFn }).catch(() => []))
-      .filter(c => (chunkUse.get(c.anchorId) ?? 0) < 2);
+      .filter(c => (chunkUse.get(c.anchorId) ?? 0) < (/^\s*\|.*\|/m.test(c.text || '') ? 1 : 2));
     chunks.forEach(c => chunkUse.set(c.anchorId, (chunkUse.get(c.anchorId) ?? 0) + 1));
     const evidence = buildAnchoredContext(chunks, titles).trim();
     const briefExcerpts = selectBriefExcerpts(stageBriefs, s, 6000);
