@@ -81,6 +81,61 @@ describe('div grids — the shape Readability loses', () => {
   });
 });
 
+describe('real markup from the reported page (nettimoto listing)', () => {
+  // Copied from the live page. The spec pairs sit TWO levels down: a layout
+  // wrapper holds one .vehicle-info-box, which holds the label and the value.
+  // Checking the wrapper's cell count sees ONE child, so the whole table was
+  // invisible — that is what unwrap() fixes.
+  const REAL = `
+    <div class="grid-x cell vehicle-all-info__info-wrap technical-information">
+      <div class="grid-x cell vehicle-all-info__details vehicle-all-info__details-odd-even">
+        <div class="vehicle-info-box">
+          <div class="vehicle-info-box__vehicle-info">Rekisterinumero</div>
+          <div class="vehicle-info-box__vehicle-det">
+                                  GA-269
+                          </div>
+        </div>
+      </div>
+      <div class="grid-x cell vehicle-all-info__details vehicle-all-info__details-odd-even">
+        <div class="vehicle-info-box">
+          <div class="vehicle-info-box__vehicle-info">Mittarilukema</div>
+          <div class="vehicle-info-box__vehicle-det">71 000 km</div>
+        </div>
+      </div>
+      <div class="grid-x cell vehicle-all-info__details vehicle-all-info__details-odd-even">
+        <div class="vehicle-info-box">
+          <div class="vehicle-info-box__vehicle-info">Moottori</div>
+          <div class="vehicle-info-box__vehicle-det">650 cm³, 4-tahti</div>
+        </div>
+      </div>
+      <div class="grid-x cell vehicle-all-info__details vehicle-all-info__details-odd-even">
+        <div class="vehicle-info-box">
+          <div class="vehicle-info-box__vehicle-info">Vuosimalli</div>
+          <div class="vehicle-info-box__vehicle-det">2006</div>
+        </div>
+      </div>
+      <div class="grid-x cell vehicle-all-info__details vehicle-all-info__details-odd-even">
+        <div class="vehicle-info-box">
+          <div class="vehicle-info-box__vehicle-info">Väri</div>
+          <div class="vehicle-info-box__vehicle-det">Sininen</div>
+        </div>
+      </div>
+    </div>`;
+
+  it('recovers the pairs through the layout wrapper', () => {
+    const md = salvageSpecs(docFrom(REAL));
+    expect(md).toContain('| Mittarilukema | 71 000 km |');
+    expect(md).toContain('| Vuosimalli | 2006 |');
+    expect(md).toContain('| Moottori | 650 cm³, 4-tahti |');
+    expect(md).toContain('| Väri | Sininen |');
+  });
+
+  it('collapses the template whitespace around a value', () => {
+    // The live page indents values across several lines inside the div.
+    expect(salvageSpecs(docFrom(REAL))).toContain('| Rekisterinumero | GA-269 |');
+  });
+});
+
 describe('definition lists', () => {
   it('pairs dt with dd', () => {
     const doc = docFrom(`
