@@ -67,6 +67,15 @@ export const MagpieEmptyIllustration: React.FC<MarkProps> = ({ size = 72, classN
     aria-hidden="true"
     focusable="false"
   >
+    {/* Sky behind the bird — visible only under the scene palettes, which are
+        the ones that have a sky. Two flat discs, no gradient: the mark is
+        rendered at 48-72px and a gradient at that size just muddies the edge.
+        Kept inside the SVG rather than as a wrapper element so the empty
+        state's existing layout is untouched. */}
+    <g className="magpie-mark-sky">
+      <circle cx="24" cy="18" r="17" />
+      <circle className="magpie-mark-sun" cx="35" cy="9" r="4.5" />
+    </g>
     {/* Card */}
     <rect x="4" y="27" width="40" height="16" rx="2" className="stroke-current opacity-50" strokeWidth="1.6" />
     <line x1="8" y1="32" x2="40" y2="32" stroke="hsl(var(--rule) / 0.8)" strokeWidth="1.6" strokeLinecap="round" />

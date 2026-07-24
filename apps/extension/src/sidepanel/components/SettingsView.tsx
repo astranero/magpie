@@ -72,6 +72,7 @@ function ThemeSwatch({ theme }: { theme: ThemePref }) {
     light:   ['hsl(210 33% 98%)', 'hsl(200 85% 34%)', 'hsl(262 65% 56%)'],
     dark:    ['hsl(228 24% 8%)',  'hsl(197 75% 58%)', 'hsl(262 70% 68%)'],
     village: ['hsl(38 42% 95%)',  'hsl(145 26% 34%)', 'hsl(345 48% 62%)'],
+    ghibli:  ['hsl(196 52% 95%)', 'hsl(203 58% 39%)', 'hsl(43 82% 55%)'],
   };
   return (
     <span className="inline-flex" aria-hidden="true">
@@ -1432,7 +1433,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
       <div className="px-4 pt-4 pb-1">
         <h2 className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">The app itself</h2>
       </div>
-      <Section id="appearance" title="Appearance" subtitle="Pick a palette. Village is a warm light theme.">
+      <Section id="appearance" title="Appearance" subtitle="Pick a palette. Village and Ghibli are illustrated light themes.">
         <AppearanceSection />
       </Section>
       <Section id="shortcuts" title="Keyboard Shortcuts" subtitle="Quick access keyboard triggers.">

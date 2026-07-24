@@ -174,6 +174,141 @@
     --sidebar-border: 34 26% 83%;
     --sidebar-ring: 145 26% 34%;
   }
+  /* ── Ghibli: big sky, deep meadow ──
+     Deliberately NOT a village re-tint. Village is interior and warm
+     (plaster, moss, terracotta); this is exterior and cool — a hillside
+     under an enormous sky. The saturation lives in the accents so long
+     reading passages stay calm. */
+  .ghibli {
+    --background: 196 52% 95%;       /* washed sky near the horizon */
+    --foreground: 205 30% 17%;       /* storm blue, never pure black */
+
+    --card: 190 46% 98%;             /* cloud */
+    --card-foreground: 205 30% 17%;
+
+    --popover: 190 46% 98%;
+    --popover-foreground: 205 30% 17%;
+
+    --primary: 203 58% 39%;          /* the sky itself */
+    --primary-foreground: 190 50% 98%;
+
+    --secondary: 190 34% 90%;
+    --secondary-foreground: 205 30% 20%;
+
+    --muted: 194 30% 90%;
+    --muted-foreground: 203 18% 37%; /* measured: 5.75:1 on bg, 5.15:1 on muted */
+
+    --accent: 150 30% 89%;           /* grass catching light */
+    --accent-foreground: 205 30% 17%;
+
+    --destructive: 358 58% 48%;
+    --destructive-foreground: 190 50% 98%;
+
+    --border: 197 26% 82%;
+    --input: 197 26% 82%;
+    --ring: 203 58% 39%;
+
+    --radius: 0.75rem;               /* softest of the four */
+
+    --rule: 6 66% 60%;               /* the red of a roof, a coat, a torii */
+    --highlight: 43 82% 55%;         /* sunflower */
+    --ink-panel: 205 34% 14%;        /* night before the credits */
+    --ink-panel-fg: 190 34% 90%;
+
+    --chart-1: 203 58% 50%;
+    --chart-2: 140 34% 42%;
+    --chart-3: 43 82% 55%;
+    --chart-4: 6 66% 60%;
+    --chart-5: 268 26% 56%;
+
+    --sidebar: 196 52% 96%;
+    --sidebar-foreground: 205 30% 22%;
+    --sidebar-primary: 203 58% 39%;
+    --sidebar-primary-foreground: 190 50% 98%;
+    --sidebar-accent: 190 34% 91%;
+    --sidebar-accent-foreground: 205 30% 17%;
+    --sidebar-border: 197 26% 82%;
+    --sidebar-ring: 203 58% 39%;
+  }
+  /* Sky, cloud bank, and a hint of hill at the bottom. Gradients only:
+     no asset, no request, and nothing that repaints while scrolling. */
+  .ghibli body {
+    background-image:
+      radial-gradient(ellipse 120% 60% at 50% -10%, hsl(203 62% 82% / 0.75), transparent 68%),
+      radial-gradient(ellipse 60% 30% at 18% 14%, hsl(0 0% 100% / 0.85), transparent 70%),
+      radial-gradient(ellipse 48% 24% at 82% 24%, hsl(0 0% 100% / 0.65), transparent 72%),
+      radial-gradient(ellipse 140% 42% at 50% 108%, hsl(140 38% 74% / 0.5), transparent 70%);
+    background-attachment: fixed;
+  }
+
+  /* The mark's sky. Hidden by default: the plain light and dark palettes are
+     paper-and-ink, and a sun behind the bird would contradict them. */
+  .magpie-mark-sky { display: none; }
+  .village .magpie-mark-sky, .ghibli .magpie-mark-sky { display: block; }
+  .village .magpie-mark-sky circle { fill: hsl(42 60% 88%); }
+  .village .magpie-mark-sun { fill: hsl(18 64% 62% / 0.55); }
+  .ghibli .magpie-mark-sky circle { fill: hsl(203 62% 86%); }
+  .ghibli .magpie-mark-sun { fill: hsl(43 82% 62% / 0.8); }
+
+  /* The strip the flock crosses. Each scene paints its own sky, so the band
+     belongs to the palette rather than to the component. */
+  .magpie-band { background: linear-gradient(hsl(var(--muted) / 0.5), transparent); }
+  .village .magpie-band {
+    background: linear-gradient(hsl(42 60% 88% / 0.9), hsl(145 30% 88% / 0.35));
+  }
+  .ghibli .magpie-band {
+    background:
+      radial-gradient(ellipse 40% 70% at 22% 60%, hsl(0 0% 100% / 0.9), transparent 70%),
+      radial-gradient(ellipse 34% 60% at 74% 40%, hsl(0 0% 100% / 0.75), transparent 72%),
+      linear-gradient(hsl(203 66% 80%), hsl(196 60% 90%));
+  }
+
+  /* ── The magpie crossing the sky (see FlyingMagpie.tsx) ──
+     Only transform and opacity animate, so the compositor handles it and a
+     saturated main thread does not make the bird stutter. */
+  @keyframes magpie-fly {
+    0%   { transform: translate3d(-22%, 0, 0) rotate(-3deg); opacity: 0; }
+    8%   { opacity: 1; }
+    50%  { transform: translate3d(50%, var(--fly-rise, -10px), 0) rotate(2deg); }
+    92%  { opacity: 1; }
+    100% { transform: translate3d(122%, 0, 0) rotate(-2deg); opacity: 0; }
+  }
+  @keyframes magpie-beat-near {
+    0%, 100% { transform: rotate(0deg); }
+    50%      { transform: rotate(38deg); }
+  }
+  @keyframes magpie-beat-far {
+    0%, 100% { transform: rotate(6deg); }
+    50%      { transform: rotate(-26deg); }
+  }
+  .magpie-flier {
+    position: absolute;
+    left: 0;
+    top: var(--fly-top, 20%);
+    will-change: transform, opacity;
+    animation: magpie-fly var(--fly-dur, 15s) linear var(--fly-delay, 0s) infinite;
+  }
+  .magpie-body { fill: hsl(var(--foreground) / 0.72); }
+  .magpie-wing {
+    fill: hsl(var(--foreground) / 0.62);
+    /* Pivot at the shoulder, not the box centre, or the wings shear. */
+    transform-origin: 20px 12px;
+  }
+  .magpie-wing-near { animation: magpie-beat-near 0.62s ease-in-out infinite; }
+  .magpie-wing-far  { animation: magpie-beat-far  0.62s ease-in-out infinite; }
+
+  /* Asked not to animate: keep the silhouette, drop the movement. Parked
+     mid-panel rather than at the offscreen 0% keyframe, which would render
+     an empty sky and look like a bug. */
+  @media (prefers-reduced-motion: reduce) {
+    .magpie-flier {
+      animation: none;
+      transform: translate3d(46%, 0, 0);
+      opacity: 0.85;
+    }
+    .magpie-wing-near, .magpie-wing-far { animation: none; }
+  }
+
   /* Plaster, not flat paint: two very soft washes so large empty areas
      have somewhere for the eye to rest. Gradients only — no asset, no
      request, no repaint cost beyond the initial composite. */

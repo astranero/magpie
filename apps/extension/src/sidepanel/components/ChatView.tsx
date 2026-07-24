@@ -11,6 +11,8 @@ import { paletteEntries, SlashCommand } from '../../lib/commands';
 import { ErrorBoundary } from './ErrorBoundary';
 import { shouldRestoreScroll } from '../../lib/scroll-restore';
 import { reasoningTail } from '../../lib/reasoning-stream';
+import { FlyingMagpie } from './FlyingMagpie';
+import { useScene } from '../hooks/useScene';
 import { isImeComposing } from '../../lib/ime';
 import { stripInvisibleMathOps } from '../../lib/unicode-text';
 import { MagpieEmptyIllustration } from './BrandMark';
@@ -649,6 +651,7 @@ const MessageEditor: React.FC<{
 const ThinkingIndicator: React.FC<{ phase?: string; reasoning: string }> = ({ phase, reasoning }) => {
   const [elapsed, setElapsed] = useState(0);
   const [open, setOpen] = useState(false);
+  const scene = useScene();
   useEffect(() => {
     const started = Date.now();
     const t = setInterval(() => setElapsed(Math.floor((Date.now() - started) / 1000)), 1000);
@@ -660,7 +663,17 @@ const ThinkingIndicator: React.FC<{ phase?: string; reasoning: string }> = ({ ph
 
   return (
     <div className="flex justify-start">
-      <div className="max-w-[85%] min-w-0 rounded-lg rounded-bl-sm border bg-card border-border text-card-foreground px-4 py-3 text-sm shadow-card">
+      <div className="max-w-[85%] min-w-0 rounded-lg rounded-bl-sm border bg-card border-border text-card-foreground text-sm shadow-card overflow-hidden">
+        {/* A strip of sky with the flock crossing it, under the scene palettes
+            only — .dark and plain light have no sky for a bird to cross, and a
+            silhouette on a flat card reads as a rendering fault rather than as
+            weather. Waits for 2s so a fast answer does not flash it. */}
+        {scene && elapsed >= 2 && (
+          <div className="relative h-11 border-b border-border/50 magpie-band">
+            <FlyingMagpie />
+          </div>
+        )}
+        <div className="px-4 py-3">
         <div className="flex items-center gap-2">
           <div className="flex space-x-1" aria-hidden="true">
             <div className="w-1.5 h-1.5 rounded-full bg-primary animate-pulse motion-reduce:animate-none" style={{ animationDelay: '0ms' }} />
@@ -700,6 +713,7 @@ const ThinkingIndicator: React.FC<{ phase?: string; reasoning: string }> = ({ ph
             )}
           </div>
         )}
+        </div>
       </div>
     </div>
   );
