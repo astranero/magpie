@@ -26,6 +26,7 @@ import {
   extractSearchUrls,
   generateSearchQueries,
   generateSubQuestions,
+  RESEARCH_LANGUAGE_RULE,
   sourceTier,
   dedupeSourceRecords,
   buildSourcesDocMarkdown,
@@ -270,6 +271,39 @@ describe('generateSearchQueries', () => {
     expect(llm).toHaveBeenCalledOnce();
     const [, userMsg] = llm.mock.calls[0];
     expect(userMsg).toBe('neural networks');
+  });
+});
+
+// ─── Language ─────────────────────────────────────────────────────────────────
+// A Finnish question produced English directives in the plan card and an
+// English report. Only QUERY generation carried a language rule; every
+// reader-facing call carried none, and the sources are overwhelmingly English,
+// so the model followed them.
+
+describe('RESEARCH_LANGUAGE_RULE', () => {
+  it('keys off the topic rather than a locale or a script guess', () => {
+    // The topic is the user's own words, so this works for any language the
+    // model can write without a list to maintain or a detector to be wrong.
+    expect(RESEARCH_LANGUAGE_RULE).toMatch(/SAME LANGUAGE as the research topic/i);
+  });
+
+  it('names non-Latin scripts explicitly, not just European languages', () => {
+    expect(RESEARCH_LANGUAGE_RULE).toMatch(/kurdish/i);
+    expect(RESEARCH_LANGUAGE_RULE).toMatch(/arabic|japanese/i);
+  });
+
+  it('tells the model to translate findings rather than follow the sources', () => {
+    // The specific failure mode: reading English sources and drifting into
+    // English because that is what was in front of it.
+    expect(RESEARCH_LANGUAGE_RULE).toMatch(/TRANSLATE/);
+    expect(RESEARCH_LANGUAGE_RULE).toMatch(/[Nn]ever switch/);
+  });
+
+  it('protects the tokens that must not be translated', () => {
+    // Translating an anchor breaks every citation in the report.
+    expect(RESEARCH_LANGUAGE_RULE).toMatch(/anchor_id/);
+    expect(RESEARCH_LANGUAGE_RULE).toMatch(/proper nouns/i);
+    expect(RESEARCH_LANGUAGE_RULE).toMatch(/code/i);
   });
 });
 

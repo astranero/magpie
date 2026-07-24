@@ -154,6 +154,25 @@ const REPORT_VOICE =
   `- NEVER put code inside a markdown table cell — pipes and backticks corrupt the table and it renders as an unreadable pipe-soup. To compare code variants, write consecutive fenced blocks, each preceded by a one-line bold label ("**Incorrect:**", "**Correct:**").\n` +
   `- Tables are for short scalar values only: names, numbers, one-phrase verdicts. If a cell needs a sentence or a snippet, the content belongs in prose or a fenced block, not a table.\n`;
 
+// The report belongs to the person who asked, in the language they asked in.
+//
+// Only QUERY generation carried a language rule; every reader-facing call —
+// directives, briefs, sections, capstone, revisions — carried none. So a
+// Finnish question produced English directives in the plan card, English
+// briefs, and an English report. The sources are overwhelmingly English, and
+// with nothing pushing the other way the model simply followed them.
+//
+// Keyed off the TOPIC's own language rather than a locale setting or a script
+// guess: the topic is the user's own words, so it works for any language the
+// model can write — Finnish, Kurdish (Sorani and Kurmanji), Arabic, CJK,
+// Cyrillic — with no list to maintain and nothing to detect.
+export const RESEARCH_LANGUAGE_RULE =
+  `\nLANGUAGE — non-negotiable:\n` +
+  `- Write EVERYTHING you output in the SAME LANGUAGE as the research topic. If the topic is Finnish, every heading, sentence and bullet is Finnish; if it is Kurdish, Arabic, Japanese or any other language you can write, the same applies.\n` +
+  `- The source material is usually in another language (most often English). TRANSLATE its findings into the topic's language. Never switch your output to the sources' language because that is what you were reading.\n` +
+  `- Keep verbatim, untranslated: [anchor_id] citations, URLs, code and identifiers, file paths, and proper nouns (people, products, libraries, standards). Where a technical term has no settled translation, use the original and gloss it once in the topic's language.\n` +
+  `- Do not add a translation, a note about which language you used, or an apology about the sources' language.\n`;
+
 // Sandwich defense (prompt-injection hardening + adherence): scraped web text
 // is untrusted DATA that sits between the system prompt and this trailer.
 // Re-asserting the contract AFTER the data measurably improves rule adherence
@@ -795,7 +814,7 @@ STEP 1 (think, do not output): identify 3-5 DISTINCT expert perspectives whose c
 
 STEP 2 (output): derive 5-7 research directives such that EVERY perspective's core concern is covered by at least one directive, and AT LEAST ONE directive explicitly targets disagreements, failure modes, or evidence against the mainstream view.
 Each directive is ONE sentence that starts with an action verb (Analyze / Investigate / Compare / Evaluate / Survey / Trace / Synthesize), names WHAT to examine, and ends with a purpose clause ("… to determine/extract/identify …"). Directives must be concrete enough to search on — name the specific systems, methods, or populations involved.
-Return ONLY a JSON array of directive strings, nothing else.`;
+Return ONLY a JSON array of directive strings, nothing else.\n${RESEARCH_LANGUAGE_RULE}`;
   const res = await llmChatFn(sysPrompt, topic);
   try {
     const start = res.indexOf('[');
@@ -1951,11 +1970,12 @@ STRUCTURE:
 - ${CONTRADICTIONS_SECTION_RULE}
 - Close with a decisive **Verdict** or **Recommendation** paragraph.
 
-LENGTH: target ${lengthSpec.quick} words — hit it by preserving the excerpts' SPECIFIC findings, numbers, and named examples, not by padding.
+LENGTH: target ${lengthSpec.quick} words — a range to land INSIDE, not a floor. Hit it by preserving the excerpts' SPECIFIC findings, numbers, and named examples; if you are over, cut restatement rather than evidence.
 
 ${PRESCRIPTIVE_GUIDANCE}
 ${REPORT_VOICE}
 ${EPISTEMIC_RULES}
+${RESEARCH_LANGUAGE_RULE}
 ${RESEARCH_CITATION_RULES}`;
 
   const rawSynthesis = await withKeepAlive(
@@ -2299,6 +2319,7 @@ Rewrite the report to FULLY address these findings using the source excerpts pro
 - Only if the sources genuinely cannot answer the topic: say so in the first paragraph and keep it short — but first make a real attempt to synthesise guidance from what IS there.
 
 ${PRESCRIPTIVE_GUIDANCE}
+${RESEARCH_LANGUAGE_RULE}
 ${RESEARCH_CITATION_RULES}`;
   const user = `ORIGINAL REPORT:\n\n${synthesis.slice(0, 24_000)}\n\nSOURCE EXCERPTS:\n\n${sourceContext.slice(0, 60_000)}${DATA_TRAILER}`;
   const revised = await withKeepAlive(
@@ -2452,7 +2473,7 @@ async function reviseFlaggedSections(
       `- KEEP every [anchor_id] citation that still supports its sentence. Citations are the report's ` +
       `contract with the reader — a rewrite that drops them is a FAILED rewrite, however good the prose.\n` +
       `- Never fabricate an anchor that is not in the excerpts.\n\n` +
-      `${PRESCRIPTIVE_GUIDANCE}\n${RESEARCH_CITATION_RULES}`;
+      `${PRESCRIPTIVE_GUIDANCE}\n${RESEARCH_LANGUAGE_RULE}\n${RESEARCH_CITATION_RULES}`;
     const user =
       `SECTION TO REVISE:\n\n${sec.heading}\n${sec.body}\n\n` +
       `SOURCE EXCERPTS:\n\n${sourceContext.slice(0, 40_000)}${DATA_TRAILER}`;
@@ -2902,6 +2923,7 @@ async function synthesizeStageBrief(
     `You are a research analyst writing Stage ${stage} of ${totalStages} in a staged investigation of: "${topic}".
 ${specPreamble ? `\n${specPreamble}` : ''}
 Using ONLY the source excerpts below, write a comprehensive research brief (aim for ~1500 words).
+${RESEARCH_LANGUAGE_RULE}
 ${handoffContext ? `\nCONTEXT FROM PRIOR STAGES:\n${handoffContext}\n` : ''}
 Sub-questions to address:
 ${subQuestions.map((q, i) => `${i + 1}. ${q}`).join('\n')}
@@ -2952,12 +2974,13 @@ You have ${stageBriefs.length} research briefs from a staged investigation, each
 
 Write ONE long, comprehensive, decision-useful report — the kind a reader pays for because it saves them weeks. Depth and structure matter as much as accuracy.
 
-LENGTH & DEPTH — the #1 failure of these reports is being too SHORT. Target ${lengthSpec.total} words. Hit it by PRESERVING detail, not padding:
+LENGTH & DEPTH — target ${lengthSpec.total} words, and treat BOTH ends of that range as real limits. Undershooting means you compressed the briefs into a digest; overshooting means you padded. Hit the range by PRESERVING detail, not by adding words:
 - Do NOT summarise the briefs into a short digest. The briefs are your raw material — carry their SPECIFIC findings, mechanisms, numbers, named examples, and trade-offs into the report in full.
 - Every distinct point from the briefs earns its own sentence with its citation — do NOT collapse several distinct findings into one line.
 - Every sub-question gets its OWN multi-paragraph section (3–6 paragraphs), not a sentence or two.
 - For each recommendation or trade-off, give the mechanism AND the downside/cost, not just the headline.
-- If your draft is under the target range, you have compressed too much — go back and restore the detail the briefs contain.
+- If your draft is under the range, you compressed too much — restore the detail the briefs contain.
+- If your draft is over the range, you padded — cut restatement, throat-clearing, and section-opening summaries of what you are about to say. Never cut evidence, numbers, or citations to fit; if the material genuinely needs more room, exceed the range rather than dropping findings.
 
 STRUCTURE — adapt it to the subject; do NOT use a rigid template:
 - Do NOT write a top-level title / H1 (no "# Professional Report: …", no "Report on …") — the document already has a title, and a second one renders as an ugly double header. Start directly with the body.
@@ -2981,6 +3004,7 @@ SYNTHESIS RULES:
 ${PRESCRIPTIVE_GUIDANCE}
 ${REPORT_VOICE}
 ${EPISTEMIC_RULES}
+${RESEARCH_LANGUAGE_RULE}
 ${RESEARCH_CITATION_RULES}`;
 
   const userMsg = `RESEARCH BRIEFS:\n\n${briefsBlock}`;
@@ -3096,13 +3120,14 @@ ${s.evidenceNotes.length ? `- Key evidence gathered: ${s.evidenceNotes.join(' | 
 ${prevTail}
 Requirements:
 - Output starts with EXACTLY "## ${s.heading}" and contains ONLY this section — no executive summary, no verdict, no conclusions, no other sections.
-- ${lengthSpec.sectionWords} words of analytical prose. Use ### sub-headings for long analysis.
+- ${lengthSpec.sectionWords} words of analytical prose — stay inside that range; the report's total budget assumes it. Use ### sub-headings for long analysis.
 - Present comparable or quantitative evidence as a Markdown table.
 - Carry the SPECIFIC findings, mechanisms, numbers, and named examples from the material — do not compress distinct findings into one line.
 
 ${PRESCRIPTIVE_GUIDANCE}
 ${REPORT_VOICE}
 ${EPISTEMIC_RULES}
+${RESEARCH_LANGUAGE_RULE}
 ${RESEARCH_CITATION_RULES}`;
 
     const user = `SECTION EVIDENCE (retrieved excerpts):\n\n${evidence || '(none — use the brief excerpts)'}\n\nRELEVANT BRIEF EXCERPTS:\n\n${briefExcerpts || '(none)'}${DATA_TRAILER}`;
@@ -3157,7 +3182,8 @@ Produce EXACTLY three blocks separated by these delimiter lines:
 (block 3) A "## Verdict" section: a clear position, the strongest case for it, and the top 2-3 risks or caveats. Do not hedge into a shrug.
 Use ONLY [anchor_id] citations that appear in the provided material — never invent any.
 ${REPORT_VOICE}
-${EPISTEMIC_RULES}`;
+${EPISTEMIC_RULES}
+${RESEARCH_LANGUAGE_RULE}`;
     const capUser = `REPORT OUTLINE:\n${formatOutlineSkeleton(outline)}\n\nFINAL STAGE HANDOFF (known gaps/contradictions):\n${handoffContext.slice(0, 3000)}\n\nREPORT BODY:\n\n${body.slice(0, 20000)}`;
     const cap = await withKeepAlive(
       '[SYNTHESIZING] Capstone: overview, contradictions & verdict',
@@ -3706,6 +3732,7 @@ async function runDeeperResearch(
       `- Match register to the subject (analyst report for market/product questions with pricing + competitor tables and a recommendation; technical review for scientific ones).\n` +
       `- End with a decisive **Verdict** (or **Recommendation**): a clear position, the strongest case, and the top 2–3 risks. Do not hedge.\n\n` +
       `${PRESCRIPTIVE_GUIDANCE}\n` +
+      `${RESEARCH_LANGUAGE_RULE}\n` +
       `${RESEARCH_CITATION_RULES}`;
     synthesis = await withKeepAlive(
       '[SYNTHESIZING] Drafting direct synthesis',

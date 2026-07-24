@@ -11,6 +11,7 @@ import { SearchApiKeys, getSearchApiKeys, saveSearchApiKeys } from '../../lib/se
 import { getCrashLog, clearCrashLog, formatCrashLog } from '../../lib/crash-log';
 import { COPILOT_PENDING_KEY, type CopilotPendingAuth } from '../../lib/copilot-auth';
 import { THEMES, THEME_LABELS, THEME_STORAGE_KEY, THEME_CHANGED_EVENT, readThemePref, type ThemePref } from '../../lib/theme';
+import { REPORT_LENGTH_SPECS } from '../../lib/research-limits';
 
 // ── Appearance ────────────────────────────────────────────────────────────
 /**
@@ -1044,9 +1045,14 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
               <SelectValue />
             </SelectTrigger>
             <SelectContent className="border border-border rounded-lg shadow-card">
-              <SelectItem value="concise" className="font-mono text-xs">Concise — ~900-1500 words</SelectItem>
-              <SelectItem value="standard" className="font-mono text-xs">Standard — ~1800-3000 words</SelectItem>
-              <SelectItem value="comprehensive" className="font-mono text-xs">Comprehensive — ~2800-4500 words</SelectItem>
+              {/* Word counts come from REPORT_LENGTH_SPECS, not hardcoded here —
+                  typed by hand they silently become wrong the moment the specs
+                  are retuned, and the user is told a number the model never saw. */}
+              {(['concise', 'standard', 'comprehensive'] as const).map(k => (
+                <SelectItem key={k} value={k} className="font-mono text-xs">
+                  {k.charAt(0).toUpperCase() + k.slice(1)} — ~{REPORT_LENGTH_SPECS[k].total} words
+                </SelectItem>
+              ))}
             </SelectContent>
           </Select>
           <p className="text-[10px] text-muted-foreground font-mono leading-normal">
