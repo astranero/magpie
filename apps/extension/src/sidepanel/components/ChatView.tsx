@@ -10,6 +10,7 @@ import { Button } from '@/components/ui/button';
 import { paletteEntries, SlashCommand } from '../../lib/commands';
 import { ErrorBoundary } from './ErrorBoundary';
 import { shouldRestoreScroll } from '../../lib/scroll-restore';
+import { reasoningTail } from '../../lib/reasoning-stream';
 import { stripInvisibleMathOps } from '../../lib/unicode-text';
 import { MagpieEmptyIllustration } from './BrandMark';
 import { ModelSelect } from './ModelSelect';
@@ -28,6 +29,8 @@ interface ChatViewProps {
   generating: Record<string, boolean>;
   /** Live phase line for the thinking indicator ("Reading the page…"). */
   thinkingStatus?: Record<string, string>;
+  /** Live chain of thought from a reasoning model, per chat. Never persisted. */
+  reasoning?: Record<string, string>;
   researching: Record<string, boolean>;
   researchLogs: Record<string, string[]>;
   documents: LocalDocument[];
@@ -546,6 +549,80 @@ const MessageBody: React.FC<MessageBodyProps> = React.memo(({ text: rawText, com
   prev.renderLive === next.renderLive);
 
 // ─────────────────────────────────────────────
+/**
+ * Live "the model is working" indicator.
+ *
+ * Replaces a static `Thinking…` that sat there unchanged for the whole wait. On
+ * a reasoning model (DeepSeek-R1 and friends) that wait is 30-120s before the
+ * first answer token, which read as a hang — there was no way to tell a thinking
+ * model from a dead one.
+ *
+ * Three signals, in order of usefulness:
+ *   • the real phase, which the worker already reports ("Reading the page…",
+ *     "Understanding the question…", "Writing the answer…")
+ *   • elapsed seconds, so a long wait is visibly progressing
+ *   • the tail of the chain of thought, once one is streaming — expandable to
+ *     read the whole trace
+ */
+const ThinkingIndicator: React.FC<{ phase?: string; reasoning: string }> = ({ phase, reasoning }) => {
+  const [elapsed, setElapsed] = useState(0);
+  const [open, setOpen] = useState(false);
+  useEffect(() => {
+    const started = Date.now();
+    const t = setInterval(() => setElapsed(Math.floor((Date.now() - started) / 1000)), 1000);
+    return () => clearInterval(t);
+  }, []);
+
+  const tail = reasoning ? reasoningTail(reasoning) : '';
+  const label = phase || (reasoning ? 'Thinking it through…' : 'Thinking…');
+
+  return (
+    <div className="flex justify-start">
+      <div className="max-w-[85%] min-w-0 rounded-lg rounded-bl-sm border bg-card border-border text-card-foreground px-4 py-3 text-sm shadow-card">
+        <div className="flex items-center gap-2">
+          <div className="flex space-x-1" aria-hidden="true">
+            <div className="w-1.5 h-1.5 rounded-full bg-primary animate-pulse motion-reduce:animate-none" style={{ animationDelay: '0ms' }} />
+            <div className="w-1.5 h-1.5 rounded-full bg-primary animate-pulse motion-reduce:animate-none" style={{ animationDelay: '150ms' }} />
+            <div className="w-1.5 h-1.5 rounded-full bg-primary animate-pulse motion-reduce:animate-none" style={{ animationDelay: '300ms' }} />
+          </div>
+          {/* Only the phase is announced. The timer ticks every second and the
+              reasoning tail changes constantly — in a live region either would
+              make a screen reader chatter continuously. */}
+          <span className="text-xs text-muted-foreground font-medium" aria-live="polite">{label}</span>
+          {elapsed >= 3 && (
+            <span className="text-[10px] font-mono text-muted-foreground/70 tabular-nums" aria-hidden="true">
+              {elapsed < 60 ? `${elapsed}s` : `${Math.floor(elapsed / 60)}m ${elapsed % 60}s`}
+            </span>
+          )}
+        </div>
+
+        {tail && (
+          <div className="mt-2 pt-2 border-t border-border/60">
+            <button
+              type="button"
+              onClick={() => setOpen(o => !o)}
+              className="flex items-center gap-1 text-[10px] font-mono uppercase tracking-wider text-muted-foreground hover:text-foreground transition-colors"
+              aria-expanded={open}
+            >
+              {open ? <ChevronUp size={10} /> : <ChevronDown size={10} />}
+              Reasoning
+            </button>
+            {open ? (
+              <div className="mt-1.5 max-h-40 overflow-y-auto no-scrollbar text-[11px] leading-relaxed text-muted-foreground whitespace-pre-wrap break-words">
+                {reasoning}
+              </div>
+            ) : (
+              <div className="mt-1 text-[11px] leading-snug text-muted-foreground/80 line-clamp-2 break-words" aria-hidden="true">
+                {tail}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+};
+
 // Copy Message Button Component
 // ─────────────────────────────────────────────
 const CopyButton: React.FC<{ text: string }> = ({ text }) => {
@@ -715,6 +792,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
   activeProjectId,
   generating,
   thinkingStatus = {},
+  reasoning,
   researching,
   researchLogs,
   documents,
@@ -1068,18 +1146,10 @@ export const ChatView: React.FC<ChatViewProps> = ({
         {/* No message was queued during the run → field log stays at the end. */}
         {firstQueuedIdx === -1 && fieldLog}
         {generating[activeChatId] && !researching[activeProjectId] && (messages[messages.length - 1]?.role !== 'assistant' || !messages[messages.length - 1]?.text) && (
-          <div className="flex justify-start">
-            <div className="max-w-[85%] rounded-lg rounded-bl-sm border bg-card border-border text-card-foreground px-4 py-3 text-sm flex items-center gap-2 shadow-card">
-              <div className="flex space-x-1" aria-hidden="true">
-                <div className="w-1.5 h-1.5 rounded-full bg-primary animate-pulse motion-reduce:animate-none" style={{ animationDelay: '0ms' }} />
-                <div className="w-1.5 h-1.5 rounded-full bg-primary animate-pulse motion-reduce:animate-none" style={{ animationDelay: '150ms' }} />
-                <div className="w-1.5 h-1.5 rounded-full bg-primary animate-pulse motion-reduce:animate-none" style={{ animationDelay: '300ms' }} />
-              </div>
-              <span className="text-xs text-muted-foreground font-medium" aria-live="polite">
-                {thinkingStatus[activeChatId] || 'Thinking…'}
-              </span>
-            </div>
-          </div>
+          <ThinkingIndicator
+            phase={thinkingStatus[activeChatId]}
+            reasoning={reasoning?.[activeChatId] || ''}
+          />
         )}
         <div ref={msgEnd} />
       </div>

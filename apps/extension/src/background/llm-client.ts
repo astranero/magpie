@@ -7,6 +7,7 @@
 import { BUILTIN_GEMINI_SENTINEL } from '../lib/provider-detect';
 import { isAllowedProviderUrl } from '../lib/settings';
 import { getValidCopilotToken, COPILOT_API_URL, COPILOT_EDITOR_HEADERS } from '../lib/copilot-auth';
+import { createThinkSplitter, reasoningFromDelta } from '../lib/reasoning-stream';
 
 export async function getProviderSettings(): Promise<Record<string, string>> {
   const s = await chrome.storage.local.get(['customUrl', 'customKey', 'customModel', 'visionModel']);
@@ -123,7 +124,13 @@ export async function chatWithCustomStream(
   userPrompt: string,
   signal: AbortSignal,
   onDeltaRaw: (delta: string) => void,
-  modelOverride?: string
+  modelOverride?: string,
+  /**
+   * Chain-of-thought from a reasoning model, kept on its OWN channel so it can
+   * never reach the answer (or the saved transcript). Optional: callers that
+   * don't pass it get exactly today's behaviour — the reasoning is discarded.
+   */
+  onReasoningRaw?: (delta: string) => void,
 ): Promise<void> {
   // F1: coalesce SSE tokens to reduce IPC/render pressure.
   const FLUSH_MS = 40;
@@ -146,8 +153,44 @@ export async function chatWithCustomStream(
     if (deltaBuf.length >= FLUSH_CHARS) flush();
     else scheduleFlush();
   };
+
+  // Reasoning gets its own coalescing buffer. It must NOT share the answer's:
+  // interleaving the two would reorder text within each stream.
+  let reasonBuf = '';
+  let reasonTimer: ReturnType<typeof setTimeout> | null = null;
+  const flushReasoning = () => {
+    if (reasonTimer) { clearTimeout(reasonTimer); reasonTimer = null; }
+    if (!reasonBuf) return;
+    const chunk = reasonBuf;
+    reasonBuf = '';
+    onReasoningRaw?.(chunk);
+  };
+  const onReasoning = (delta: string) => {
+    if (!onReasoningRaw || !delta) return;
+    reasonBuf += delta;
+    if (reasonBuf.length >= FLUSH_CHARS) flushReasoning();
+    else if (!reasonTimer) reasonTimer = setTimeout(flushReasoning, FLUSH_MS);
+  };
+
+  // Some runtimes inline the trace as <think>…</think> inside `content` instead
+  // of using a separate field, and the tags arrive split across chunks.
+  const think = createThinkSplitter();
+  /** Route one `content` delta: answer text out, inline reasoning diverted. */
+  const onContent = (raw: string) => {
+    const { answer, reasoning } = think.push(raw);
+    if (reasoning) onReasoning(reasoning);
+    if (answer) onDelta(answer);
+  };
+  /** End of stream: release any tail the splitter was holding back. */
+  const flushThink = () => {
+    const { answer, reasoning } = think.flush();
+    if (reasoning) onReasoning(reasoning);
+    if (answer) onDelta(answer);
+  };
+
   signal.addEventListener('abort', () => {
     if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; }
+    if (reasonTimer) { clearTimeout(reasonTimer); reasonTimer = null; }
   }, { once: true });
 
   const { apiKey, endpoint, model: defaultModel, isCopilot } = await getProviderSettings();
@@ -180,8 +223,14 @@ export async function chatWithCustomStream(
   const contentType = res.headers.get('content-type') || '';
   if (!res.body || !contentType.includes('event-stream')) {
     const data = await res.json();
-    const text = data.choices?.[0]?.message?.content || '';
-    if (text) onDeltaRaw(text);
+    const msg = data.choices?.[0]?.message;
+    const sep = reasoningFromDelta(msg);
+    if (sep) onReasoningRaw?.(sep);
+    const text = msg?.content || '';
+    // Non-streaming providers still inline <think> blocks — split before
+    // publishing, or the trace lands in the answer.
+    if (text) { onContent(text); flushThink(); flush(); }
+    flushReasoning();
     return;
   }
 
@@ -202,21 +251,29 @@ export async function chatWithCustomStream(
         const trimmed = line.trim();
         if (!trimmed.startsWith('data:')) continue;
         const payload = trimmed.slice(5).trim();
-        if (payload === '[DONE]') { flush(); return; }
+        if (payload === '[DONE]') { flushThink(); flush(); flushReasoning(); return; }
         try {
           const json = JSON.parse(payload);
-          const delta = json.choices?.[0]?.delta?.content
-            ?? json.choices?.[0]?.message?.content
-            ?? '';
-          if (delta) onDelta(delta);
+          const choice = json.choices?.[0];
+          // Reasoning arrives on its own field (DeepSeek: reasoning_content,
+          // OpenRouter: reasoning). Before this, only `content` was read — so
+          // an R1-class model streamed nothing at all until it stopped thinking.
+          const reason = reasoningFromDelta(choice?.delta) || reasoningFromDelta(choice?.message);
+          if (reason) onReasoning(reason);
+          const delta = choice?.delta?.content ?? choice?.message?.content ?? '';
+          if (delta) onContent(delta);
         } catch {
           // Incomplete JSON split across reads — skip rather than crash.
         }
       }
     }
+    flushThink();
     flush();
+    flushReasoning();
   } catch (err) {
+    flushThink();
     flush();
+    flushReasoning();
     throw err;
   }
 }

@@ -348,6 +348,11 @@ loadChatHistory(activeChatId).then(() => {
   const [generating, setGenerating] = useState<Record<string, boolean>>({});
   // Live phase line for the thinking indicator ("Reading the page…")
   const [thinkingStatus, setThinkingStatus] = useState<Record<string, string>>({});
+  // Reasoning-model chain of thought for the CURRENT turn, per chat. Ephemeral
+  // by design: never saved, cleared when the next turn starts. It exists so a
+  // model that thinks for a minute before its first answer token shows signs
+  // of life instead of a frozen 'Thinking…'.
+  const [reasoning, setReasoning] = useState<Record<string, string>>({});
   const [researching, setResearching] = useState<Record<string, boolean>>({});
   const [researchLogs, setResearchLogs] = useState<Record<string, string[]>>({});
   const msgEnd = useRef<HTMLDivElement>(null);
@@ -610,6 +615,11 @@ loadChatHistory(activeChatId).then(() => {
         let aId = mirrorStreamRef.current[m.chatId];
         if (!aId) { aId = uid(); mirrorStreamRef.current[m.chatId] = aId; setGenerating(prev => ({ ...prev, [m.chatId]: true })); }
         appendMirrorDelta(m.chatId, aId, (m.text as string) || '');
+        return;
+      }
+      if (m.action === 'CHAT_REASONING') {
+        if (streamingChatsRef.current.has(m.chatId)) return; // our own port already delivered it
+        setReasoning(prev => ({ ...prev, [m.chatId]: (prev[m.chatId] || '') + ((m.text as string) || '') }));
         return;
       }
       if (m.action === 'CHAT_RESET') {
@@ -1534,6 +1544,8 @@ loadChatHistory(activeChatId).then(() => {
       [currentChatId]: [...(prev[currentChatId] || []), commandMsg]
     }));
     setGenerating(prev => ({ ...prev, [currentChatId]: true }));
+    // Previous turn's chain of thought belongs to the previous answer.
+    setReasoning(prev => (prev[currentChatId] ? { ...prev, [currentChatId]: '' } : prev));
     streamingChatsRef.current.add(currentChatId);
 
     const port = chrome.runtime.connect({ name: 'chat-stream' });
@@ -1558,6 +1570,8 @@ loadChatHistory(activeChatId).then(() => {
     port.onMessage.addListener((m: any) => {
       if (m.type === 'STATUS') {
         setThinkingStatus(prev => ({ ...prev, [currentChatId]: m.text || '' }));
+      } else if (m.type === 'REASONING') {
+        setReasoning(prev => ({ ...prev, [currentChatId]: (prev[currentChatId] || '') + (m.text || '') }));
       } else if (m.type === 'DELTA') {
         setThinkingStatus(prev => prev[currentChatId] ? { ...prev, [currentChatId]: '' } : prev);
         pushDelta(currentChatId, assistantId, m.text);
@@ -1877,6 +1891,8 @@ loadChatHistory(activeChatId).then(() => {
       }));
     }
     setGenerating(prev => ({ ...prev, [currentChatId]: true }));
+    // Previous turn's chain of thought belongs to the previous answer.
+    setReasoning(prev => (prev[currentChatId] ? { ...prev, [currentChatId]: '' } : prev));
     streamingChatsRef.current.add(currentChatId);
 
     if (typeof chrome === 'undefined' || !chrome.runtime?.connect) {
@@ -1909,6 +1925,8 @@ loadChatHistory(activeChatId).then(() => {
       } else if (m?.type === 'RESET') {
         // Worker is replacing the answer (refusal → web-sourced answer).
         resetStreamingMessage(currentChatId, assistantId);
+      } else if (m?.type === 'REASONING') {
+        setReasoning(prev => ({ ...prev, [currentChatId]: (prev[currentChatId] || '') + (m.text || '') }));
       } else if (m?.type === 'DELTA') {
         setThinkingStatus(prev => prev[currentChatId] ? { ...prev, [currentChatId]: '' } : prev);
         pushDelta(currentChatId, assistantId, m.text);
@@ -2270,6 +2288,7 @@ loadChatHistory(activeChatId).then(() => {
               activeProjectId={activeProjectId}
               generating={generating}
               thinkingStatus={thinkingStatus}
+              reasoning={reasoning}
               researching={researching}
               isActive={view === 'chat'}
               llmEndpointLocal={/^https?:\/\/(localhost|127\.0\.0\.1|0\.0\.0\.0|\[?::1\]?)(:|\/|$)/i.test(customUrl.trim())}

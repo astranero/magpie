@@ -2736,6 +2736,16 @@ chrome.runtime.onConnect.addListener((port) => {
       display(text);
     };
 
+    // Reasoning-model chain of thought. A SEPARATE channel on purpose: it never
+    // touches `full`, so it can't reach the answer, the saved transcript, or the
+    // citation/sentinel logic that reads `full`. Its only job is to prove the
+    // model is working — an R1-class model used to show nothing at all until it
+    // stopped thinking, which read as a hang.
+    const emitReasoning = (text: string) => {
+      safePost({ type: 'REASONING', text });
+      chrome.runtime.sendMessage({ action: 'CHAT_REASONING', chatId, text }).catch(() => {});
+    };
+
     // Keep the MV3 worker alive for the whole turn. Context assembly (intent
     // call, retrieval, link scrapes) and a slow provider's time-to-first-token
     // are silent gaps; a >30s gap with no chrome API activity evicts the worker
@@ -2854,7 +2864,10 @@ chrome.runtime.onConnect.addListener((port) => {
       }
 
       if (!cliSuccess) {
-        await chatWithCustomStream(systemPrompt, formattedHistory, prompt, localController.signal, emitAnswerDelta);
+        await chatWithCustomStream(
+          systemPrompt, formattedHistory, prompt, localController.signal, emitAnswerDelta,
+          undefined, emitReasoning,
+        );
       }
 
       // RELIABLE NET: the score gate can still let a workspace-grounded turn
