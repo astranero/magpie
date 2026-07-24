@@ -390,6 +390,27 @@
     box-shadow: 0 1px 2px hsl(25 30% 20% / 0.06), 0 3px 10px hsl(25 30% 20% / 0.08);
   }
 
+  /* Ghibli speaks in a soft humanist voice — airy and open, distinct from
+     Village's cozy book serif. Display slots get a warm humanist sans; the
+     body picks up a matching stack below. System fonts only, so no webfont.
+     'Optima'/'Palatino' on Mac, 'Candara'/'Constantia' on Windows, then a
+     graceful fallback. */
+  .ghibli .font-display,
+  .ghibli .prose-headings-display :is(h1, h2, h3, h4) {
+    font-family: 'Optima', 'Palatino Linotype', 'Candara', 'Gill Sans', 'Gill Sans MT', 'Segoe UI', sans-serif;
+    letter-spacing: 0.005em;
+    font-weight: 600;
+  }
+  /* Body copy in the scene themes reads warmer than the default Geist. Ghibli:
+     humanist. (Village keeps its default body; its serif is on headings.) */
+  .ghibli body,
+  .ghibli .prose {
+    font-family: 'Avenir Next', 'Segoe UI', 'Optima', system-ui, -apple-system, sans-serif;
+  }
+  .ghibli .shadow-card {
+    box-shadow: 0 1px 2px hsl(205 40% 25% / 0.06), 0 3px 12px hsl(205 40% 25% / 0.10);
+  }
+
   /* Dark ink surface (deep-research log, code-like panels) */
   .ink-panel {
     background-color: hsl(var(--ink-panel));

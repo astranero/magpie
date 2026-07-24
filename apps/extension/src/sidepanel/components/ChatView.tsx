@@ -131,6 +131,7 @@ const FieldLog: React.FC<{ log: string[]; onStop: () => void }> = ({ log, onStop
   const act = useMemo(() => parseResearchActivity(log), [log]);
   const LabelIcon = PHASE_ICON[act.latestLabel] || Loader2;
   const activeIdx = PHASE_ORDER.indexOf(act.phase as ResearchPhase);
+  const scene = useScene();
 
   // The raw log is oldest-first; the line you open it to see is the newest, at
   // the bottom. Pin to the bottom on open and on every new line so the latest
@@ -154,6 +155,16 @@ const FieldLog: React.FC<{ log: string[]; onStop: () => void }> = ({ log, onStop
           Stop
         </button>
       </div>
+
+      {/* The flock crosses the sky while research runs — under the scene
+          palettes (Ghibli/Village), which are the ones that have a sky. This
+          is the "flying magpie while researching" the field log earns; the
+          same band the thinking indicator uses, so both read as one weather. */}
+      {scene && (
+        <div className="relative h-11 border-b border-white/10 magpie-band">
+          <FlyingMagpie />
+        </div>
+      )}
 
       <div className="px-3.5 py-3 space-y-3">
         {/* Phase rail: the four stops, the reached ones lit. */}
