@@ -9,6 +9,7 @@ import { CustomSkill, sanitizeCustomSkill } from '../../lib/commands';
 import { McpServerConfig, McpConnection, getMcpServers, saveMcpServers, isAllowedMcpUrl } from '../../lib/mcp-client';
 import { SearchApiKeys, getSearchApiKeys, saveSearchApiKeys } from '../../lib/search-providers';
 import { getCrashLog, clearCrashLog, formatCrashLog } from '../../lib/crash-log';
+import { timeAgo } from '../../lib/format';
 import { COPILOT_PENDING_KEY, type CopilotPendingAuth } from '../../lib/copilot-auth';
 import { THEMES, THEME_LABELS, THEME_STORAGE_KEY, THEME_CHANGED_EVENT, readThemePref, type ThemePref } from '../../lib/theme';
 import { REPORT_LENGTH_SPECS } from '../../lib/research-limits';
@@ -364,6 +365,79 @@ interface SettingsViewProps {
   workspaceRules: string;
   saveWorkspaceRules: (rules: string) => void | Promise<void>;
 }
+
+// ─────────────────────────────────────────────
+// Drive sync status
+// ─────────────────────────────────────────────
+// The Drive block had controls (connect, folder, Force Resync) but no state:
+// nothing said how much was synced, how much was waiting, or when the last
+// sync actually happened. A "Uploading 227/449" toast scrolls past and then
+// the user is guessing. This queries SYNC_STATUS and refreshes whenever a
+// SYNC_PROGRESS broadcast arrives, so the panel tracks a run live and settles
+// on the final counts when it ends.
+
+interface SyncSnapshot { synced: number; pending: number; total: number; lastSyncAt: string | null }
+
+const SyncStatusPanel: React.FC = () => {
+  const [snap, setSnap] = useState<SyncSnapshot | null>(null);
+
+  useEffect(() => {
+    let alive = true;
+    const load = () => {
+      try {
+        chrome.runtime.sendMessage({ action: 'SYNC_STATUS' }, (r: any) => {
+          if (chrome.runtime.lastError) return;      // worker asleep — ignore
+          if (alive && r?.success !== false) setSnap(r as SyncSnapshot);
+        });
+      } catch { /* no runtime — test/preview */ }
+    };
+    load();
+
+    // A progress broadcast means counts are moving; re-query, debounced so a
+    // fast burst of "Uploading i/N" lines does not fan out into N queries.
+    let t: ReturnType<typeof setTimeout> | null = null;
+    const onMsg = (m: any) => {
+      if (m?.action !== 'SYNC_PROGRESS') return;
+      if (t) clearTimeout(t);
+      t = setTimeout(load, 400);
+    };
+    try { chrome.runtime.onMessage.addListener(onMsg); } catch { /* ignore */ }
+    return () => {
+      alive = false;
+      if (t) clearTimeout(t);
+      try { chrome.runtime.onMessage.removeListener(onMsg); } catch { /* ignore */ }
+    };
+  }, []);
+
+  if (!snap) return null;
+  const { synced, pending, lastSyncAt } = snap;
+  const allUp = pending === 0;
+
+  return (
+    <div className="rounded-lg border border-border bg-muted/20 px-3 py-2.5 space-y-2">
+      <div className="flex items-center justify-between">
+        <span className="text-[11px] font-medium text-muted-foreground">Sync status</span>
+        <span className={`inline-flex items-center gap-1 text-[10px] font-medium ${allUp ? 'text-emerald-600 dark:text-emerald-400' : 'text-amber-700 dark:text-highlight'}`}>
+          <span className={`w-1.5 h-1.5 rounded-full ${allUp ? 'bg-emerald-500' : 'bg-amber-500 animate-pulse motion-reduce:animate-none'}`} aria-hidden="true" />
+          {allUp ? 'Up to date' : `${pending} pending`}
+        </span>
+      </div>
+      <div className="grid grid-cols-2 gap-2 text-center">
+        <div className="rounded-md bg-background/60 py-1.5">
+          <div className="text-sm font-bold font-mono tabular-nums">{synced}</div>
+          <div className="text-[9px] uppercase tracking-wider text-muted-foreground">Synced</div>
+        </div>
+        <div className="rounded-md bg-background/60 py-1.5">
+          <div className={`text-sm font-bold font-mono tabular-nums ${pending > 0 ? 'text-amber-700 dark:text-highlight' : ''}`}>{pending}</div>
+          <div className="text-[9px] uppercase tracking-wider text-muted-foreground">Pending</div>
+        </div>
+      </div>
+      <div className="text-[10px] text-muted-foreground text-center">
+        {lastSyncAt ? `Last synced ${timeAgo(lastSyncAt)}` : 'Not synced yet'}
+      </div>
+    </div>
+  );
+};
 
 export const SettingsView: React.FC<SettingsViewProps> = ({
   customUrl, setCustomUrl, customKey, setCustomKey, customModel, visionModel, setVisionModel, classificationModel, setClassificationModel, customModels, copilotModels, byokModels, activateProviderModel, fetchCustomModels,
@@ -1417,6 +1491,8 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                   <span className={`absolute top-0.5 w-3 h-3 rounded-full bg-background transition-all ${syncResearchSources ? 'right-0.5' : 'left-0.5'}`} />
                 </button>
               </div>
+
+              <SyncStatusPanel />
 
               <Button
                 variant="outline"

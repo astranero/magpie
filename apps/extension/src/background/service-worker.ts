@@ -8,7 +8,7 @@ import {
   saveDocument, listDocuments, updateDocumentSync,
   getUnsyncedDocuments, getChatHistory, clearChatHistory, truncateChatFrom, saveChatMessage,
   linkDocumentToProject, getProject, listProjects,
-  getChunkByAnchor, deleteOrphanDocuments, resetSyncStatus, getKnownDriveFileIds,
+  getChunkByAnchor, deleteOrphanDocuments, resetSyncStatus, getKnownDriveFileIds, getSyncStats,
   saveDocImages, getDocImage, listDocImages
 } from '../lib/db';
 import { chunkDocument, makeDocShortId } from '../lib/chunker';
@@ -652,6 +652,11 @@ const messageHandlers: Record<string, MessageHandler> = {
   },
   IMPORT_FROM_DRIVE: handleImportFromDrive,
   LIST_DRIVE_FILES: handleListDriveFiles,
+  SYNC_STATUS: async () => {
+    const stats = await getSyncStats();
+    const s = await chrome.storage.local.get(['lastDriveSyncAt']);
+    return { ...stats, lastSyncAt: (s.lastDriveSyncAt as string) || null };
+  },
 
   // ── Utils ──
   GET_MAIN_WORLD_YT_RESPONSE: async (_r, sender) => {
@@ -4134,6 +4139,12 @@ async function handleSyncToDrive(request?: Record<string, unknown>): Promise<Rec
     }
   }
 
+  // Stamp the last successful sync so the status panel can show "synced 3m
+  // ago" instead of leaving the user guessing whether anything happened.
+  // Only when something was actually uploaded — a no-op run is not a sync.
+  if (synced > 0) {
+    await chrome.storage.local.set({ lastDriveSyncAt: new Date().toISOString() });
+  }
   return { synced, total: unsynced.length, errors };
 }
 

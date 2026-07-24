@@ -1000,11 +1000,53 @@ export async function truncateChatFrom(chatId: string, messageId: string): Promi
 
 // ── Bulk Operations ──
 
+/**
+ * Whether an un-synced document is eligible to upload.
+ *
+ * The one place this rule lives, shared by getUnsyncedDocuments (what Force
+ * Resync uploads) and getSyncStats (the "N pending" the panel shows). If the
+ * two computed eligibility separately they could disagree, and a status that
+ * contradicts the button beside it is worse than none.
+ */
+export function isSyncEligible(doc: Pick<StoredDocument, 'content'>, syncAll: boolean): boolean {
+  return syncAll || !contentHasTag(doc.content || '', 'research-source');
+}
+
 export async function getUnsyncedDocuments(): Promise<StoredDocument[]> {
   const docs = await listDocuments();
   const s = await chrome.storage.local.get(['syncResearchSources']);
   const syncAll = !!s.syncResearchSources;
-  return docs.filter(d => !d.syncedToDrive && (syncAll || !contentHasTag(d.content || '', 'research-source')));
+  return docs.filter(d => !d.syncedToDrive && isSyncEligible(d, syncAll));
+}
+
+export interface SyncStats {
+  /** Documents flagged as synced to Drive. */
+  synced: number;
+  /** Documents eligible for sync that have not been uploaded yet. */
+  pending: number;
+  /** Every document in the library, including research sources. */
+  total: number;
+}
+
+/**
+ * Counts for the sync-status panel.
+ *
+ * `pending` uses the SAME eligibility filter as getUnsyncedDocuments (research
+ * sources excluded unless the user opted in), so "N pending" here matches
+ * exactly what "Force Resync" would upload — a number that meant something
+ * different from the button next to it would be worse than no number.
+ */
+export async function getSyncStats(): Promise<SyncStats> {
+  const docs = await listDocuments();
+  const s = await chrome.storage.local.get(['syncResearchSources']);
+  const syncAll = !!s.syncResearchSources;
+  let synced = 0;
+  let pending = 0;
+  for (const d of docs) {
+    if (d.syncedToDrive) { synced++; continue; }
+    if (isSyncEligible(d, syncAll)) pending++;
+  }
+  return { synced, pending, total: docs.length };
 }
 
 /**
