@@ -5,7 +5,9 @@ import remarkGfm from 'remark-gfm';
 import remarkMath from 'remark-math';
 import rehypeKatex from 'rehype-katex';
 import { LocalDocument, ChatMessage, ResearchPlan, ResolvedCitation } from '../types';
-import { Send, StopCircle, Sparkles, ChevronDown, ChevronUp, Loader2, Microscope, Search, BookOpen, User, Copy, Check, Paperclip, FileText, RotateCcw, Pencil } from 'lucide-react';
+import { Send, StopCircle, Sparkles, ChevronDown, ChevronUp, Loader2, Microscope, Search, BookOpen, User, Copy, Check, Paperclip, FileText, RotateCcw, Pencil, Globe, Newspaper, Plug, PenLine, ShieldCheck, CheckCircle2, XCircle } from 'lucide-react';
+import { parseResearchActivity, PHASE_ORDER, PHASE_LABEL, type ResearchPhase } from '../../lib/research-activity';
+import type { LucideIcon } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { paletteEntries, SlashCommand } from '../../lib/commands';
 import { ErrorBoundary } from './ErrorBoundary';
@@ -92,6 +94,130 @@ interface PlanCardProps {
   onStart?: (msgId: string, plan: ResearchPlan) => void;
   onCancel?: (msgId: string) => void;
 }
+
+// ─────────────────────────────────────────────
+// Field log — the live research view
+// ─────────────────────────────────────────────
+// A deep run takes minutes and used to show three raw log lines
+// ("[WEB] Reading 3/8: https://…"). This reads the same log through
+// parseResearchActivity and shows where the run actually is: the four phases
+// with the active one lit, a source tally, the batch progress bar, and the
+// newest human line. The raw log is one click away for anyone who wants it.
+
+const PHASE_ICON: Record<string, LucideIcon> = {
+  WEB: Globe, ACADEMIC: BookOpen, NEWS: Newspaper, MCP: Plug,
+  SYNTHESIZING: PenLine, REFS: PenLine,
+  EVALUATING: ShieldCheck, FAITHFULNESS: ShieldCheck, FIGURES: ShieldCheck, AUDIT: ShieldCheck,
+  PLANNING: Sparkles,
+};
+
+const FieldLog: React.FC<{ log: string[]; onStop: () => void }> = ({ log, onStop }) => {
+  const [showRaw, setShowRaw] = useState(false);
+  const act = useMemo(() => parseResearchActivity(log), [log]);
+  const LabelIcon = PHASE_ICON[act.latestLabel] || Loader2;
+  const activeIdx = PHASE_ORDER.indexOf(act.phase as ResearchPhase);
+
+  return (
+    <div className="w-full max-w-[95%] rounded-xl ink-panel shadow-card overflow-hidden animate-in fade-in motion-reduce:animate-none">
+      <div className="flex items-center gap-2 px-3.5 py-2 border-b border-white/10">
+        <Loader2 size={12} className="animate-spin motion-reduce:animate-none text-highlight shrink-0" aria-hidden="true" />
+        <span className="text-xs font-medium opacity-80 flex-1">Field log — chat stays open</span>
+        <button
+          type="button"
+          onClick={onStop}
+          className="text-[11px] font-medium opacity-70 border border-current rounded-md px-1.5 py-0.5 hover:opacity-100 hover:text-red-300 transition-opacity"
+          aria-label="Stop research"
+        >
+          Stop
+        </button>
+      </div>
+
+      <div className="px-3.5 py-3 space-y-3">
+        {/* Phase rail: the four stops, the reached ones lit. */}
+        <ol className="flex items-center gap-1" aria-label="Research progress">
+          {PHASE_ORDER.map((p, i) => {
+            const done = i < activeIdx;
+            const active = i === activeIdx;
+            return (
+              <React.Fragment key={p}>
+                {i > 0 && <span className={`h-px flex-1 ${i <= activeIdx ? 'bg-highlight/60' : 'bg-white/15'}`} aria-hidden="true" />}
+                <span
+                  className={`text-[10px] font-medium px-1.5 py-0.5 rounded-full whitespace-nowrap transition-colors ${
+                    active ? 'bg-highlight/20 text-highlight' :
+                    done ? 'text-white/70' : 'text-white/35'
+                  }`}
+                  aria-current={active ? 'step' : undefined}
+                >
+                  {PHASE_LABEL[p]}
+                </span>
+              </React.Fragment>
+            );
+          })}
+        </ol>
+
+        {/* Source tally: only once anything has been captured or missed. */}
+        {(act.captured > 0 || act.failed > 0) && (
+          <div className="flex items-center gap-3 text-[11px] font-mono">
+            <span className="flex items-center gap-1 text-emerald-300">
+              <CheckCircle2 size={11} aria-hidden="true" /> {act.captured} captured
+            </span>
+            {act.failed > 0 && (
+              <span className="flex items-center gap-1 opacity-45">
+                <XCircle size={11} aria-hidden="true" /> {act.failed} skipped
+              </span>
+            )}
+          </div>
+        )}
+
+        {/* The batch being read right now, as a bar. */}
+        {act.reading && act.reading.total > 0 && (
+          <div className="space-y-1">
+            <div className="flex justify-between text-[10px] font-mono opacity-60">
+              <span>Reading sources</span>
+              <span className="tabular-nums">{act.reading.done}/{act.reading.total}</span>
+            </div>
+            <div className="h-1 rounded-full bg-white/10 overflow-hidden">
+              <div
+                className="h-full bg-highlight transition-all duration-500"
+                style={{ width: `${Math.min(100, (act.reading.done / act.reading.total) * 100)}%` }}
+              />
+            </div>
+          </div>
+        )}
+
+        {/* The newest line, with an icon for its phase. */}
+        <div className="flex items-start gap-2" aria-live="polite">
+          <LabelIcon size={12} className={`mt-0.5 shrink-0 ${LabelIcon === Loader2 ? 'animate-spin motion-reduce:animate-none' : ''} text-highlight/80`} aria-hidden="true" />
+          <span className="text-[11px] leading-relaxed text-white/80 break-words">
+            {act.latest || 'Warming up…'}
+          </span>
+        </div>
+
+        {/* Raw log, folded away. */}
+        {log.length > 0 && (
+          <div className="border-t border-white/10 pt-2">
+            <button
+              type="button"
+              onClick={() => setShowRaw(v => !v)}
+              className="flex items-center gap-1 text-[10px] font-mono uppercase tracking-wider opacity-50 hover:opacity-90 transition-opacity"
+              aria-expanded={showRaw}
+            >
+              {showRaw ? <ChevronUp size={10} /> : <ChevronDown size={10} />}
+              {log.length} steps
+            </button>
+            {showRaw && (
+              <div className="mt-1.5 max-h-40 overflow-y-auto no-scrollbar space-y-0.5">
+                {log.map((line, i) => (
+                  <div key={i} className="text-[10px] font-mono leading-relaxed opacity-45 break-words">{line}</div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+};
 
 const PlanCard: React.FC<PlanCardProps> = ({ msgId, plan, onStart, onCancel }) => {
   const isAcademic = plan.sourceMode === 'academic';
@@ -1015,40 +1141,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
   const firstQueuedIdx = researching[activeProjectId] ? messages.findIndex(m => m.queued) : -1;
   const fieldLog = researching[activeProjectId] ? (
     <div className="flex justify-start" key="field-log">
-      {/* The field log: night-ledger ink panel — the one dark surface in
-          the app, reserved for the agent working through the stacks. */}
-      <div className="w-full max-w-[95%] rounded-xl ink-panel shadow-card overflow-hidden animate-in fade-in motion-reduce:animate-none">
-        <div className="flex items-center gap-2 px-3.5 py-2 border-b border-white/10">
-          <Loader2 size={12} className="animate-spin motion-reduce:animate-none text-highlight shrink-0" aria-hidden="true" />
-          <span className="text-xs font-medium opacity-80 flex-1">
-            Field log — chat stays open
-          </span>
-          <span className="text-[10px] font-mono opacity-50 tabular-nums">
-            {(researchLogs[activeProjectId] || []).length} steps
-          </span>
-          <button
-            type="button"
-            onClick={cancelTask}
-            className="text-[11px] font-medium opacity-70 border border-current rounded-md px-1.5 py-0.5 hover:opacity-100 hover:text-red-300 transition-opacity"
-            aria-label="Stop research"
-          >
-            Stop
-          </button>
-        </div>
-        <div className="px-3.5 py-2.5 space-y-1" aria-live="polite">
-          {(researchLogs[activeProjectId] || []).slice(-3).map((line, i, arr) => (
-            <div
-              key={`${line}-${i}`}
-              className={`text-[10px] font-mono truncate leading-relaxed ${i === arr.length - 1 ? 'text-highlight' : 'opacity-45'}`}
-            >
-              {line}
-            </div>
-          ))}
-          {(researchLogs[activeProjectId] || []).length === 0 && (
-            <div className="text-[10px] font-mono opacity-60">Warming up…</div>
-          )}
-        </div>
-      </div>
+      <FieldLog log={researchLogs[activeProjectId] || []} onStop={cancelTask} />
     </div>
   ) : null;
 
