@@ -1323,6 +1323,39 @@ export const ChatView: React.FC<ChatViewProps> = ({
           </div>
         )}
 
+        {/* Where the answer may come from. Its OWN row above the input pill:
+            placed inside it, this became a flex sibling of the paperclip and
+            the textarea and squeezed the field into a two-line placeholder.
+            The router already decides this well; the control exists so the
+            decision is visible and can be overruled, which is what a silent
+            router earns. */}
+        {onSourceModeChange && (
+          <div className="flex items-center gap-0.5 px-1 pb-1" role="radiogroup" aria-label="Answer source">
+            {([
+              ['auto', 'Auto', 'Let Magpie decide'],
+              ['sources', 'Sources', 'Only my saved sources'],
+              ['web', 'Web', 'Search the web'],
+              ['general', 'General', "The model's own knowledge"],
+            ] as const).map(([mode, label, title]) => (
+              <button
+                key={mode}
+                type="button"
+                role="radio"
+                aria-checked={sourceMode === mode}
+                title={title}
+                onClick={() => onSourceModeChange(mode)}
+                className={`text-[10px] font-medium px-2 py-0.5 rounded-full transition-colors ${
+                  sourceMode === mode
+                    ? 'bg-primary/10 text-primary'
+                    : 'text-muted-foreground hover:text-foreground hover:bg-accent'
+                }`}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+        )}
+
         <div className="relative flex items-end w-full rounded-xl border border-input bg-card shadow-card focus-within:border-primary/70 focus-within:ring-2 focus-within:ring-primary/15 transition-all">
           {input.startsWith('/') && !input.includes(' ') && (() => {
             const matches = paletteEntries(input, customCommands);
@@ -1362,36 +1395,6 @@ export const ChatView: React.FC<ChatViewProps> = ({
               </div>
             );
           })()}
-
-          {/* Where the answer may come from. The router already decides this
-              well; the control exists so the decision is VISIBLE and can be
-              overruled, which is the complaint a silent router earns. */}
-          {onSourceModeChange && (
-            <div className="flex items-center gap-0.5 px-1 pb-1" role="radiogroup" aria-label="Answer source">
-              {([
-                ['auto', 'Auto', 'Let Magpie decide'],
-                ['sources', 'Sources', 'Only my saved sources'],
-                ['web', 'Web', 'Search the web'],
-                ['general', 'General', "The model's own knowledge"],
-              ] as const).map(([mode, label, title]) => (
-                <button
-                  key={mode}
-                  type="button"
-                  role="radio"
-                  aria-checked={sourceMode === mode}
-                  title={title}
-                  onClick={() => onSourceModeChange(mode)}
-                  className={`text-[10px] font-medium px-2 py-0.5 rounded-full transition-colors ${
-                    sourceMode === mode
-                      ? 'bg-primary/10 text-primary'
-                      : 'text-muted-foreground hover:text-foreground hover:bg-accent'
-                  }`}
-                >
-                  {label}
-                </button>
-              ))}
-            </div>
-          )}
 
           {/* Add Context Button (+ Button) */}
           <AddContextButton

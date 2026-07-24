@@ -52,6 +52,29 @@ test('bottom nav switches between Lore, Chat, Config', async () => {
   await page.close();
 });
 
+test('the answer-source control sits ABOVE the input, not inside it', async () => {
+  // Shipped broken once: the control was rendered inside the input pill, so it
+  // became a flex sibling of the paperclip and the textarea and squeezed the
+  // field until the placeholder wrapped onto two lines. Unit tests cannot see
+  // that, so the geometry is asserted here.
+  const page = await context.newPage();
+  await page.goto(`chrome-extension://${extensionId}/sidepanel.html`);
+  await page.getByRole('button', { name: /chat/i }).click();
+
+  const input = page.getByPlaceholder(/Ask a question/i);
+  const auto = page.getByRole('radio', { name: 'Auto', exact: true });
+  await expect(input).toBeVisible({ timeout: 8000 });
+  await expect(auto).toBeVisible();
+
+  const inputBox = (await input.boundingBox())!;
+  const autoBox = (await auto.boundingBox())!;
+  // Its own row: entirely above the field rather than beside it.
+  expect(autoBox.y + autoBox.height).toBeLessThanOrEqual(inputBox.y + 2);
+  // And the field is back to a single line.
+  expect(inputBox.height).toBeLessThan(64);
+  await page.close();
+});
+
 test('command palette lists slash commands including /recall', async () => {
   const page = await context.newPage();
   await page.goto(`chrome-extension://${extensionId}/sidepanel.html`);
