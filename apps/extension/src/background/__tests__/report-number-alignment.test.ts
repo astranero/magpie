@@ -69,13 +69,19 @@ describe('assembleReportBody: [[n]] ↔ Sources alignment', () => {
     const checked = verifyAlignment(body, ordered);
     expect(checked).toBe(5);
 
-    // Citation order: B=1, A=2, C=3; uncited D trails as 4.
+    // Citation order: B=1, A=2, C=3; uncited D is NOT in ## Sources anymore.
     expect(ordered.map(r => r.title)).toEqual(['Nginx Docs', 'Vitest API', 'React Learn', 'Uncited Extra']);
     expect(body).toContain(`[[1](#cite:${sB}.s0.p1)]`);
     expect(body).toContain(`[[2](#cite:${sA}.s1.p0)]`);
     expect(body).toContain(`[[2](#cite:${sA}.s1.p2)]`);
     expect(body).toContain(`[[3](#cite:${sC}.s3.p0)]`);
-    expect(body).toContain('4. [Uncited Extra](https://example.org/never-cited)');
+    // ## Sources holds only the three CITED sources; the uncited one is kept
+    // under its own heading so it no longer pads the citation count.
+    const sourcesBlock = body.slice(body.indexOf('## Sources'), body.indexOf('## Additional sources reviewed'));
+    expect(sourcesBlock).not.toContain('Uncited Extra');
+    expect(sourcesBlock.match(/^\d+\. /gm)?.length).toBe(3);
+    expect(body).toContain('## Additional sources reviewed');
+    expect(body).toContain('1. [Uncited Extra](https://example.org/never-cited)');
   });
 
   it('holds across 40 randomized reports (fuzz: order, repeats, uncited, url-less)', () => {

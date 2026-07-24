@@ -949,14 +949,77 @@ export function isRetractedTitle(title?: string): boolean {
 }
 
 /** Dedupe records: same document (docId) or same URL = same source. */
+// Mirror/aggregator hosts that re-host a paper under their own URL. On these we
+// trust a bare arXiv id in the path; on arbitrary hosts we do NOT, or a random
+// "2024.12345" in a slug would wrongly merge two unrelated pages.
+const PAPER_MIRRORS = /scribd\.com|researchgate\.net|semanticscholar\.org|scholar\.google|\.core\.ac\.uk/i;
+
+/**
+ * The identity of the DOCUMENT a URL points at, so the four faces of one paper
+ * — arxiv.org/abs, /pdf, /html, a scribd re-upload — collapse to a single
+ * source instead of inflating the bibliography.
+ *
+ * Order matters: a globally-unique paper id (arXiv, DOI) wins over the URL, so
+ * different URLs of the same paper share a key. Everything else falls back to a
+ * PATH-PRESERVING normalized URL, so two genuinely different pages on one
+ * domain stay distinct. Pure — unit-tested.
+ */
+export function canonicalSourceKey(url: string): string {
+  const u = (url || '').trim();
+  if (!u) return '';
+
+  // arXiv id from an arXiv/HuggingFace URL (abs/pdf/html, any version).
+  let arx = u.match(/arxiv\.org\/(?:abs|pdf|html)\/(\d{4}\.\d{4,5})/i)?.[1]
+        ?? u.match(/huggingface\.co\/papers\/(\d{4}\.\d{4,5})/i)?.[1]
+        ?? null;
+  // On a known mirror only, trust a bare id in the path.
+  if (!arx && PAPER_MIRRORS.test(u)) arx = u.match(/(\d{4}\.\d{4,5})(?:v\d+)?/)?.[1] ?? null;
+  if (arx) return `arxiv:${arx}`;
+
+  const doi = extractDoi(u);
+  if (doi) return `doi:${doi.toLowerCase()}`;
+
+  // Normalized URL fallback: drop scheme, leading www, a .html/.pdf suffix, a
+  // trailing slash, and the query/fragment — but keep the path.
+  try {
+    const p = new URL(u.includes('://') ? u : `https://${u}`);
+    const host = p.host.replace(/^www\./i, '').toLowerCase();
+    const path = p.pathname.replace(/\/+$/, '').replace(/\.(html?|pdf)$/i, '');
+    return `${host}${path}`.toLowerCase();
+  } catch {
+    return u.toLowerCase();
+  }
+}
+
+/**
+ * Collapse records that point at the same document. Two records merge when they
+ * share a docId OR a canonical URL key — so the SAME saved doc scraped under two
+ * URLs collapses (docId match), AND the SAME paper scraped as two different docs
+ * under abs/pdf/html/mirror collapses (canonical-key match). One paper, one row,
+ * however many faces it arrived under. On a merge the higher-tier record wins
+ * (arxiv.org over a scribd mirror); first-seen position is kept.
+ */
 export function dedupeSourceRecords(records: SourceRecord[]): SourceRecord[] {
-  const seen = new Set<string>();
+  const keyToIdx = new Map<string, number>();   // "doc:<id>" | "canon:<key>" → index in out
   const out: SourceRecord[] = [];
   for (const r of records) {
-    const key = r.docId || r.url;
-    if (!key || seen.has(key)) continue;
-    seen.add(key);
-    out.push(r);
+    const docKey = r.docId ? `doc:${r.docId}` : '';
+    const canon = canonicalSourceKey(r.url);
+    const canonKey = canon ? `canon:${canon}` : '';
+    if (!docKey && !canonKey) continue;   // nothing to identify it by
+
+    let idx = docKey && keyToIdx.has(docKey) ? keyToIdx.get(docKey)!
+            : canonKey && keyToIdx.has(canonKey) ? keyToIdx.get(canonKey)!
+            : -1;
+    if (idx === -1) {
+      idx = out.length;
+      out.push(r);
+    } else if (r.tier === 'high' && out[idx].tier !== 'high') {
+      out[idx] = r;   // same document, better source for it
+    }
+    // Register BOTH keys at this index so a later record matching either merges.
+    if (docKey) keyToIdx.set(docKey, idx);
+    if (canonKey) keyToIdx.set(canonKey, idx);
   }
   return out;
 }
@@ -1017,6 +1080,11 @@ export function linkifyReportCitations(
   }
   for (const short of collided) byShort.delete(short);
   const numByShort = new Map<string, number>();
+  // Collapse citations of the SAME paper scraped as two docs (arxiv abs + pdf →
+  // two docIds → two short ids) onto one number, so it is [7] everywhere and
+  // appears once in Sources — the "cited 4 times as 4 sources" defect. Keyed by
+  // canonical document identity; url-less records (canon '') never collapse.
+  const numByCanon = new Map<string, number>();
   const cited: SourceRecord[] = [];
   const re = /\[(([a-z]\w{1,8})\.s\d+\.p\d+(?:\.\d+)?)\]/gi;
   const text = synthesis.replace(re, (full, anchor: string, short: string) => {
@@ -1024,9 +1092,17 @@ export function linkifyReportCitations(
     if (!rec) return full; // unknown anchor — leave untouched rather than drop it
     let n = numByShort.get(short);
     if (n === undefined) {
-      n = cited.length + 1;
-      numByShort.set(short, n);
-      cited.push(rec);
+      const canon = canonicalSourceKey(rec.url);
+      const shared = canon ? numByCanon.get(canon) : undefined;
+      if (shared !== undefined) {
+        n = shared;                    // same paper, already numbered — reuse it
+        numByShort.set(short, n);
+      } else {
+        n = cited.length + 1;
+        numByShort.set(short, n);
+        if (canon) numByCanon.set(canon, n);
+        cited.push(rec);
+      }
     }
     // Keep the CHUNK anchor, as a #cite link both renderers turn into a
     // chunk-jump chip. The old form, [[n](webUrl)], threw the anchor away —
@@ -1820,11 +1896,46 @@ export function assembleReportBody(
   // feeds brief text that may already contain one. Dropped here, where every
   // synthesis path converges.
   const linkedSynthesis = dropDuplicateTables(stripUnresolvableAnchors(linked));
-  const unique = dedupeSourceRecords(sources).filter(r => r.url || r.title);
-  const citedKeys = new Set(cited.map(r => r.docId || r.url));
-  const ordered = [...cited, ...unique.filter(r => !citedKeys.has(r.docId || r.url))];
-  const sourceLines = ordered.map((r, i) => `${i + 1}. ${renderSourceEntry(r)}`);
-  const body = `${linkedSynthesis}\n\n## Sources\n${sourceLines.join('\n')}`;
+
+  // ## Sources lists ONLY what the prose actually cited, in citation order — so
+  // [[n]] still aligns with line n. A source count that equals the citations is
+  // an honest one; padding it with every scrape (the old [...cited, ...uncited])
+  // made "42 sources" read as breadth it didn't have.
+  const citedLines = cited.map((r, i) => `${i + 1}. ${renderSourceEntry(r)}`);
+
+  // Collected but never cited: kept, not hidden, under their own heading — and
+  // deduped by canonical identity so a paper cited via one URL doesn't reappear
+  // here under another. Excluded if they share a docId OR a canonical key with
+  // anything cited.
+  const citedDocIds = new Set(cited.map(r => r.docId).filter(Boolean));
+  const citedCanon = new Set(cited.map(r => canonicalSourceKey(r.url)).filter(Boolean));
+  const reviewed = dedupeSourceRecords(sources).filter(r =>
+    (r.url || r.title) &&
+    !(r.docId && citedDocIds.has(r.docId)) &&
+    !citedCanon.has(canonicalSourceKey(r.url)));
+
+  let body = `${linkedSynthesis}\n\n## Sources\n${citedLines.join('\n')}`;
+  if (reviewed.length) {
+    const revLines = reviewed.map((r, i) => `${i + 1}. ${renderSourceEntry(r)}`);
+    body += `\n\n## Additional sources reviewed\n${revLines.join('\n')}`;
+  }
+
+  // Honest note when the citations lean on one non-primary domain — "42 sources"
+  // hides that four came from a single blog. Counts CITED sources only.
+  const byHost = new Map<string, number>();
+  for (const r of cited) {
+    if (r.tier === 'high') continue;   // primary docs/papers don't need flagging
+    let host = '';
+    try { host = new URL(r.url).host.replace(/^www\./i, ''); } catch { /* no host */ }
+    if (host) byHost.set(host, (byHost.get(host) ?? 0) + 1);
+  }
+  const heavy = [...byHost.entries()].filter(([, n]) => n >= 3).sort((a, b) => b[1] - a[1]);
+  if (heavy.length) {
+    const notes = heavy.map(([host, n]) => `${n} citations come from \`${host}\``).join('; ');
+    body += `\n\n_Source note: ${notes} — weigh these as one voice, not independent corroboration._`;
+  }
+
+  const ordered = [...cited, ...reviewed];
   return { body, cited, ordered };
 }
 
