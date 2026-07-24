@@ -19,6 +19,7 @@ const entries: Record<string, { input: string; fileName: string }> = {
 const target = entries[entry];
 
 export default defineConfig({
+  define: { __BUILD_STAMP__: JSON.stringify(new Date().toISOString()) },
   resolve: {
     alias: {
       "@": resolve(__dirname, "./src"),

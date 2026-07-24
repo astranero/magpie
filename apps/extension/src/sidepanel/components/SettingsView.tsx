@@ -425,6 +425,17 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   // Research settings are self-contained: read/write chrome.storage directly.
   const [researchDepth, setResearchDepth] = useState<'standard' | 'deep' | 'exhaustive'>('standard');
   const [reportLength, setReportLength] = useState<'concise' | 'standard' | 'comprehensive'>('standard');
+  // Asked from the worker rather than read locally: the point is to compare the
+  // two, which only works if each reports its OWN build.
+  const [workerBuild, setWorkerBuild] = useState('');
+  useEffect(() => {
+    try {
+      chrome.runtime.sendMessage({ action: 'GET_BUILD_INFO' }, (r: any) => {
+        if (chrome.runtime.lastError) { setWorkerBuild('unavailable'); return; }
+        setWorkerBuild(r?.build || 'unknown');
+      });
+    } catch { setWorkerBuild('unavailable'); }
+  }, []);
   const [sourceQuality, setSourceQuality] = useState<'all' | 'high'>('all');
   const [academicDepth, setAcademicDepth] = useState<'abstract' | 'full'>('full');
   const [contextTokens, setContextTokens] = useState('32768');
@@ -821,6 +832,23 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
             />
             <p className="text-[10px] text-muted-foreground font-mono">Used for reading images & scanned PDFs (uses text model if blank).</p>
           </div>
+      </Section>
+
+      {/* ── About ── */}
+      <Section id="about" title="About" subtitle="Which build is actually running." defaultOpen={false}>
+        <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-[11px] font-mono">
+          <dt className="text-muted-foreground">Version</dt>
+          <dd>{chrome.runtime?.getManifest?.().version || '—'}</dd>
+          <dt className="text-muted-foreground">Panel build</dt>
+          <dd>{__BUILD_STAMP__}</dd>
+          <dt className="text-muted-foreground">Worker build</dt>
+          <dd>{workerBuild || 'asking…'}</dd>
+        </dl>
+        <p className="text-[10px] text-muted-foreground leading-normal">
+          The panel and the service worker are loaded separately. Reopening the panel
+          picks up panel changes; worker changes need a reload on chrome://extensions.
+          If these two stamps disagree, that is what happened.
+        </p>
       </Section>
 
       {/* ── Appearance ── */}

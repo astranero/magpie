@@ -136,7 +136,13 @@ installCrashHandlers('sw');
 installCrumbReceiver();
 dumpCrashLog('[Magpie crashlog]').catch(() => {});
 const SW_BOOT_AT = Date.now();
-crumb('sw', 'service worker started', { build: 'parse-worker-fixed' });
+// The hardcoded build label this replaced ('parse-worker-fixed') was written
+// once and never updated, so it told you nothing about what was running.
+// __BUILD_STAMP__ is injected at build time, and the console line means the
+// answer to "did my change load?" is one glance at the service-worker console
+// rather than an inference from behaviour.
+console.log(`[Magpie] service worker started — build ${__BUILD_STAMP__}`);
+crumb('sw', 'service worker started', { build: __BUILD_STAMP__ });
 
 // The offscreen doc can't read chrome.storage to learn the inference device, and
 // can't watch it for changes — so we push changes to it from here (this context
@@ -566,6 +572,7 @@ const messageHandlers: Record<string, MessageHandler> = {
     return { generating: liveChatStreams.has(chatId), full: liveChatStreams.get(chatId) || '' };
   },
   CLEAR_CHAT_HISTORY: handleClearChatHistory,
+  GET_BUILD_INFO: async () => ({ build: __BUILD_STAMP__, version: chrome.runtime.getManifest().version }),
   TRUNCATE_CHAT_FROM: handleTruncateChatFrom,
   CANCEL_TASK: handleCancelTask,
 

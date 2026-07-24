@@ -32,7 +32,17 @@ function patchServiceWorkerPolyfill(): Plugin {
 // Content scripts (content.js, inject.js) are built by vite.content.config.ts
 // as self-contained IIFE bundles, because content scripts cannot use ES module
 // imports — sharing chunks with these entries would break them.
+// Build stamp. "Did my change take effect?" was unanswerable from inside the
+// running extension: an unpacked build looks identical whether Chrome picked up
+// the new files or is still running the previous service worker. Baking the
+// build time in makes it checkable in one glance instead of inferred from
+// behaviour.
+const BUILD_STAMP = new Date().toISOString().replace('T', ' ').slice(0, 19) + 'Z';
+
 export default defineConfig({
+  define: {
+    __BUILD_STAMP__: JSON.stringify(BUILD_STAMP),
+  },
   plugins: [
     react(),
     patchServiceWorkerPolyfill(),
