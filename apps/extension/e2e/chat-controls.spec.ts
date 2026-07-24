@@ -136,7 +136,13 @@ test('regenerate replaces the answer instead of appending a second one', async (
   expect(before, 'mock did not serialise its completions').toBeTruthy();
 
   await answers.last().hover();
-  await page.getByRole('button', { name: /regenerate/i }).last().click();
+  // Two-step confirm: the first click arms ("Replace answer?"), the second
+  // commits. A single click must NOT regenerate — it is a discard.
+  const regen = page.getByRole('button', { name: /regenerate answer/i }).last();
+  await regen.click();
+  await expect(page.getByText('Replace answer?')).toBeVisible();
+  await expect(page.getByText(before!, { exact: false })).toHaveCount(1);   // still the original
+  await page.getByRole('button', { name: /confirm regenerate/i }).last().click();
 
   // The answer COUNT is unchanged — replaced, not appended…
   await expect(answers).toHaveCount(total, { timeout: 15000 });

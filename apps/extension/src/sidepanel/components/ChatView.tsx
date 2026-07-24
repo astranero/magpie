@@ -912,6 +912,38 @@ const ThinkingIndicator: React.FC<{ phase?: string; reasoning: string }> = ({ ph
 
 // Copy Message Button Component
 // ─────────────────────────────────────────────
+// Regenerate discards the current answer, so it confirms first (two-step arm,
+// like the workspace-delete and edit flows). Bordered chip to match Copy — the
+// old bare text button was easy to miss and easy to fat-finger.
+const RegenerateButton: React.FC<{ onConfirm: () => void; disabled?: boolean }> = ({ onConfirm, disabled }) => {
+  const [armed, setArmed] = useState(false);
+  // Auto-disarm so a stray first click doesn't leave it primed indefinitely.
+  useEffect(() => {
+    if (!armed) return;
+    const t = setTimeout(() => setArmed(false), 3500);
+    return () => clearTimeout(t);
+  }, [armed]);
+
+  return (
+    <button
+      type="button"
+      disabled={disabled}
+      onClick={() => { if (armed) { setArmed(false); onConfirm(); } else setArmed(true); }}
+      onBlur={() => setArmed(false)}
+      className={`inline-flex items-center gap-1 text-[10px] font-medium px-1.5 py-0.5 rounded border shadow-sm transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${
+        armed
+          ? 'bg-amber-500/15 border-amber-500/40 text-amber-700 dark:text-highlight'
+          : 'bg-muted/50 border-border/50 text-muted-foreground hover:text-foreground'
+      }`}
+      title={armed ? 'Click again to replace this answer' : 'Ask again and replace this answer'}
+      aria-label={armed ? 'Confirm regenerate — replaces this answer' : 'Regenerate answer'}
+    >
+      <RotateCcw size={10} />
+      <span>{armed ? 'Replace answer?' : 'Regenerate'}</span>
+    </button>
+  );
+};
+
 const CopyButton: React.FC<{ text: string }> = ({ text }) => {
   const [copied, setCopied] = useState(false);
 
@@ -1478,21 +1510,14 @@ export const ChatView: React.FC<ChatViewProps> = ({
               </div>
             )}
 
-            {/* Action row for assistant messages */}
+            {/* Action row for assistant messages. Kept faintly visible rather
+                than fully hidden — the old opacity-0 meant Copy and Regenerate
+                only existed once you happened to hover the message. */}
             {m.role === 'assistant' && !m.streaming && (
-              <div className="flex items-center gap-2 px-1 mt-0.5 opacity-0 hover:opacity-100 focus-within:opacity-100 transition-opacity">
+              <div className="flex items-center gap-2 px-1 mt-1 opacity-70 hover:opacity-100 focus-within:opacity-100 transition-opacity">
                 <CopyButton text={m.text} />
                 {onRegenerate && (
-                  <button
-                    type="button"
-                    onClick={() => onRegenerate(m.id)}
-                    disabled={busy}
-                    className="flex items-center gap-1 text-[10px] font-medium text-muted-foreground hover:text-foreground disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
-                    title="Ask again and replace this answer"
-                  >
-                    <RotateCcw size={10} />
-                    <span>Regenerate</span>
-                  </button>
+                  <RegenerateButton onConfirm={() => onRegenerate(m.id)} disabled={busy} />
                 )}
               </div>
             )}
