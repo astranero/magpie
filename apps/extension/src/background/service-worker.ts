@@ -13,6 +13,7 @@ import {
 } from '../lib/db';
 import { chunkDocument, makeDocShortId } from '../lib/chunker';
 import { selectHistory } from '../lib/chat-memory';
+import { shouldSuggestFollowUps, parseFollowUps, FOLLOW_UP_PROMPT } from '../lib/follow-ups';
 import type { EmbeddedImage } from '../lib/pdf-parser';
 import { buildCitationContext, CITATION_SYSTEM_PROMPT, parseResponseCitations } from '../lib/citations';
 import { buildFrontmatter, hasFrontmatter } from '../lib/frontmatter';
@@ -1583,7 +1584,13 @@ const RESPONSE_STYLE =
   `• Do NOT end with a "Sources:" line or a list of URLs — the app shows sources separately.\n` +
   `•${LANGUAGE_RULE}`;
 
-async function buildChatRequest(chatId: string, projectId: string, prompt: string, signal: AbortSignal, pageContext?: PageContext | null, onStatus?: (s: string) => void): Promise<{ systemPrompt: string; formattedHistory: Array<{ role: string; content: string }>; grounded: boolean; place?: string; branch: ChatBranch }> {
+/**
+ * Where an answer may come from, when the user says rather than the router
+ * guesses. 'auto' is the existing routing, unchanged.
+ */
+export type SourceMode = 'auto' | 'sources' | 'web' | 'general';
+
+async function buildChatRequest(chatId: string, projectId: string, prompt: string, signal: AbortSignal, pageContext?: PageContext | null, onStatus?: (s: string) => void, sourceMode: SourceMode = 'auto'): Promise<{ systemPrompt: string; formattedHistory: Array<{ role: string; content: string }>; grounded: boolean; place?: string; branch: ChatBranch }> {
   // BATCH: workspace docs, project rules, locale, history, web-fallback — five
   // separate async sources that previously ran as five sequential awaits. Run
   // them concurrently where possible. History must land first (formattedHistory
@@ -1646,6 +1653,18 @@ async function buildChatRequest(chatId: string, projectId: string, prompt: strin
   //
   // Only use the onboarding-style invite at conversation START. Mid-conversation
   // "ok"/"thanks"/"hi" gets a brief conversational reply instead.
+  // Explicit override: answer from the model's own knowledge only. Placed ahead
+  // of every other branch so it genuinely overrides rather than competing.
+  if (sourceMode === 'general') {
+    onStatus?.('Writing the answer…');
+    const systemPrompt = rulesBlock + localeBlock +
+      `You are a helpful assistant. The user has asked you to answer from your OWN general knowledge — ` +
+      `do NOT search the web and do NOT use their saved sources, even if some would be relevant. ` +
+      `Say plainly when something is outside what you know rather than guessing.` +
+      RESPONSE_STYLE;
+    return { systemPrompt: LANGUAGE_DIRECTIVE + systemPrompt, formattedHistory, grounded: false, place, branch: 'general' };
+  }
+
   if (isChitchat(prompt)) {
     onStatus?.('Writing the answer…');
     const isFresh = formattedHistory.length < 2;
@@ -1849,9 +1868,17 @@ async function buildChatRequest(chatId: string, projectId: string, prompt: strin
   // Location/live questions ("weather today") must not ground on the workspace —
   // a stray chunk that clears the confidence bar sends them to the citation
   // refusal ("cannot answer from sources") instead of a localized web answer.
-  const groundOnWorkspace = !usePage &&
-    !isLocationDependent(effectiveQuery) &&
-    isConfidentMatch(relevantChunks as Array<{ rerankScore?: number }>);
+  //
+  // sourceMode is the user overruling the router. 'sources' grounds on the
+  // workspace whenever anything was retrieved at all, skipping the confidence
+  // gate — they asked for their own material, so a weak match beats silently
+  // answering from somewhere else. 'web' refuses to ground, so the web branch
+  // below takes the turn.
+  const groundOnWorkspace = sourceMode === 'web' ? false
+    : sourceMode === 'sources' ? relevantChunks.length > 0
+    : (!usePage &&
+       !isLocationDependent(effectiveQuery) &&
+       isConfidentMatch(relevantChunks as Array<{ rerankScore?: number }>));
   if (groundOnWorkspace) {
     grounded = true;
     // Build citation-anchored context (generous — favor fuller grounding over
@@ -2852,7 +2879,8 @@ chrome.runtime.onConnect.addListener((port) => {
       const pageCtx = req.includePageContext ? await getPageContext().catch(() => null) : null;
       const built = await buildChatRequest(
         chatId, projectId, prompt, localController.signal, pageCtx,
-        (text) => safePost({ type: 'STATUS', text })
+        (text) => safePost({ type: 'STATUS', text }),
+        (req.sourceMode as SourceMode) || 'auto',
       );
       const { formattedHistory, grounded, place, branch } = built;
       let systemPrompt = built.systemPrompt;
@@ -2969,7 +2997,10 @@ chrome.runtime.onConnect.addListener((port) => {
       // model's own judgment is the ground truth the scores only approximate.
       // Command turns (systemPromptOverride, e.g. /compare) get the net too —
       // a refusal there used to be FINAL, a dead end with no escalation.
-      if (grounded && isRefusalAnswer(full) && await isChatWebFallbackEnabled()) {
+      // 'sources' means the user explicitly wanted their own material. Silently
+      // escalating to the web would answer a different question than the one
+      // they asked, so the refusal stands.
+      if (grounded && req.sourceMode !== 'sources' && isRefusalAnswer(full) && await isChatWebFallbackEnabled()) {
         safePost({ type: 'STATUS', text: 'Not in your workspace — searching the web…' });
         // Localize the query (same as the main web branch) so "weather today"
         // resolves to the user's region, not the search provider's server IP.
@@ -3032,6 +3063,27 @@ chrome.runtime.onConnect.addListener((port) => {
         });
       }
       safePost({ type: 'DONE', fullText: full });
+
+      // FOLLOW-UPS — after DONE, so they never delay the answer. A separate
+      // call rather than a tail instruction on the answer prompt: the codebase
+      // already found that trailing formatting instructions are "routinely
+      // skipped by small models", and a separate call also keeps the
+      // suggestions out of the saved transcript, out of history, and out of the
+      // screen reader's read of the reply. Shares the turn's controller, so
+      // Stop kills it too.
+      if (shouldSuggestFollowUps(branch, !!systemPromptOverride) && full.trim().length > 200) {
+        chatWithCustom(
+          FOLLOW_UP_PROMPT,
+          [],
+          `USER ASKED:\n${prompt}\n\nANSWER GIVEN:\n${full.slice(0, 3000)}`,
+          localController.signal,
+        ).then(raw => {
+          const items = parseFollowUps(raw);
+          if (!items.length || localController.signal.aborted) return;
+          safePost({ type: 'FOLLOWUPS', items });
+          chrome.runtime.sendMessage({ action: 'CHAT_FOLLOWUPS', chatId, items }).catch(() => {});
+        }).catch(() => { /* suggestions are a bonus; never surface a failure */ });
+      }
     } catch (err) {
       const aborted = localController.signal.aborted;
       if (full.trim()) {

@@ -353,6 +353,11 @@ loadChatHistory(activeChatId).then(() => {
   // model that thinks for a minute before its first answer token shows signs
   // of life instead of a frozen 'Thinking…'.
   const [reasoning, setReasoning] = useState<Record<string, string>>({});
+  // Suggested next questions for the last answer, per chat. Ephemeral like
+  // reasoning: never saved, cleared when the next turn starts.
+  const [followUps, setFollowUps] = useState<Record<string, string[]>>({});
+  // Where answers may come from. 'auto' is the router deciding, as before.
+  const [sourceMode, setSourceMode] = useState<'auto' | 'sources' | 'web' | 'general'>('auto');
   const [researching, setResearching] = useState<Record<string, boolean>>({});
   const [researchLogs, setResearchLogs] = useState<Record<string, string[]>>({});
   const msgEnd = useRef<HTMLDivElement>(null);
@@ -615,6 +620,11 @@ loadChatHistory(activeChatId).then(() => {
         let aId = mirrorStreamRef.current[m.chatId];
         if (!aId) { aId = uid(); mirrorStreamRef.current[m.chatId] = aId; setGenerating(prev => ({ ...prev, [m.chatId]: true })); }
         appendMirrorDelta(m.chatId, aId, (m.text as string) || '');
+        return;
+      }
+      if (m.action === 'CHAT_FOLLOWUPS') {
+        if (streamingChatsRef.current.has(m.chatId)) return;
+        setFollowUps(prev => ({ ...prev, [m.chatId]: (m.items as string[]) || [] }));
         return;
       }
       if (m.action === 'CHAT_REASONING') {
@@ -1208,6 +1218,7 @@ loadChatHistory(activeChatId).then(() => {
           if (r.visionModel) setVisionModel(r.visionModel);
           setAutoLinkCaptures(r.autoLinkCaptures !== false); // default ON
           setIncludePageContext(r.includePageContext !== false); // default ON
+          if (r.chatSourceMode) setSourceMode(r.chatSourceMode as any);
           setSyncResearchSources(r.syncResearchSources === true); // default OFF
           if (typeof r.routeChatThroughCli === 'boolean') {
             setRouteChatThroughCli(r.routeChatThroughCli ? 'enabled' : 'disabled');
@@ -1546,6 +1557,7 @@ loadChatHistory(activeChatId).then(() => {
     setGenerating(prev => ({ ...prev, [currentChatId]: true }));
     // Previous turn's chain of thought belongs to the previous answer.
     setReasoning(prev => (prev[currentChatId] ? { ...prev, [currentChatId]: '' } : prev));
+    setFollowUps(prev => (prev[currentChatId]?.length ? { ...prev, [currentChatId]: [] } : prev));
     streamingChatsRef.current.add(currentChatId);
 
     const port = chrome.runtime.connect({ name: 'chat-stream' });
@@ -1570,6 +1582,8 @@ loadChatHistory(activeChatId).then(() => {
     port.onMessage.addListener((m: any) => {
       if (m.type === 'STATUS') {
         setThinkingStatus(prev => ({ ...prev, [currentChatId]: m.text || '' }));
+      } else if (m.type === 'FOLLOWUPS') {
+        setFollowUps(prev => ({ ...prev, [currentChatId]: (m.items as string[]) || [] }));
       } else if (m.type === 'REASONING') {
         setReasoning(prev => ({ ...prev, [currentChatId]: (prev[currentChatId] || '') + (m.text || '') }));
       } else if (m.type === 'DELTA') {
@@ -1943,6 +1957,7 @@ loadChatHistory(activeChatId).then(() => {
     setGenerating(prev => ({ ...prev, [currentChatId]: true }));
     // Previous turn's chain of thought belongs to the previous answer.
     setReasoning(prev => (prev[currentChatId] ? { ...prev, [currentChatId]: '' } : prev));
+    setFollowUps(prev => (prev[currentChatId]?.length ? { ...prev, [currentChatId]: [] } : prev));
     streamingChatsRef.current.add(currentChatId);
 
     if (typeof chrome === 'undefined' || !chrome.runtime?.connect) {
@@ -1975,6 +1990,8 @@ loadChatHistory(activeChatId).then(() => {
       } else if (m?.type === 'RESET') {
         // Worker is replacing the answer (refusal → web-sourced answer).
         resetStreamingMessage(currentChatId, assistantId);
+      } else if (m?.type === 'FOLLOWUPS') {
+        setFollowUps(prev => ({ ...prev, [currentChatId]: (m.items as string[]) || [] }));
       } else if (m?.type === 'REASONING') {
         setReasoning(prev => ({ ...prev, [currentChatId]: (prev[currentChatId] || '') + (m.text || '') }));
       } else if (m?.type === 'DELTA') {
@@ -2005,7 +2022,8 @@ loadChatHistory(activeChatId).then(() => {
       prompt: messageText,
       chatId: currentChatId,
       projectId: currentProjectId,
-      includePageContext: includePageContext || forcePageContext
+      includePageContext: includePageContext || forcePageContext,
+      sourceMode
     });
   });
 
@@ -2339,6 +2357,12 @@ loadChatHistory(activeChatId).then(() => {
               generating={generating}
               thinkingStatus={thinkingStatus}
               reasoning={reasoning}
+              followUps={followUps}
+              sourceMode={sourceMode}
+              onSourceModeChange={(m) => {
+                setSourceMode(m);
+                try { chrome.storage.local.set({ chatSourceMode: m }); } catch { /* private mode */ }
+              }}
               onRegenerate={regenerateAnswer}
               onEditAndRerun={editAndRerun}
               researching={researching}

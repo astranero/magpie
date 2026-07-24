@@ -32,6 +32,11 @@ interface ChatViewProps {
   thinkingStatus?: Record<string, string>;
   /** Live chain of thought from a reasoning model, per chat. Never persisted. */
   reasoning?: Record<string, string>;
+  /** Suggested next questions for the last answer, per chat. Never persisted. */
+  followUps?: Record<string, string[]>;
+  /** Where answers may come from; 'auto' lets the router decide. */
+  sourceMode?: 'auto' | 'sources' | 'web' | 'general';
+  onSourceModeChange?: (m: 'auto' | 'sources' | 'web' | 'general') => void;
   /** Ask the same question again, replacing this answer. */
   onRegenerate?: (assistantMsgId: string) => void;
   /** Replace an earlier question and re-run from it; later turns are discarded. */
@@ -870,6 +875,9 @@ export const ChatView: React.FC<ChatViewProps> = ({
   generating,
   thinkingStatus = {},
   reasoning,
+  followUps,
+  sourceMode = 'auto',
+  onSourceModeChange,
   onRegenerate,
   onEditAndRerun,
   researching,
@@ -1270,6 +1278,24 @@ export const ChatView: React.FC<ChatViewProps> = ({
             reasoning={reasoning?.[activeChatId] || ''}
           />
         )}
+        {/* Suggested next questions. Rendered OUTSIDE the message list on
+            purpose: they belong to the conversation's current state, not to a
+            saved turn, and must never be mistaken for part of the reply. */}
+        {!generating[activeChatId] && (followUps?.[activeChatId]?.length ?? 0) > 0 && (
+          <div className="flex flex-wrap gap-1.5 pt-1" aria-label="Suggested follow-up questions">
+            {followUps![activeChatId].map((q, i) => (
+              <button
+                key={i}
+                type="button"
+                dir="auto"
+                onClick={() => { setInput(q); requestAnimationFrame(() => send()); }}
+                className="text-left text-[11px] leading-snug px-2.5 py-1.5 rounded-full border border-border bg-card hover:bg-accent hover:border-primary/40 text-muted-foreground hover:text-foreground transition-colors max-w-full"
+              >
+                {q}
+              </button>
+            ))}
+          </div>
+        )}
         <div ref={msgEnd} />
       </div>
 
@@ -1336,6 +1362,36 @@ export const ChatView: React.FC<ChatViewProps> = ({
               </div>
             );
           })()}
+
+          {/* Where the answer may come from. The router already decides this
+              well; the control exists so the decision is VISIBLE and can be
+              overruled, which is the complaint a silent router earns. */}
+          {onSourceModeChange && (
+            <div className="flex items-center gap-0.5 px-1 pb-1" role="radiogroup" aria-label="Answer source">
+              {([
+                ['auto', 'Auto', 'Let Magpie decide'],
+                ['sources', 'Sources', 'Only my saved sources'],
+                ['web', 'Web', 'Search the web'],
+                ['general', 'General', "The model's own knowledge"],
+              ] as const).map(([mode, label, title]) => (
+                <button
+                  key={mode}
+                  type="button"
+                  role="radio"
+                  aria-checked={sourceMode === mode}
+                  title={title}
+                  onClick={() => onSourceModeChange(mode)}
+                  className={`text-[10px] font-medium px-2 py-0.5 rounded-full transition-colors ${
+                    sourceMode === mode
+                      ? 'bg-primary/10 text-primary'
+                      : 'text-muted-foreground hover:text-foreground hover:bg-accent'
+                  }`}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+          )}
 
           {/* Add Context Button (+ Button) */}
           <AddContextButton
