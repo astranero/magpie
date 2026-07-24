@@ -8,7 +8,7 @@ import {
   saveDocument, listDocuments, updateDocumentSync,
   getUnsyncedDocuments, getChatHistory, clearChatHistory, truncateChatFrom, saveChatMessage,
   linkDocumentToProject, getProject, listProjects,
-  getChunkByAnchor, deleteOrphanDocuments, resetSyncStatus,
+  getChunkByAnchor, deleteOrphanDocuments, resetSyncStatus, getKnownDriveFileIds,
   saveDocImages, getDocImage, listDocImages
 } from '../lib/db';
 import { chunkDocument, makeDocShortId } from '../lib/chunker';
@@ -4026,20 +4026,29 @@ async function ensureFolder(token: string): Promise<string> {
   return createData.id;
 }
 
+/**
+ * Write a document to Drive.
+ *
+ * With `existingFileId` this UPDATES that file; without one it creates a new
+ * file in `folderId`. The update path is not an optimisation — creating
+ * unconditionally meant any re-upload of an already-synced document left a
+ * duplicate behind, which is how a library ends up with several copies of
+ * everything.
+ */
 async function uploadMarkdown(
   token: string,
   folderId: string,
   fileName: string,
-  content: string
+  content: string,
+  existingFileId?: string
 ): Promise<string> {
   const boundary = '----MAGPIE_BOUNDARY';
 
-// Brand import moved to top level removed here due to top-level import restriction
-  const metadata = {
-    name: fileName,
-    mimeType: 'text/markdown',
-    parents: [folderId]
-  };
+  // `parents` is only valid on create. Sending it in a PATCH is rejected by
+  // Drive — moving a file between folders needs the addParents query param.
+  const metadata: Record<string, unknown> = existingFileId
+    ? { name: fileName, mimeType: 'text/markdown' }
+    : { name: fileName, mimeType: 'text/markdown', parents: [folderId] };
 
   const body =
     `--${boundary}\r\n` +
@@ -4050,8 +4059,12 @@ async function uploadMarkdown(
     content +
     `\r\n--${boundary}--`;
 
-  const res = await driveRequest('/upload/drive/v3/files?uploadType=multipart', token, {
-    method: 'POST',
+  const path = existingFileId
+    ? `/upload/drive/v3/files/${existingFileId}?uploadType=multipart`
+    : '/upload/drive/v3/files?uploadType=multipart';
+
+  const res = await driveRequest(path, token, {
+    method: existingFileId ? 'PATCH' : 'POST',
     headers: { 'Content-Type': `multipart/related; boundary=${boundary}` },
     body
   });
@@ -4103,7 +4116,16 @@ async function handleSyncToDrive(request?: Record<string, unknown>): Promise<Rec
         }
       }
 
-      const driveFileId = await uploadMarkdown(token, targetFolderId, fileName, doc.content);
+      // Update the file we already have up there, when we have one. If the
+      // user deleted it from Drive in the meantime the PATCH 404s, so fall
+      // back to creating a fresh file rather than failing the document.
+      let driveFileId: string;
+      try {
+        driveFileId = await uploadMarkdown(token, targetFolderId, fileName, doc.content, doc.driveFileId);
+      } catch (err) {
+        if (!doc.driveFileId) throw err;
+        driveFileId = await uploadMarkdown(token, targetFolderId, fileName, doc.content);
+      }
       await updateDocumentSync(doc.id, true, driveFileId);
       report(`Uploading ${synced + 1}/${unsynced.length} to Drive…`);
       synced++;
@@ -4146,38 +4168,80 @@ function sanitizeSegment(name: string): string {
     .trim() || 'untitled';
 }
 
+/**
+ * Every non-folder file under `rootFolderId`, following subfolders AND pages.
+ *
+ * The page loop is the point. Both Drive listings used to request a single
+ * `pageSize=100` and drop `nextPageToken` on the floor, so a folder with 449
+ * documents returned an arbitrary 100 of them — which is why importing looked
+ * like it picked files at random. It was not random; it was truncated.
+ *
+ * `folders` collects the subfolders seen, so callers that need the folder tree
+ * do not have to walk it again.
+ */
+async function listDriveTree(
+  token: string,
+  rootFolderId: string,
+  onFolder?: (f: { id: string; name: string }) => boolean,
+): Promise<Array<{ id: string; name: string; mimeType: string; createdTime: string; parents?: string[] }>> {
+  const out: Array<any> = [];
+  const toScan = [rootFolderId];
+  const seen = new Set<string>();
+
+  while (toScan.length > 0) {
+    const parentId = toScan.pop()!;
+    if (seen.has(parentId)) continue;
+    seen.add(parentId);
+
+    const q = encodeURIComponent(`'${parentId}' in parents and trashed=false`);
+    let pageToken: string | undefined;
+    do {
+      const params =
+        `q=${q}&fields=nextPageToken,files(id,name,mimeType,createdTime,parents)` +
+        `&orderBy=createdTime desc&pageSize=1000` +
+        (pageToken ? `&pageToken=${encodeURIComponent(pageToken)}` : '');
+      const res = await driveRequest(`/drive/v3/files?${params}`, token);
+      const data = await res.json();
+      for (const f of (data.files || [])) {
+        if (f.mimeType === 'application/vnd.google-apps.folder') {
+          if (!onFolder || onFolder(f)) toScan.push(f.id);
+        } else {
+          out.push(f);
+        }
+      }
+      pageToken = data.nextPageToken || undefined;
+    } while (pageToken);
+  }
+  return out;
+}
+
 async function handleImportFromDrive(request: Record<string, unknown>): Promise<Record<string, unknown>> {
   const token = await getToken(false);
   const rootFolderId = await ensureFolder(token);
   const projectId = request.projectId as string;
   if (!projectId) throw new Error('projectId is required for importing');
 
-  // Collect files from the root folder and all subfolders recursively.
-  const allFiles: Array<{ id: string; name: string; createdTime: string }> = [];
-  const foldersToScan = [rootFolderId];
-  const seen = new Set<string>();
+  // Which files to bring in. The panel sends an explicit list once the user
+  // has chosen; an absent list still means "everything", so the old
+  // one-button behaviour keeps working.
+  const wanted = Array.isArray(request.fileIds) ? new Set(request.fileIds as string[]) : null;
 
-  while (foldersToScan.length > 0) {
-    const parentId = foldersToScan.pop()!;
-    if (seen.has(parentId)) continue;
-    seen.add(parentId);
+  const tree = await listDriveTree(token, rootFolderId);
+  let allFiles = tree
+    .filter(f => f.name?.endsWith('.md'))
+    .map(f => ({ id: f.id, name: f.name, createdTime: f.createdTime }));
+  if (wanted) allFiles = allFiles.filter(f => wanted.has(f.id));
 
-    const q = encodeURIComponent(`'${parentId}' in parents and trashed=false`);
-    const res = await driveRequest(
-      `/drive/v3/files?q=${q}&fields=files(id,name,mimeType,createdTime,parents)&orderBy=createdTime desc&pageSize=100`,
-      token
-    );
-    const data = await res.json();
-    for (const f of (data.files || [])) {
-      if (f.mimeType === 'application/vnd.google-apps.folder') {
-        foldersToScan.push(f.id);
-      } else if (f.name?.endsWith('.md')) {
-        allFiles.push({ id: f.id, name: f.name, createdTime: f.createdTime });
-      }
-    }
-  }
+  // Never import a Drive file this library already holds. Without this, a
+  // second click made a second copy of every document.
+  const known = await getKnownDriveFileIds();
+  const skipped = allFiles.filter(f => known.has(f.id)).length;
+  allFiles = allFiles.filter(f => !known.has(f.id));
 
   let imported = 0;
+  const report = (text: string) =>
+    chrome.runtime.sendMessage({ action: 'SYNC_PROGRESS', text }).catch(() => {});
+  report(allFiles.length ? `Importing 0/${allFiles.length} from Drive…` : 'Nothing new to import.');
 
   for (const file of allFiles) {
     try {
@@ -4203,12 +4267,13 @@ async function handleImportFromDrive(request: Record<string, unknown>): Promise<
       await addChunksToVectorStore(projectId, savedChunks);
 
       imported++;
+      report(`Importing ${imported}/${allFiles.length} from Drive…`);
     } catch {
       // Skip files that fail to import
     }
   }
 
-  return { imported, total: allFiles.length };
+  return { imported, total: allFiles.length, skipped };
 }
 
 async function handleListDriveFiles(): Promise<Record<string, unknown>> {
@@ -4216,34 +4281,12 @@ async function handleListDriveFiles(): Promise<Record<string, unknown>> {
   const storage = await chrome.storage.local.get(['driveFolderId']);
   if (!storage.driveFolderId) return { files: [] };
 
-  // Recursively list files from the root folder and all subfolders.
-  const allFiles: any[] = [];
-  const foldersToScan = [storage.driveFolderId];
-  const seen = new Set<string>();
+  // Shares the paginated walker, so the picker shows the whole folder rather
+  // than the first page of it. Hidden folders are still skipped.
+  const files = await listDriveTree(token, storage.driveFolderId, f => !!f.name && !f.name.startsWith('.'));
 
-  while (foldersToScan.length > 0) {
-    const parentId = foldersToScan.pop()!;
-    if (seen.has(parentId)) continue;
-    seen.add(parentId);
-
-    const q = encodeURIComponent(`'${parentId}' in parents and trashed=false`);
-    const res = await driveRequest(
-      `/drive/v3/files?q=${q}&fields=files(id,name,mimeType,createdTime,parents)&orderBy=createdTime desc&pageSize=100`,
-      token
-    );
-    const data = await res.json();
-    for (const f of (data.files || [])) {
-      if (f.mimeType === 'application/vnd.google-apps.folder') {
-        // Only descend into folders that look like project root folders
-        // (not hidden, not empty name).
-        if (f.name && !f.name.startsWith('.')) {
-          foldersToScan.push(f.id);
-        }
-      } else {
-        allFiles.push(f);
-      }
-    }
-  }
-
-  return { files: allFiles };
+  // Mark what is already here so the picker can say so instead of letting the
+  // user select files that will be silently skipped.
+  const known = await getKnownDriveFileIds();
+  return { files: files.map(f => ({ ...f, alreadyImported: known.has(f.id) })) };
 }

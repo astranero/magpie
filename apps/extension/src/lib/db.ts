@@ -1007,6 +1007,36 @@ export async function getUnsyncedDocuments(): Promise<StoredDocument[]> {
   return docs.filter(d => !d.syncedToDrive && (syncAll || !contentHasTag(d.content || '', 'research-source')));
 }
 
+/**
+ * Every Drive file id this library already holds a copy of.
+ *
+ * Used to keep an import idempotent: without it, importing twice creates a
+ * second local document for the same Drive file, and the library grows by the
+ * size of the folder on every click.
+ *
+ * Reads via a cursor and keeps only the id string, never the record. A full
+ * `listDocuments()` here would materialise every document's markdown at once
+ * — the exact shape of an OOM this codebase has hit before.
+ */
+export async function getKnownDriveFileIds(): Promise<Set<string>> {
+  const db = await openDB();
+  const transaction = tx(db, 'documents', 'readonly');
+  const store = transaction.objectStore('documents');
+  const ids = new Set<string>();
+  await new Promise<void>((resolve, reject) => {
+    const req = store.openCursor();
+    req.onsuccess = (ev) => {
+      const cursor = (ev.target as any).result;
+      if (!cursor) { resolve(); return; }
+      const fid = cursor.value?.driveFileId;
+      if (typeof fid === 'string' && fid) ids.add(fid);
+      cursor.continue();
+    };
+    req.onerror = () => reject(req.error);
+  });
+  return ids;
+}
+
 export async function getDocumentWithChunks(docId: string): Promise<{
   doc: StoredDocument;
   chunks: Chunk[];
@@ -1029,9 +1059,17 @@ export async function resetSyncStatus(): Promise<number> {
       const cursor = (ev.target as any).result;
       if (cursor) {
         const doc = cursor.value;
-        if (doc.syncedToDrive || doc.driveFileId) {
+        if (doc.syncedToDrive) {
+          // Clear the FLAG, keep the file id.
+          //
+          // This used to drop driveFileId too, which made "Force Sync" a
+          // duplicator: the re-upload had no id to update, so it created a
+          // second Drive file for every document and orphaned the first. A
+          // 449-document library doubled the folder on each press, and the
+          // next import pulled both copies back. Keeping the id means the
+          // re-upload PATCHes the file that is already there, which is what
+          // "push my local content again" should mean.
           doc.syncedToDrive = false;
-          doc.driveFileId = undefined;
           cursor.update(doc);
           resetCount++;
         }

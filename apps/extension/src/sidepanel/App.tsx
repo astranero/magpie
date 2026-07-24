@@ -26,6 +26,7 @@ import { LinkPreview, LinkPreviewState } from './components/LinkPreview';
 import { Header } from './components/layout/Header';
 import { Navbar } from './components/layout/Navbar';
 import { Button } from '@/components/ui/button';
+import { DriveImportDialog, DriveFile } from '@/sidepanel/components/DriveImportDialog';
 
 // Lazy-load view components — they're heavy (markdown renderer, KaTeX, icons)
 // and only one view is visible at a time. Code-splitting shaves ~600 KB from
@@ -341,6 +342,8 @@ loadChatHistory(activeChatId).then(() => {
   // What the sync/import is doing right now. These loop over every document
   // and used to run in complete silence, which reads as nothing happening.
   const [syncStatus, setSyncStatus] = useState('');
+  // Non-null while the Drive import picker is open; holds what Drive listed.
+  const [driveFiles, setDriveFiles] = useState<DriveFile[] | null>(null);
   const [profile, setProfile] = useState<{ name: string; email: string; picture: string } | null>(null);
 
   // Chat
@@ -1524,6 +1527,13 @@ loadChatHistory(activeChatId).then(() => {
     }
   };
 
+  /**
+   * Step 1 of import: read the Drive folder and show the picker.
+   *
+   * This used to import everything the listing returned, with no way to choose
+   * — and the listing was capped at one page, so on a large folder it looked
+   * like it imported at random.
+   */
   const importFromDrive = async () => {
     // The handler requires a projectId (imported docs are linked to a
     // workspace). This call sent NO payload at all, so every import failed with
@@ -1532,7 +1542,28 @@ loadChatHistory(activeChatId).then(() => {
     if (!activeProjectId) { showToast('error', 'Select a workspace first — imported documents are linked to one.'); return; }
     setSyncing(true);
     setSyncStatus('Reading your Drive folder…');
-    const res = await msg('IMPORT_FROM_DRIVE', { projectId: activeProjectId });
+    const res = await msg('LIST_DRIVE_FILES');
+    setSyncing(false);
+    setSyncStatus('');
+    if (!res.success) {
+      showToast('error', (res.error as string) || 'Could not read Drive — sign in to Google in Settings');
+      return;
+    }
+    const files = ((res.files as DriveFile[]) || []).filter(f => /\.md$/i.test(f.name || ''));
+    if (files.length === 0) {
+      showToast('info', 'No Markdown files found in your Drive folder.');
+      return;
+    }
+    setDriveFiles(files);
+  };
+
+  /** Step 2: import exactly what was ticked. */
+  const runDriveImport = async (fileIds: string[]) => {
+    setDriveFiles(null);
+    if (!activeProjectId) return;
+    setSyncing(true);
+    setSyncStatus(`Importing 0/${fileIds.length} from Drive…`);
+    const res = await msg('IMPORT_FROM_DRIVE', { projectId: activeProjectId, fileIds });
     setSyncing(false);
     setSyncStatus('');
     if (res.success) {
@@ -2583,6 +2614,15 @@ onOpenDocument={(docId, anchorId) => openDocById(docId, anchorId, 'chat')}
           )}
         </div>
       </main>
+
+      {/* ── Pick what to import from Drive ── */}
+      {driveFiles && (
+        <DriveImportDialog
+          files={driveFiles}
+          onCancel={() => setDriveFiles(null)}
+          onImport={runDriveImport}
+        />
+      )}
 
       {/* ── Link preview overlay — follow links without leaving the panel ── */}
       {linkPreview && (
