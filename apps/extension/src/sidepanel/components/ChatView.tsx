@@ -5,7 +5,7 @@ import remarkGfm from 'remark-gfm';
 import remarkMath from 'remark-math';
 import rehypeKatex from 'rehype-katex';
 import { LocalDocument, ChatMessage, ResearchPlan, ResolvedCitation } from '../types';
-import { Send, StopCircle, Sparkles, ChevronDown, ChevronUp, Loader2, Microscope, Search, BookOpen, User, Copy, Check, Paperclip, FileText } from 'lucide-react';
+import { Send, StopCircle, Sparkles, ChevronDown, ChevronUp, Loader2, Microscope, Search, BookOpen, User, Copy, Check, Paperclip, FileText, RotateCcw, Pencil } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { paletteEntries, SlashCommand } from '../../lib/commands';
 import { ErrorBoundary } from './ErrorBoundary';
@@ -31,6 +31,10 @@ interface ChatViewProps {
   thinkingStatus?: Record<string, string>;
   /** Live chain of thought from a reasoning model, per chat. Never persisted. */
   reasoning?: Record<string, string>;
+  /** Ask the same question again, replacing this answer. */
+  onRegenerate?: (assistantMsgId: string) => void;
+  /** Replace an earlier question and re-run from it; later turns are discarded. */
+  onEditAndRerun?: (userMsgId: string, newText: string) => void;
   researching: Record<string, boolean>;
   researchLogs: Record<string, string[]>;
   documents: LocalDocument[];
@@ -550,6 +554,76 @@ const MessageBody: React.FC<MessageBodyProps> = React.memo(({ text: rawText, com
 
 // ─────────────────────────────────────────────
 /**
+ * Inline editor for a user message.
+ *
+ * Editing an earlier question invalidates every answer that followed it, so the
+ * save is a two-step confirm naming the count — the same pattern the workspace
+ * delete uses. Deletion is permanent and chat history syncs to Drive, so this
+ * is not a place for a silent destructive default.
+ */
+const MessageEditor: React.FC<{
+  initial: string;
+  discards: number;
+  onCancel: () => void;
+  onSave: (text: string) => void;
+}> = ({ initial, discards, onCancel, onSave }) => {
+  const [text, setText] = useState(initial);
+  const [armed, setArmed] = useState(false);
+  const ref = useRef<HTMLTextAreaElement>(null);
+  useEffect(() => { ref.current?.focus(); ref.current?.select(); }, []);
+
+  const changed = text.trim() !== initial.trim() && !!text.trim();
+  // Nothing after this message → nothing to lose → no confirm step.
+  const needsConfirm = discards > 0;
+  const submit = () => {
+    if (!changed) { onCancel(); return; }
+    if (needsConfirm && !armed) { setArmed(true); return; }
+    onSave(text);
+  };
+
+  return (
+    <div className="w-full">
+      <textarea
+        ref={ref}
+        value={text}
+        onChange={e => { setText(e.target.value); setArmed(false); }}
+        onKeyDown={e => {
+          if (e.key === 'Escape') { e.preventDefault(); onCancel(); }
+          if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); submit(); }
+        }}
+        rows={Math.min(8, text.split('\n').length + 1)}
+        className="w-full resize-y rounded-md border border-primary/40 bg-background px-2 py-1.5 text-sm leading-relaxed focus:outline-none focus:ring-2 focus:ring-ring"
+        aria-label="Edit message"
+      />
+      <div className="flex items-center gap-2 mt-1.5">
+        <button
+          type="button"
+          onClick={submit}
+          disabled={!changed}
+          className={`text-[11px] font-medium px-2 py-1 rounded-md transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${
+            armed ? 'bg-destructive text-destructive-foreground' : 'bg-primary text-primary-foreground hover:bg-primary/90'
+          }`}
+        >
+          {armed ? `Discard ${discards} and re-run?` : 'Save & re-run'}
+        </button>
+        <button
+          type="button"
+          onClick={onCancel}
+          className="text-[11px] font-medium px-2 py-1 rounded-md text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
+        >
+          Cancel
+        </button>
+        {needsConfirm && !armed && (
+          <span className="text-[10px] text-muted-foreground">
+            replaces the {discards} message{discards === 1 ? '' : 's'} below
+          </span>
+        )}
+      </div>
+    </div>
+  );
+};
+
+/**
  * Live "the model is working" indicator.
  *
  * Replaces a static `Thinking…` that sat there unchanged for the whole wait. On
@@ -793,6 +867,8 @@ export const ChatView: React.FC<ChatViewProps> = ({
   generating,
   thinkingStatus = {},
   reasoning,
+  onRegenerate,
+  onEditAndRerun,
   researching,
   researchLogs,
   documents,
@@ -819,6 +895,11 @@ export const ChatView: React.FC<ChatViewProps> = ({
 }) => {
   const msgEnd = useRef<HTMLDivElement>(null);
   const scrollBox = useRef<HTMLDivElement>(null);
+  /** Which user message is open in the inline editor (one at a time). */
+  const [editingId, setEditingId] = useState<string | null>(null);
+  // Re-running while a turn is in flight would race two streams into the same
+  // chat, so both controls are inert until the current one settles.
+  const busy = !!generating[activeChatId];
   // Two-step clear confirmation
   const [confirmClear, setConfirmClear] = useState(false);
   const { t } = useTranslation();
@@ -1123,6 +1204,13 @@ export const ChatView: React.FC<ChatViewProps> = ({
                   <CollapsibleMessage text={m.text} streaming={m.streaming}>
                     <MessageBody text={m.text} compact={m.role === 'system'} streaming={m.streaming} renderLive={m.renderLive} resolveCitations={resolveCitations} onOpenDocument={onOpenDocument} onOpenExternalLink={onOpenExternalLink} />
                   </CollapsibleMessage>
+                ) : editingId === m.id ? (
+                  <MessageEditor
+                    initial={m.text}
+                    discards={messages.length - mi - 1}
+                    onCancel={() => setEditingId(null)}
+                    onSave={(text) => { setEditingId(null); onEditAndRerun?.(m.id, text); }}
+                  />
                 ) : (
                   <CollapsibleMessage text={m.text}>
                     {/* Render the user's own message as Markdown too, so typed
@@ -1133,10 +1221,38 @@ export const ChatView: React.FC<ChatViewProps> = ({
               </ErrorBoundary>
             </div>
 
+            {/* Action row for the user's own messages */}
+            {m.role === 'user' && !m.queued && editingId !== m.id && onEditAndRerun && (
+              <div className="flex items-center gap-2 px-1 mt-0.5 opacity-0 hover:opacity-100 focus-within:opacity-100 transition-opacity">
+                <button
+                  type="button"
+                  onClick={() => setEditingId(m.id)}
+                  disabled={busy}
+                  className="flex items-center gap-1 text-[10px] font-medium text-muted-foreground hover:text-foreground disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                  title="Edit this message and ask again"
+                >
+                  <Pencil size={10} />
+                  <span>Edit</span>
+                </button>
+              </div>
+            )}
+
             {/* Action row for assistant messages */}
             {m.role === 'assistant' && !m.streaming && (
               <div className="flex items-center gap-2 px-1 mt-0.5 opacity-0 hover:opacity-100 focus-within:opacity-100 transition-opacity">
                 <CopyButton text={m.text} />
+                {onRegenerate && (
+                  <button
+                    type="button"
+                    onClick={() => onRegenerate(m.id)}
+                    disabled={busy}
+                    className="flex items-center gap-1 text-[10px] font-medium text-muted-foreground hover:text-foreground disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                    title="Ask again and replace this answer"
+                  >
+                    <RotateCcw size={10} />
+                    <span>Regenerate</span>
+                  </button>
+                )}
               </div>
             )}
           </div>

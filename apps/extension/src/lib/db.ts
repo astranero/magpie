@@ -969,6 +969,35 @@ export async function clearChatHistory(chatId: string): Promise<void> {
   notifySync();
 }
 
+/**
+ * Delete `messageId` and every message after it in the chat. Returns how many
+ * were removed, or -1 when the id isn't in this chat (so the caller can say so
+ * instead of silently doing nothing).
+ *
+ * Backs regenerate and edit-and-re-run: both mean "the transcript from here on
+ * is about to be replaced". Ordering comes from getChatHistory, so "after"
+ * means the same thing here as it does on screen — deleting by raw timestamp
+ * comparison would disagree with the UI whenever two messages share a
+ * millisecond.
+ *
+ * Destructive and it participates in Drive sync (see notifySync below), so
+ * callers that discard more than the last answer should confirm first.
+ */
+export async function truncateChatFrom(chatId: string, messageId: string): Promise<number> {
+  const history = await getChatHistory(chatId);
+  const idx = history.findIndex(m => m.id === messageId);
+  if (idx === -1) return -1;
+  const doomed = history.slice(idx).map(m => m.id);
+
+  const db = await openDB();
+  const transaction = tx(db, 'chatHistory', 'readwrite');
+  const store = transaction.objectStore('chatHistory');
+  for (const id of doomed) store.delete(id);
+  await txComplete(transaction);
+  notifySync();
+  return doomed.length;
+}
+
 // ── Bulk Operations ──
 
 export async function getUnsyncedDocuments(): Promise<StoredDocument[]> {

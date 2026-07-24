@@ -6,7 +6,7 @@
 
 import {
   saveDocument, listDocuments, updateDocumentSync,
-  getUnsyncedDocuments, getChatHistory, clearChatHistory, saveChatMessage,
+  getUnsyncedDocuments, getChatHistory, clearChatHistory, truncateChatFrom, saveChatMessage,
   linkDocumentToProject, getProject, listProjects,
   getChunkByAnchor, deleteOrphanDocuments, resetSyncStatus,
   saveDocImages, getDocImage, listDocImages
@@ -566,6 +566,7 @@ const messageHandlers: Record<string, MessageHandler> = {
     return { generating: liveChatStreams.has(chatId), full: liveChatStreams.get(chatId) || '' };
   },
   CLEAR_CHAT_HISTORY: handleClearChatHistory,
+  TRUNCATE_CHAT_FROM: handleTruncateChatFrom,
   CANCEL_TASK: handleCancelTask,
 
   // ── Deep Research ──
@@ -2998,6 +2999,17 @@ async function handleClearChatHistory(request: Record<string, unknown>): Promise
   const chatId = request.chatId as string;
   await clearChatHistory(chatId);
   return {};
+}
+
+/** Drop `messageId` and everything after it — backs regenerate / edit-and-re-run. */
+async function handleTruncateChatFrom(request: Record<string, unknown>): Promise<Record<string, unknown>> {
+  const chatId = request.chatId as string;
+  const messageId = request.messageId as string;
+  if (!chatId || !messageId) throw new Error('chatId and messageId are required');
+  const removed = await truncateChatFrom(chatId, messageId);
+  // removed === -1 means the id was not in this chat: report it rather than
+  // letting the caller re-run against a transcript it thinks it truncated.
+  return { removed, found: removed !== -1 };
 }
 
 // ─────────────────────────────────────────────

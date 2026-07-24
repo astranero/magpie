@@ -1861,6 +1861,56 @@ loadChatHistory(activeChatId).then(() => {
   };
 
   /**
+   * Re-run a turn after discarding the transcript from `fromId` onward.
+   *
+   * Regenerate and edit-and-re-run are the same operation: truncate, then ask
+   * again. Deliberately reuses runChatStream rather than adding a second
+   * streaming path — the service worker re-saves the user turn and the new
+   * answer exactly as it does for a freshly typed message.
+   */
+  const rerunFrom = async (fromId: string, questionText: string) => {
+    if (!activeChatId || !activeProjectId || generating[activeChatId]) return;
+    const chatId = activeChatId;
+    const projectId = activeProjectId;
+
+    const res = await msg('TRUNCATE_CHAT_FROM', { chatId, messageId: fromId });
+    if (res?.found === false) {
+      // The transcript on screen and the stored one disagree — re-running now
+      // would append to history the user thinks they just discarded.
+      showToast('error', 'That message is no longer in the saved history — reopen the chat and try again.');
+      return;
+    }
+
+    setMessages(prev => {
+      const list = prev[chatId] || [];
+      const idx = list.findIndex(m => m.id === fromId);
+      return idx === -1 ? prev : { ...prev, [chatId]: list.slice(0, idx) };
+    });
+
+    await runChatStream(chatId, projectId, questionText, false);
+  };
+
+  /** Ask the same question again, discarding only this answer. */
+  const regenerateAnswer = async (assistantId: string) => {
+    const list = messages[activeChatId] || [];
+    const idx = list.findIndex(m => m.id === assistantId);
+    if (idx === -1) return;
+    // Walk back to the question this answer belongs to; the turn is re-sent
+    // from there so the worker sees the same shape as the original run.
+    let q = idx - 1;
+    while (q >= 0 && list[q].role !== 'user') q--;
+    if (q < 0) { showToast('error', 'No question found to regenerate from.'); return; }
+    await rerunFrom(list[q].id, list[q].text);
+  };
+
+  /** Replace an earlier question and re-run from it. Everything after is lost. */
+  const editAndRerun = async (userMsgId: string, newText: string) => {
+    const text = newText.trim();
+    if (!text) return;
+    await rerunFrom(userMsgId, text);
+  };
+
+  /**
    * Stream one chat turn over a long-lived port. Resolves when the stream
    * finishes (DONE/ERROR/disconnect). `existingUserMsgId` is set when the user
    * bubble already exists (a queued message being drained) — we just clear its
@@ -2289,6 +2339,8 @@ loadChatHistory(activeChatId).then(() => {
               generating={generating}
               thinkingStatus={thinkingStatus}
               reasoning={reasoning}
+              onRegenerate={regenerateAnswer}
+              onEditAndRerun={editAndRerun}
               researching={researching}
               isActive={view === 'chat'}
               llmEndpointLocal={/^https?:\/\/(localhost|127\.0\.0\.1|0\.0\.0\.0|\[?::1\]?)(:|\/|$)/i.test(customUrl.trim())}
