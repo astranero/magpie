@@ -1595,7 +1595,7 @@ loadChatHistory(activeChatId).then(() => {
     if (!activeProjectId) { showToast('error', 'Select a workspace first — imported documents are linked to one.'); return; }
     setSyncing(true);
     setSyncStatus('Reading your Drive folder…');
-    const res = await msg('LIST_DRIVE_FILES');
+    const res = await msg('LIST_DRIVE_FILES', { projectId: activeProjectId });
     setSyncing(false);
     setSyncStatus('');
     if (!res.success) {

@@ -4010,13 +4010,28 @@ async function clearToken(): Promise<void> {
 }
 
 async function driveRequest(path: string, token: string, init?: RequestInit): Promise<Response> {
-  const res = await fetch(`https://www.googleapis.com${path}`, {
-    ...init,
-    headers: {
-      Authorization: `Bearer ${token}`,
-      ...(init?.headers ?? {})
+  // A Drive call with no timeout can hang forever on a flaky network — which is
+  // exactly what made sync and import look "blocked" with no way out. Cap every
+  // request. The caller's own signal (if any) still wins; otherwise a 45s
+  // ceiling. 45s, not less, because a multipart upload of a large document is
+  // legitimately slow.
+  const signal = init?.signal ?? AbortSignal.timeout(45_000);
+  let res: Response;
+  try {
+    res = await fetch(`https://www.googleapis.com${path}`, {
+      ...init,
+      signal,
+      headers: {
+        Authorization: `Bearer ${token}`,
+        ...(init?.headers ?? {})
+      }
+    });
+  } catch (e: any) {
+    if (e?.name === 'TimeoutError' || e?.name === 'AbortError') {
+      throw new Error('Drive request timed out — check your connection and try again.');
     }
-  });
+    throw e;
+  }
   if (!res.ok) {
     const body = await res.text().catch(() => '');
     throw new Error(`Drive API ${res.status}: ${res.statusText}. ${body}`);
@@ -4259,6 +4274,46 @@ async function listDriveTree(
   return out;
 }
 
+/**
+ * The Drive subfolder a project's documents sync INTO, or null when the project
+ * has none (the Default Session, or a project whose folder was never created
+ * because it has synced nothing yet). Finds, never creates — reading the folder
+ * must not have side effects.
+ */
+async function findProjectSubfolderId(token: string, rootId: string, projectId: string): Promise<string | null> {
+  const project = await getProject(projectId).catch(() => null);
+  const name = project?.title;
+  if (!name || name === 'Default Session') return null;
+  const q = encodeURIComponent(
+    `name='${sanitizeSegment(name)}' and mimeType='application/vnd.google-apps.folder' and '${rootId}' in parents and trashed=false`
+  );
+  const res = await driveRequest(`/drive/v3/files?q=${q}&fields=files(id)`, token);
+  const data = await res.json();
+  return data.files?.[0]?.id ?? null;
+}
+
+/**
+ * Markdown files that belong to ONE project: the files sitting directly in the
+ * Magpie root (Default Session / pre-subfolder era) plus everything under that
+ * project's own subfolder. Files under OTHER projects' subfolders are excluded
+ * — the whole point of "show me this project, not the entire Magpie folder".
+ * With no subfolder id, returns just the root-level files.
+ */
+async function listProjectMarkdown(
+  token: string, rootId: string, subfolderId: string | null,
+): Promise<Array<{ id: string; name: string; createdTime: string; alreadyImported?: boolean }>> {
+  const out: Array<{ id: string; name: string; createdTime: string }> = [];
+  // Root: this level only — do NOT descend into sibling project folders.
+  const rootTree = await listDriveTree(token, rootId, () => false);
+  for (const f of rootTree) if (f.name?.endsWith('.md')) out.push({ id: f.id, name: f.name, createdTime: f.createdTime });
+  // The project's own subfolder: everything under it.
+  if (subfolderId) {
+    const subTree = await listDriveTree(token, subfolderId);
+    for (const f of subTree) if (f.name?.endsWith('.md')) out.push({ id: f.id, name: f.name, createdTime: f.createdTime });
+  }
+  return out;
+}
+
 async function handleImportFromDrive(request: Record<string, unknown>): Promise<Record<string, unknown>> {
   const token = await getToken(false);
   const rootFolderId = await ensureFolder(token);
@@ -4266,14 +4321,13 @@ async function handleImportFromDrive(request: Record<string, unknown>): Promise<
   if (!projectId) throw new Error('projectId is required for importing');
 
   // Which files to bring in. The panel sends an explicit list once the user
-  // has chosen; an absent list still means "everything", so the old
-  // one-button behaviour keeps working.
+  // has chosen; an absent list still means "everything in this project", so the
+  // old one-button behaviour keeps working — but scoped to the project, not the
+  // whole Magpie folder.
   const wanted = Array.isArray(request.fileIds) ? new Set(request.fileIds as string[]) : null;
 
-  const tree = await listDriveTree(token, rootFolderId);
-  let allFiles = tree
-    .filter(f => f.name?.endsWith('.md'))
-    .map(f => ({ id: f.id, name: f.name, createdTime: f.createdTime }));
+  const subfolderId = await findProjectSubfolderId(token, rootFolderId, projectId);
+  let allFiles = await listProjectMarkdown(token, rootFolderId, subfolderId);
   if (wanted) allFiles = allFiles.filter(f => wanted.has(f.id));
 
   // Never import a Drive file this library already holds. Without this, a
@@ -4287,47 +4341,65 @@ async function handleImportFromDrive(request: Record<string, unknown>): Promise<
     chrome.runtime.sendMessage({ action: 'SYNC_PROGRESS', text }).catch(() => {});
   report(allFiles.length ? `Importing 0/${allFiles.length} from Drive…` : 'Nothing new to import.');
 
-  for (const file of allFiles) {
-    try {
-      const contentRes = await driveRequest(`/drive/v3/files/${file.id}?alt=media`, token);
-      const content = await contentRes.text();
+  // Bounded-parallel: the downloads overlap instead of running strictly one at
+  // a time. Embedding inside saveDocument is serialized downstream by the
+  // offscreen queue regardless, but the network no longer waits on itself.
+  const CONCURRENCY = 3;
+  let idx = 0;
+  const worker = async (): Promise<void> => {
+    while (idx < allFiles.length) {
+      const file = allFiles[idx++];
+      try {
+        const contentRes = await driveRequest(`/drive/v3/files/${file.id}?alt=media`, token);
+        const content = await contentRes.text();
 
-      const tempId = crypto.randomUUID?.() ?? `${Date.now()}`;
-      const docShortId = makeDocShortId(tempId);
-      const chunks = chunkDocument({ docShortId, content });
+        const tempId = crypto.randomUUID?.() ?? `${Date.now()}`;
+        const docShortId = makeDocShortId(tempId);
+        const chunks = chunkDocument({ docShortId, content });
 
-      const { id: docId, chunks: savedChunks } = await saveDocument({
-        title: file.name?.replace(/\.md$/i, '') || 'Imported',
-        url: '',
-        content,
-        capturedAt: file.createdTime || new Date().toISOString(),
-        wordCount: content.split(/\s+/).length,
-        syncedToDrive: true,
-        driveFileId: file.id
-      }, chunks);
+        const { id: docId, chunks: savedChunks } = await saveDocument({
+          title: file.name?.replace(/\.md$/i, '') || 'Imported',
+          url: '',
+          content,
+          capturedAt: file.createdTime || new Date().toISOString(),
+          wordCount: content.split(/\s+/).length,
+          syncedToDrive: true,
+          driveFileId: file.id
+        }, chunks);
 
-      // Link into the project so it shows up in the session's source list
-      await linkDocumentToProject(projectId, docId);
-      await addChunksToVectorStore(projectId, savedChunks);
+        // Link into the project so it shows up in the session's source list
+        await linkDocumentToProject(projectId, docId);
+        await addChunksToVectorStore(projectId, savedChunks);
 
-      imported++;
-      report(`Importing ${imported}/${allFiles.length} from Drive…`);
-    } catch {
-      // Skip files that fail to import
+        imported++;
+        report(`Importing ${imported}/${allFiles.length} from Drive…`);
+      } catch {
+        // Skip files that fail to import
+      }
     }
-  }
+  };
+  await Promise.all(Array.from({ length: Math.min(CONCURRENCY, allFiles.length) }, () => worker()));
 
   return { imported, total: allFiles.length, skipped };
 }
 
-async function handleListDriveFiles(): Promise<Record<string, unknown>> {
+async function handleListDriveFiles(request?: Record<string, unknown>): Promise<Record<string, unknown>> {
   const token = await getToken(false);
-  const storage = await chrome.storage.local.get(['driveFolderId']);
-  if (!storage.driveFolderId) return { files: [] };
+  const rootId = await ensureFolder(token);
+  const projectId = typeof request?.projectId === 'string' ? request.projectId : undefined;
 
-  // Shares the paginated walker, so the picker shows the whole folder rather
-  // than the first page of it. Hidden folders are still skipped.
-  const files = await listDriveTree(token, storage.driveFolderId, f => !!f.name && !f.name.startsWith('.'));
+  // Scope to the active project: root-level files + this project's own
+  // subfolder, NOT every other project's folder. Without a projectId (older
+  // caller), fall back to the whole tree.
+  let files: Array<{ id: string; name: string; createdTime: string }>;
+  if (projectId) {
+    const subfolderId = await findProjectSubfolderId(token, rootId, projectId);
+    files = await listProjectMarkdown(token, rootId, subfolderId);
+  } else {
+    files = (await listDriveTree(token, rootId, f => !!f.name && !f.name.startsWith('.')))
+      .filter(f => f.name?.endsWith('.md'))
+      .map(f => ({ id: f.id, name: f.name, createdTime: f.createdTime }));
+  }
 
   // Mark what is already here so the picker can say so instead of letting the
   // user select files that will be silently skipped.

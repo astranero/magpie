@@ -28,9 +28,10 @@ export const DriveImportDialog: React.FC<{
   onImport: (fileIds: string[]) => void;
 }> = ({ files, onCancel, onImport }) => {
   const importable = useMemo(() => files.filter(f => !f.alreadyImported), [files]);
-  // Pre-selected: the common case is "bring in what is new", and unticking a
-  // few is less work than ticking eighty.
-  const [selected, setSelected] = useState<Set<string>>(() => new Set(importable.map(f => f.id)));
+  // Start with NOTHING selected. Pre-selecting everything made "Importing 0/2"
+  // appear after the user thought they'd picked one — the count reflected a
+  // default they never made. "Select all" is one click away for the bulk case.
+  const [selected, setSelected] = useState<Set<string>>(() => new Set());
   const [query, setQuery] = useState('');
 
   const shown = useMemo(() => {
