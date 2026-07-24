@@ -602,7 +602,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
         <h2 className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">Connect a model</h2>
         <p className="text-[10px] text-muted-foreground/80 mt-0.5 leading-snug">Needed once, before anything else works.</p>
       </div>
-      <Section id="provider" title="AI Provider Configuration" subtitle="Configure your AI backend (or use Copilot above).">
+      <Section id="provider" title="AI Provider Configuration" subtitle="Configure your AI backend (or use Copilot below).">
           {/* Which backend will actually receive the next request — computed
               from the SAME settings the client reads, so it can't lie. Answers
               "am I really on enterprise Copilot or on OpenRouter?" at a glance. */}
@@ -1074,6 +1074,132 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           Preferred over keyless DuckDuckGo scraping. Keys stay local.
         </p>
       </Section>
+      {/* MCP servers are retrieval SOURCES, like the research APIs above —
+          not storage. They were filed under "Your library", whose own
+          subtitle says "where documents live and how they sync", which is
+          not what an MCP endpoint is. */}
+      <Section id="mcp" title="MCP Servers" subtitle="Model Context Protocol HTTP servers." defaultOpen={false}>
+        {mcpServers.map(server => (
+          <div key={server.id} className="rounded-md border border-border bg-background p-2 space-y-1.5">
+            <div className="flex items-center gap-2">
+              <div className="flex-1 min-w-0">
+                <div className="text-xs font-bold font-mono truncate">{server.name}</div>
+                <div className="text-[10px] text-muted-foreground font-mono truncate">{server.url}</div>
+              </div>
+              <button
+                type="button"
+                role="switch"
+                aria-checked={server.enabled}
+                title={server.enabled ? 'Enabled' : 'Disabled'}
+                onClick={() => persistMcp(mcpServers.map(x => x.id === server.id ? { ...x, enabled: !x.enabled } : x))}
+                className={`shrink-0 w-10 h-5 border rounded-full transition-colors relative ${server.enabled ? 'bg-primary border-primary' : 'bg-muted border-border'}`}
+              >
+                <span className={`absolute top-0.5 w-3 h-3 rounded-full bg-background transition-all ${server.enabled ? 'right-0.5' : 'left-0.5'}`} />
+              </button>
+              <button
+                type="button"
+                className="shrink-0 text-[10px] font-medium text-muted-foreground hover:text-primary"
+                onClick={() => testMcpServer(server)}
+              >
+                Test
+              </button>
+              <button
+                type="button"
+                className="shrink-0 text-[10px] font-medium text-muted-foreground hover:text-destructive"
+                onClick={() => persistMcp(mcpServers.filter(x => x.id !== server.id))}
+              >
+                Remove
+              </button>
+            </div>
+
+            {/* Health status for servers with a health endpoint */}
+            {server.healthUrl && server.enabled && (
+              <div className="text-[10px] font-mono flex items-center gap-1.5 mt-1.5 mb-1">
+                {mcpHealth[server.id] === undefined ? (
+                  <>
+                    <span className="w-1.5 h-1.5 rounded-full bg-muted-foreground animate-pulse" />
+                    <span className="text-muted-foreground">Checking…</span>
+                  </>
+                ) : mcpHealth[server.id] ? (
+                  <>
+                    <span className="relative flex h-1.5 w-1.5">
+                      <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                      <span className="relative inline-flex rounded-full h-1.5 w-1.5 bg-emerald-500"></span>
+                    </span>
+                    <span className="text-emerald-500 font-semibold">Running</span>
+                  </>
+                ) : (
+                  <>
+                    <span className="w-1.5 h-1.5 rounded-full bg-amber-500 animate-pulse" />
+                    <span className="text-amber-500 font-semibold">Not detected:</span>
+                  </>
+                )}
+              </div>
+            )}
+
+            {/* Setup hint with copy-paste commands */}
+            {server.setupHint && (!server.healthUrl || mcpHealth[server.id] === false) && (
+              <div className="rounded bg-muted/50 border border-border p-1.5 space-y-1">
+                {server.setupHint.split('\n').map((line, i) => (
+                  <div key={i} className="flex items-center gap-1 group">
+                    <code className="flex-1 text-[10px] font-mono text-foreground select-all">{line}</code>
+                    <button
+                      type="button"
+                      className={`shrink-0 text-[9px] transition-opacity duration-150 ${copiedCommand === line ? 'opacity-100 text-green-500 font-bold' : 'opacity-0 group-hover:opacity-100 text-muted-foreground hover:text-primary'}`}
+                      title={copiedCommand === line ? 'Copied!' : 'Copy'}
+                      onClick={() => {
+                        navigator.clipboard.writeText(line)
+                          .then(() => {
+                            setCopiedCommand(line);
+                            setTimeout(() => setCopiedCommand(null), 2000);
+                          })
+                          .catch(() => {});
+                      }}
+                    >
+                      {copiedCommand === line ? '✓' : '📋'}
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {/* Editable auth token */}
+            <div className="space-y-1 pt-1.5">
+              <input
+                type="password"
+                placeholder="Bearer token (optional)"
+                value={mcpTokenEdits[server.id] !== undefined ? mcpTokenEdits[server.id] : (server.authToken || '')}
+                onChange={e => setMcpTokenEdits(prev => ({ ...prev, [server.id]: e.target.value }))}
+                onBlur={() => {
+                  const val = mcpTokenEdits[server.id];
+                  if (val === undefined) return;
+                  persistMcp(mcpServers.map(x => x.id === server.id ? { ...x, authToken: val.trim() || undefined } : x));
+                  setMcpTokenEdits(prev => { const n = { ...prev }; delete n[server.id]; return n; });
+                }}
+                className="w-full rounded border border-border bg-background px-2 py-1 text-[10px] font-mono placeholder:text-muted-foreground focus:outline-none focus:border-primary"
+              />
+            </div>
+
+            {mcpStatus[server.id] && <div className="text-[10px] font-mono text-muted-foreground break-all">{mcpStatus[server.id]}</div>}
+          </div>
+        ))}
+        <div className="flex gap-2">
+          <Input value={mcpName} onChange={e => setMcpName(e.target.value)} placeholder="Name" className="rounded-lg w-1/3 text-xs" />
+          <Input value={mcpUrl} onChange={e => setMcpUrl(e.target.value)} placeholder="http://localhost:3920/mcp" className="rounded-lg flex-1 text-xs" />
+        </div>
+        <Input
+          type="password"
+          value={mcpToken}
+          onChange={e => setMcpToken(e.target.value)}
+          placeholder="API key / bearer token (optional)"
+          className="rounded-lg text-xs"
+        />
+        {mcpStatus._new && <p className="text-[10px] text-destructive font-mono">{mcpStatus._new}</p>}
+        <Button variant="secondary" size="sm" onClick={addMcpServer} className="rounded-lg font-medium text-xs">Add server</Button>
+        <p className="text-[10px] text-muted-foreground font-mono leading-normal">
+          Supports HTTP endpoints only. Keys stay local.
+        </p>
+      </Section>
       <Section id="skills" title="Custom Commands" subtitle="Register custom slash prompts." defaultOpen={false}>
         {customSkills.length > 0 && (
           <div className="space-y-2">
@@ -1301,128 +1427,6 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
               </Button>
             </div>
           )}
-      </Section>
-      <Section id="mcp" title="MCP Servers" subtitle="Model Context Protocol HTTP servers." defaultOpen={false}>
-        {mcpServers.map(server => (
-          <div key={server.id} className="rounded-md border border-border bg-background p-2 space-y-1.5">
-            <div className="flex items-center gap-2">
-              <div className="flex-1 min-w-0">
-                <div className="text-xs font-bold font-mono truncate">{server.name}</div>
-                <div className="text-[10px] text-muted-foreground font-mono truncate">{server.url}</div>
-              </div>
-              <button
-                type="button"
-                role="switch"
-                aria-checked={server.enabled}
-                title={server.enabled ? 'Enabled' : 'Disabled'}
-                onClick={() => persistMcp(mcpServers.map(x => x.id === server.id ? { ...x, enabled: !x.enabled } : x))}
-                className={`shrink-0 w-10 h-5 border rounded-full transition-colors relative ${server.enabled ? 'bg-primary border-primary' : 'bg-muted border-border'}`}
-              >
-                <span className={`absolute top-0.5 w-3 h-3 rounded-full bg-background transition-all ${server.enabled ? 'right-0.5' : 'left-0.5'}`} />
-              </button>
-              <button
-                type="button"
-                className="shrink-0 text-[10px] font-medium text-muted-foreground hover:text-primary"
-                onClick={() => testMcpServer(server)}
-              >
-                Test
-              </button>
-              <button
-                type="button"
-                className="shrink-0 text-[10px] font-medium text-muted-foreground hover:text-destructive"
-                onClick={() => persistMcp(mcpServers.filter(x => x.id !== server.id))}
-              >
-                Remove
-              </button>
-            </div>
-
-            {/* Health status for servers with a health endpoint */}
-            {server.healthUrl && server.enabled && (
-              <div className="text-[10px] font-mono flex items-center gap-1.5 mt-1.5 mb-1">
-                {mcpHealth[server.id] === undefined ? (
-                  <>
-                    <span className="w-1.5 h-1.5 rounded-full bg-muted-foreground animate-pulse" />
-                    <span className="text-muted-foreground">Checking…</span>
-                  </>
-                ) : mcpHealth[server.id] ? (
-                  <>
-                    <span className="relative flex h-1.5 w-1.5">
-                      <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
-                      <span className="relative inline-flex rounded-full h-1.5 w-1.5 bg-emerald-500"></span>
-                    </span>
-                    <span className="text-emerald-500 font-semibold">Running</span>
-                  </>
-                ) : (
-                  <>
-                    <span className="w-1.5 h-1.5 rounded-full bg-amber-500 animate-pulse" />
-                    <span className="text-amber-500 font-semibold">Not detected:</span>
-                  </>
-                )}
-              </div>
-            )}
-
-            {/* Setup hint with copy-paste commands */}
-            {server.setupHint && (!server.healthUrl || mcpHealth[server.id] === false) && (
-              <div className="rounded bg-muted/50 border border-border p-1.5 space-y-1">
-                {server.setupHint.split('\n').map((line, i) => (
-                  <div key={i} className="flex items-center gap-1 group">
-                    <code className="flex-1 text-[10px] font-mono text-foreground select-all">{line}</code>
-                    <button
-                      type="button"
-                      className={`shrink-0 text-[9px] transition-opacity duration-150 ${copiedCommand === line ? 'opacity-100 text-green-500 font-bold' : 'opacity-0 group-hover:opacity-100 text-muted-foreground hover:text-primary'}`}
-                      title={copiedCommand === line ? 'Copied!' : 'Copy'}
-                      onClick={() => {
-                        navigator.clipboard.writeText(line)
-                          .then(() => {
-                            setCopiedCommand(line);
-                            setTimeout(() => setCopiedCommand(null), 2000);
-                          })
-                          .catch(() => {});
-                      }}
-                    >
-                      {copiedCommand === line ? '✓' : '📋'}
-                    </button>
-                  </div>
-                ))}
-              </div>
-            )}
-
-            {/* Editable auth token */}
-            <div className="space-y-1 pt-1.5">
-              <input
-                type="password"
-                placeholder="Bearer token (optional)"
-                value={mcpTokenEdits[server.id] !== undefined ? mcpTokenEdits[server.id] : (server.authToken || '')}
-                onChange={e => setMcpTokenEdits(prev => ({ ...prev, [server.id]: e.target.value }))}
-                onBlur={() => {
-                  const val = mcpTokenEdits[server.id];
-                  if (val === undefined) return;
-                  persistMcp(mcpServers.map(x => x.id === server.id ? { ...x, authToken: val.trim() || undefined } : x));
-                  setMcpTokenEdits(prev => { const n = { ...prev }; delete n[server.id]; return n; });
-                }}
-                className="w-full rounded border border-border bg-background px-2 py-1 text-[10px] font-mono placeholder:text-muted-foreground focus:outline-none focus:border-primary"
-              />
-            </div>
-
-            {mcpStatus[server.id] && <div className="text-[10px] font-mono text-muted-foreground break-all">{mcpStatus[server.id]}</div>}
-          </div>
-        ))}
-        <div className="flex gap-2">
-          <Input value={mcpName} onChange={e => setMcpName(e.target.value)} placeholder="Name" className="rounded-lg w-1/3 text-xs" />
-          <Input value={mcpUrl} onChange={e => setMcpUrl(e.target.value)} placeholder="http://localhost:3920/mcp" className="rounded-lg flex-1 text-xs" />
-        </div>
-        <Input
-          type="password"
-          value={mcpToken}
-          onChange={e => setMcpToken(e.target.value)}
-          placeholder="API key / bearer token (optional)"
-          className="rounded-lg text-xs"
-        />
-        {mcpStatus._new && <p className="text-[10px] text-destructive font-mono">{mcpStatus._new}</p>}
-        <Button variant="secondary" size="sm" onClick={addMcpServer} className="rounded-lg font-medium text-xs">Add server</Button>
-        <p className="text-[10px] text-muted-foreground font-mono leading-normal">
-          Supports HTTP endpoints only. Keys stay local.
-        </p>
       </Section>
       {/* ── The app itself ── */}
       <div className="px-4 pt-4 pb-1">
