@@ -1,6 +1,7 @@
 import { Readability } from '@mozilla/readability';
 import TurndownService from 'turndown';
 import { extractMailboxList } from './mailbox';
+import { salvageSpecs, readJsonLdBlocks } from '../lib/spec-salvage';
 
 // ─────────────────────────────────────────────
 // Enhanced Content Script — AI Research Assistant
@@ -597,7 +598,12 @@ async function scrapePage(): Promise<{
 
   // ── STANDARD PAGE EXTRACTION ──
   const documentClone = document.cloneNode(true) as Document;
-  
+
+  // Read JSON-LD BEFORE the scripts are stripped below — on listing sites it is
+  // the site's own structured description of the thing being sold, which beats
+  // any guess at its layout.
+  const jsonLdBlocks = readJsonLdBlocks(documentClone);
+
   // Remove all scripts and styles from the clone to avoid CSP warnings when Readability/Turndown does innerHTML
   const elementsToRemove = documentClone.querySelectorAll('script, noscript, style, link[rel="stylesheet"]');
   elementsToRemove.forEach(el => el.parentNode?.removeChild(el));
@@ -620,6 +626,13 @@ async function scrapePage(): Promise<{
 
   // Clean up excessive newlines
   markdown = markdown.replace(/\n{4,}/g, '\n\n\n').trim();
+
+  // Readability scores by PROSE density, so a specification grid — dozens of
+  // two-word cells, no sentences — scores near zero and is dropped. Nothing
+  // signals the loss: `article.content` is non-empty and reads fine, while the
+  // year, mileage and engine size the reader actually wanted are gone. Append
+  // what it missed. (Same reasoning as the link salvage just below.)
+  markdown += salvageSpecs(documentClone, jsonLdBlocks, { existingMarkdown: markdown });
 
   // Documentation hubs / TOC pages are mostly links — and Readability often
   // strips nav-style link lists, leaving bare titles with no hrefs. Chat's

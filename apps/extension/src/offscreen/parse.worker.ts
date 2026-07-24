@@ -22,6 +22,7 @@ import './worker-dom-globals';
 import { DOMParser } from 'linkedom';
 import { Readability } from '@mozilla/readability';
 import TurndownService from 'turndown';
+import { salvageSpecs, readJsonLdBlocks } from '../lib/spec-salvage';
 
 interface ParseReq { type: 'parse'; id: number; html: string; url: string }
 
@@ -50,6 +51,11 @@ function extract(html: string, url: string): { title: string; markdown: string; 
   const turndown = new TurndownService({ headingStyle: 'atx', codeBlockStyle: 'fenced' });
   let markdown = turndown.turndown(contentNode as any);
   markdown = markdown.replace(/\n{4,}/g, '\n\n\n').trim();
+
+  // Same blind spot as the content script: Readability drops specification
+  // grids because they carry no prose. Salvage them from the FULL parsed
+  // document, not from Readability's output — the point is what it removed.
+  markdown += salvageSpecs(parsed, readJsonLdBlocks(parsed), { existingMarkdown: markdown });
 
   const wordCount = markdown.split(/\s+/).filter(w => w.length > 0).length;
   return { title, markdown, wordCount };
