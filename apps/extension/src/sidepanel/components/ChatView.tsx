@@ -8,6 +8,7 @@ import { LocalDocument, ChatMessage, ResearchPlan, ResolvedCitation } from '../t
 import { Send, StopCircle, Sparkles, ChevronDown, ChevronUp, Loader2, Microscope, Search, BookOpen, User, Copy, Check, Paperclip, FileText, RotateCcw, Pencil, Globe, Newspaper, Plug, PenLine, ShieldCheck, CheckCircle2, XCircle } from 'lucide-react';
 import { parseResearchActivity, PHASE_ORDER, PHASE_LABEL, type ResearchPhase } from '../../lib/research-activity';
 import { diagnoseError } from '../../lib/error-recovery';
+import { continueList } from '../../lib/list-continue';
 import type { LucideIcon } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { paletteEntries, SlashCommand } from '../../lib/commands';
@@ -1615,42 +1616,40 @@ export const ChatView: React.FC<ChatViewProps> = ({
                   if (e.key === 'Escape') { setInput(''); setPaletteIdx(0); return; }
                 }
               }
-              if (e.key === 'Enter' && e.shiftKey) {
-                // Markdown list auto-continue: Shift+Enter inside a "- "/"* "/"1. "
-                // line starts the next item; an empty item ends the list. Otherwise
-                // fall through to a normal newline.
+              // Cmd/Ctrl+Enter always sends — the escape hatch for sending a
+              // message that ends in a list without first breaking out of it.
+              if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+                e.preventDefault();
+                send();
                 const el = e.currentTarget;
+                requestAnimationFrame(() => { el.style.height = 'auto'; });
+                return;
+              }
+              // Apply list continuation to a list line. Shared by both Enter
+              // and Shift+Enter so they behave identically inside a list.
+              const applyListContinue = (el: HTMLTextAreaElement): boolean => {
                 const pos = el.selectionStart ?? input.length;
-                const lineStart = input.lastIndexOf('\n', pos - 1) + 1;
-                const line = input.slice(lineStart, pos);
-                const m = line.match(/^(\s*)([-*+]|\d+\.)\s+(.*)$/);
-                if (m) {
-                  e.preventDefault();
-                  const [, indent, marker, content] = m;
-                  let next: string;
-                  if (content.trim() === '') {
-                    // Empty item → end the list (clear the marker, plain newline).
-                    next = input.slice(0, lineStart) + input.slice(pos);
-                    setInput(next);
-                    requestAnimationFrame(() => { el.selectionStart = el.selectionEnd = lineStart; });
-                  } else {
-                    const marker2 = /^\d+\.$/.test(marker) ? `${parseInt(marker, 10) + 1}.` : marker;
-                    const insert = `\n${indent}${marker2} `;
-                    next = input.slice(0, pos) + insert + input.slice(pos);
-                    setInput(next);
-                    const caret = pos + insert.length;
-                    requestAnimationFrame(() => {
-                      el.selectionStart = el.selectionEnd = caret;
-                      el.style.height = 'auto';
-                      el.style.height = `${Math.min(el.scrollHeight, 160)}px`;
-                    });
-                  }
-                  return;
-                }
+                const r = continueList(input, pos);
+                if (!r) return false;
+                setInput(r.value);
+                requestAnimationFrame(() => {
+                  el.selectionStart = el.selectionEnd = r.caret;
+                  el.style.height = 'auto';
+                  el.style.height = `${Math.min(el.scrollHeight, 160)}px`;
+                });
+                return true;
+              };
+              if (e.key === 'Enter' && e.shiftKey) {
+                // Shift+Enter: continue the list if in one, else a plain newline.
+                if (applyListContinue(e.currentTarget)) e.preventDefault();
                 // not a list line → default newline behavior
+                return;
               }
               if (e.key === 'Enter' && !e.shiftKey) {
                 e.preventDefault();
+                // Enter is the default: inside a list it continues the list;
+                // otherwise it sends. (Cmd/Ctrl+Enter above forces a send.)
+                if (applyListContinue(e.currentTarget)) return;
                 // While a reply streams, send() no-ops — typing stays possible
                 // (the textarea is never disabled, so focus is never ejected).
                 send();

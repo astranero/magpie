@@ -173,3 +173,31 @@ test('editing a message re-runs it and drops the turns that followed — in stor
   await expect(page.getByText('Second question, to be discarded?', { exact: true })).toHaveCount(0);
   await page.close();
 });
+
+test('Enter continues a list instead of sending; empty item ends it', async () => {
+  const page = await context.newPage();
+  await openChat(page);
+
+  const input = page.getByPlaceholder(/Ask a question/i);
+  const answersBefore = await answersIn(page).count();
+
+  await input.click();
+  await input.type('1. one');
+  await input.press('Enter');                       // in a list → continue, not send
+  await expect(input).toHaveValue('1. one\n2. ');
+  await expect(answersIn(page)).toHaveCount(answersBefore);   // nothing was sent
+
+  await input.type('two');
+  await input.press('Enter');
+  await expect(input).toHaveValue('1. one\n2. two\n3. ');
+
+  // Enter on the empty "3. " ends the list…
+  await input.press('Enter');
+  await expect(input).toHaveValue('1. one\n2. two\n');
+  await expect(answersIn(page)).toHaveCount(answersBefore);   // still not sent
+
+  // …and the next Enter (not in a list) sends.
+  await input.press('Enter');
+  await expect(answersIn(page)).toHaveCount(answersBefore + 1, { timeout: 15000 });
+  await page.close();
+});
