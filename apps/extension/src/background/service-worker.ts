@@ -679,6 +679,7 @@ const messageHandlers: Record<string, MessageHandler> = {
   },
   IMPORT_FROM_DRIVE: handleImportFromDrive,
   RECONCILE_FROM_DRIVE: handleReconcileFromDrive,
+  ENSURE_PROJECT_SUBFOLDER: handleEnsureProjectSubfolder,
   LIST_DRIVE_FILES: handleListDriveFiles,
   SYNC_STATUS: async () => {
     const stats = await getSyncStats();
@@ -1730,25 +1731,39 @@ async function buildChatRequest(chatId: string, projectId: string, prompt: strin
     const gathered = await agenticDataGather(q, observed, discovered, host, signal, onStatus).catch((e) => {
       console.warn('[DATA] gather failed:', e); return { blocks: [], sources: [] as Array<{ title: string; url: string }> };
     });
+    let blocks = gathered.blocks;
+    let sources = gathered.sources;
+
+    // Web-search FLOOR. The agent loop only fetches if the model emits tool
+    // calls, and some providers/models (notably Copilot-routed ones) don't
+    // support function calling — so the loop can end up fetching nothing through
+    // no fault of the site. Rather than dead-end on "reload the page", do a
+    // direct keyless web search so /data still returns real, cited data.
+    if (blocks.length === 0) {
+      onStatus?.('Searching the web…');
+      const web = await gatherWebSnippets(q, { signal }).catch(() => null);
+      if (web?.context) {
+        blocks = [`\n\n--- WEB RESULTS ---\n${web.context}\n--- END WEB RESULTS ---`];
+        sources = web.sources || [];
+      }
+    }
+
     const dataSys =
-      `You are a data analyst. You were given data fetched from public APIs (below). Answer the user's ` +
-      `request using ONLY that data — build the table/ranking/summary they asked for, cite the endpoints ` +
-      `you used, and state plainly if the data is incomplete or a call failed. Do not invent rows.\n\n` +
-      (gathered.blocks.length
-        ? `FETCHED DATA:\n${gathered.blocks.join('\n')}`
+      `You are a data analyst. You were given data gathered from public APIs and/or web search (below). ` +
+      `Answer the user's request using ONLY that data — build the table/ranking/summary they asked for, cite ` +
+      `the sources you used, and state plainly if the data is incomplete or a call failed. Do not invent rows.\n\n` +
+      (blocks.length
+        ? `GATHERED DATA:\n${blocks.join('\n')}`
         : `NO DATA WAS FETCHED THIS TURN. Report ONLY that, honestly. HARD RULES:\n` +
-          `- Do NOT claim whether the site has or lacks an API, or that "no public API exists" — you did NOT ` +
-          `verify that and must not assert it.\n` +
+          `- Do NOT claim whether the site has or lacks an API — you did NOT verify that.\n` +
           `- Do NOT invent prices, listings, or any data.\n` +
-          `The most likely cause: this page's network calls were not observed. Ask the user to RELOAD the page ` +
-          `and run /data again so its API calls can be captured (the observer must be running before the page ` +
-          `loads). Other possible causes to mention briefly: the endpoints need a login (this agent is ` +
-          `credential-free), or fetches were blocked. Offer that one concrete next step and nothing more.`);
+          `State that neither the site's API nor a web search returned usable data this turn, and suggest the ` +
+          `user reload the page and retry, or try a more specific query. Offer that one next step and nothing more.`);
     return {
       systemPrompt: LANGUAGE_DIRECTIVE + rulesBlock + localeBlock + dataSys,
       formattedHistory,
       grounded: false,
-      branch: (gathered.sources.length ? 'web' : 'general') as ChatBranch,
+      branch: (sources.length ? 'web' : 'general') as ChatBranch,
       place: undefined,
     };
   }
@@ -4809,6 +4824,28 @@ async function handleReconcileFromDrive(request?: Record<string, unknown>): Prom
 
   report(imported ? `Restored ${imported} document(s) from Drive.` : 'Everything already in sync.');
   return { imported, projectsCreated, folders: subfolders.length, errors };
+}
+
+/**
+ * Create the Drive subfolder for a project up front, the moment the project is
+ * made — so `Magpie/<project>/` appears immediately instead of only when the
+ * first document happens to sync. Silent no-op when the user isn't signed in
+ * (getToken(false) rejects); the periodic sync will create it later anyway.
+ */
+async function handleEnsureProjectSubfolder(request?: Record<string, unknown>): Promise<Record<string, unknown>> {
+  const projectId = typeof request?.projectId === 'string' ? request.projectId : '';
+  if (!projectId) return { ok: false };
+  try {
+    const project = await getProject(projectId);
+    if (!project?.title) return { ok: false };
+    const token = await getToken(false);
+    const rootId = await ensureFolder(token);
+    const subId = await ensureSubfolder(token, rootId, sanitizeSegment(project.title));
+    return { ok: true, subId };
+  } catch {
+    // Not signed in / transient Drive error — the 5-min auto-sync will handle it.
+    return { ok: false };
+  }
 }
 
 async function handleListDriveFiles(request?: Record<string, unknown>): Promise<Record<string, unknown>> {

@@ -1169,6 +1169,9 @@ loadChatHistory(activeChatId).then(() => {
       const newId = res.id as string;
       await loadProjects();
       setActiveProjectId(newId);
+      // Create this workspace's Drive subfolder eagerly so Magpie/<name>/ shows
+      // up right away (no-op if Drive isn't connected). Fire-and-forget.
+      msg('ENSURE_PROJECT_SUBFOLDER', { projectId: newId }).catch(() => {});
     }
   };
 
