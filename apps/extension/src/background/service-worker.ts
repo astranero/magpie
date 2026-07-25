@@ -1725,8 +1725,14 @@ async function buildChatRequest(chatId: string, projectId: string, prompt: strin
       `you used, and state plainly if the data is incomplete or a call failed. Do not invent rows.\n\n` +
       (gathered.blocks.length
         ? `FETCHED DATA:\n${gathered.blocks.join('\n')}`
-        : `No data could be fetched (the agent found no usable public endpoint, or fetches were blocked). ` +
-          `Tell the user that, and suggest what endpoint or page would help.`);
+        : `NO DATA WAS FETCHED THIS TURN. Report ONLY that, honestly. HARD RULES:\n` +
+          `- Do NOT claim whether the site has or lacks an API, or that "no public API exists" — you did NOT ` +
+          `verify that and must not assert it.\n` +
+          `- Do NOT invent prices, listings, or any data.\n` +
+          `The most likely cause: this page's network calls were not observed. Ask the user to RELOAD the page ` +
+          `and run /data again so its API calls can be captured (the observer must be running before the page ` +
+          `loads). Other possible causes to mention briefly: the endpoints need a login (this agent is ` +
+          `credential-free), or fetches were blocked. Offer that one concrete next step and nothing more.`);
     return {
       systemPrompt: LANGUAGE_DIRECTIVE + rulesBlock + localeBlock + dataSys,
       formattedHistory,
@@ -2769,6 +2775,7 @@ async function agenticDataGather(
     `- Inspect each response, then construct the next call: paginate (page/offset/limit params) and fan out to related endpoints. Accumulate enough rows to answer.\n` +
     `- You may also fetch known public APIs directly: Reddit (append .json to a listing URL, or /search.json?q=…), the GitHub REST API, HN Algolia.\n` +
     `- All fetches are CREDENTIAL-FREE (public data only). Budget: at most ${DATA_MAX_FETCHES} fetches. Never repeat a URL.\n` +
+    `- If list_page_api_calls returns nothing, the page's requests weren't observed (it may need a reload). Do NOT conclude the site "has no API" — try a search_web for its API, or a plausible endpoint, before giving up.\n` +
     `- When you have enough, stop calling tools; the final answer is written separately from the data you gathered.`;
   const messages: any[] = [{ role: 'system', content: sys }, { role: 'user', content: question }];
 
