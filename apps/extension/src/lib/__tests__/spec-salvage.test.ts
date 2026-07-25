@@ -200,6 +200,13 @@ describe('free-text description — the prose Readability drops beside a spec gr
     expect(desc.length).toBeGreaterThan(200); // would have been rejected as a spec cell
   });
 
+  it('recovers a listing description from a class container (nettimoto ilmoitusteksti)', () => {
+    const long = 'Erittäin siisti V-Strom, aina sisällä säilytetty ja hyvin huollettu. ' + 'Uudet renkaat ja ketjut. '.repeat(6);
+    const root = docFrom(`<div class="ilmoitusteksti-body">${long}</div><nav class="menu-description">Osta Myy</nav>`);
+    const d = fromDomDescription(root);
+    expect(d).toContain('hyvin huollettu');
+  });
+
   it('recovers the description from schema.org microdata in the DOM', () => {
     const doc = docFrom(`<div itemprop="description">${long}</div>`);
     expect(fromDomDescription(doc)).toContain('V-Strom');

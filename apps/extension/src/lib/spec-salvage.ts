@@ -235,12 +235,34 @@ export function fromJsonLdDescription(raw: string[]): string {
   return best;
 }
 
+// schema.org microdata first (site-agnostic), then common marketplace
+// description containers. Lowercase-only substrings so linkedom (parse worker)
+// and the live DOM both match; a bad selector is caught per-selector below.
+const DESC_SELECTORS = [
+  '[itemprop="description"]',
+  '[class*="ilmoitusteksti"]',      // Finnish "listing text" (nettimoto/nettiauto)
+  '[class*="listing-description"]',
+  '[class*="vehicle-description"]',
+  '[class*="ad-description"]',
+  '[class*="item-description"]',
+  '[class*="seller-notes"]',
+  '[class*="description-text"]',
+  '[data-testid*="description"]',
+  '[id*="description"]',
+  '[class*="description"]',          // broadest — last, only wins if it's the longest prose
+];
+
 export function fromDomDescription(doc: any): string {
-  const nodes = Array.from(doc?.querySelectorAll?.('[itemprop="description"]') || []) as any[];
   let best = '';
-  for (const n of nodes) {
-    const t = txt(n);
-    if (t.length > best.length) best = t;
+  for (const sel of DESC_SELECTORS) {
+    let nodes: any[] = [];
+    try { nodes = Array.from(doc?.querySelectorAll?.(sel) || []); } catch { continue; }
+    for (const n of nodes) {
+      const t = txt(n);
+      // Require sentence-shaped prose so a class match that's really a label or
+      // nav list doesn't win the "longest" contest.
+      if (t.length > best.length && /[.!?]/.test(t)) best = t;
+    }
   }
   return best;
 }

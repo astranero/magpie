@@ -2512,6 +2512,9 @@ const sys = isDebugPage
     (pageMarkdown
       ? `\nYou can read the page content in detail using read_section (by heading), search_page (grep), or read_lines (by line number). Start by searching for errors or reading the relevant section.\n`
       : '') +
+    (catalogLinks.length
+      ? `\nIf the question asks whether something is GOOD / reliable / worth it / recommended and the page itself only has specs or a listing (no verdict), do NOT stop at "the page doesn't say" — READ a linked reviews or ratings page with read_link (e.g. a "read N reviews", "arvostelua", "ratings" link) and answer from it. Follow the most relevant link before concluding you can't answer.\n`
+      : '') +
     (catalogFiles.length ? `\nRepository files you may read:\n${catalogFiles.join('\n')}\n` : '') +
     (catalogLinks.length ? `\nPage links you may read:\n${catalogLinks.map(l => `${l.anchorText || l.url} — ${l.url}`).join('\n')}\n` : '');
   const messages: any[] = [{ role: 'system', content: sys }, { role: 'user', content: question }];
