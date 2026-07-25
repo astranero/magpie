@@ -14,7 +14,7 @@
 // gone the moment the transcript scrolls, which defeats the point — the learner
 // returns to these to review.
 
-import { getProject, updateProjectRules, listDocuments, linkDocumentToProject, saveDocument, getChatHistory } from '../lib/db';
+import { getProject, updateProjectRules, listDocuments, linkDocumentToProject, saveDocument, deleteDocument, getChatHistory } from '../lib/db';
 import { buildFrontmatter, splitFrontmatter } from '../lib/frontmatter';
 import { chatWithCustom } from './llm-client';
 
@@ -177,6 +177,15 @@ export function upsertMissionBlock(rules: string | undefined, mission: string): 
     return (existing.slice(0, start) + block + existing.slice(end + MISSION_CLOSE.length)).trim();
   }
   return existing.trim() ? `${existing.trim()}\n\n${block}` : block;
+}
+
+/** Strip the mission block from a workspace's rules, leaving the user's own. */
+export function removeMissionBlock(rules: string | undefined): string {
+  const existing = rules || '';
+  const start = existing.indexOf(MISSION_OPEN);
+  const end = existing.indexOf(MISSION_CLOSE);
+  if (start === -1 || end === -1 || end < start) return existing.trim();
+  return (existing.slice(0, start) + existing.slice(end + MISSION_CLOSE.length)).replace(/\n{3,}/g, '\n\n').trim();
 }
 
 /** Read a single frontmatter field. Tolerates quoted and bare values. */
@@ -431,6 +440,20 @@ export async function handleTeach(request: Record<string, unknown>, pageContext?
 
   const project = await getProject(projectId);
   if (!project) throw new Error('Workspace not found');
+
+  // `/teach reset` — wipe the course (mission + syllabus + lessons) so the NEXT
+  // /teach rebuilds from the workspace's research. The escape hatch for a course
+  // that was seeded from the wrong signal.
+  if (topic.toLowerCase() === 'reset') {
+    await updateProjectRules(projectId, removeMissionBlock(project.rules)).catch(() => {});
+    const docs = await listDocuments(projectId);
+    let deleted = 0;
+    for (const d of docs) {
+      const type = frontmatterField(d.content, 'type');
+      if (type === 'syllabus' || type === 'lesson') { await deleteDocument(d.id).catch(() => {}); deleted++; }
+    }
+    return { reset: true, deleted } as unknown as Record<string, unknown>;
+  }
 
   // "/teach about this topic" points at the research, not the literal words —
   // drop a vague arg so it can't misdirect the mission.

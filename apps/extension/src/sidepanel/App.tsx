@@ -1930,7 +1930,9 @@ loadChatHistory(activeChatId).then(() => {
       setGenerating(prev => ({ ...prev, [currentChatId]: false }));
       let body: string;
       let quiz: any;
-      if (res.courseComplete) {
+      if (res.reset) {
+        body = `**Course reset.** Cleared the mission${res.deleted ? ` and removed ${res.deleted} lesson/plan doc(s)` : ''}. Run \`/teach\` again and I'll build a fresh course from this workspace's research.`;
+      } else if (res.courseComplete) {
         body = String(res.body || 'Course complete.');
       } else if (res.success !== false && res.title) {
         const header = res.missionCreated
