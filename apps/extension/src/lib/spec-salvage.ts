@@ -183,10 +183,13 @@ export function fromJsonLd(raw: string[]): SpecRow[] {
     }
   };
   const walk = (node: any, depth: number) => {
-    if (!node || depth > 2) return;
+    if (!node || depth > 3) return;
     if (Array.isArray(node)) { node.forEach(n => walk(n, depth)); return; }
     if (typeof node !== 'object') return;
     for (const [k, v] of Object.entries(node)) {
+      // `@graph` is the container almost every real site wraps its nodes in —
+      // skipping it (as a plain `@`-key) threw away the entire payload. Descend.
+      if (k === '@graph') { walk(v, depth); continue; }
       if (k.startsWith('@')) continue;
       if (v && typeof v === 'object') walk(v, depth + 1);
       else push(k, v);
@@ -197,6 +200,52 @@ export function fromJsonLd(raw: string[]): SpecRow[] {
   }
   return out;
 }
+
+/**
+ * The seller's free-text description — the "is this a good bike?" text — is
+ * PROSE inside a nested div. Readability drops it (it scores the div beside the
+ * spec grid as low-density) and `fromJsonLd` drops it too (over the 200-char
+ * cell cap). So the one part the reader asked about is lost twice. Recover it
+ * whole, as prose, from whichever the site publishes:
+ *   - JSON-LD `description` / `articleBody` (Product/Vehicle/Offer/Article),
+ *   - DOM `[itemprop="description"]` (schema.org microdata, site-agnostic).
+ * Returns the longest candidate, or '' if none is substantial.
+ */
+const DESC_KEYS = new Set(['description', 'articleBody', 'text', 'reviewBody']);
+
+export function fromJsonLdDescription(raw: string[]): string {
+  let best = '';
+  const walk = (node: any, depth: number) => {
+    if (!node || depth > 4) return;
+    if (Array.isArray(node)) { node.forEach(n => walk(n, depth)); return; }
+    if (typeof node !== 'object') return;
+    for (const [k, v] of Object.entries(node)) {
+      if (k === '@graph') { walk(v, depth); continue; }
+      if (DESC_KEYS.has(k) && typeof v === 'string') {
+        const t = v.replace(/\s+/g, ' ').trim();
+        if (t.length > best.length) best = t;
+      } else if (v && typeof v === 'object') {
+        walk(v, depth + 1);
+      }
+    }
+  };
+  for (const block of raw) {
+    try { walk(JSON.parse(block), 0); } catch { /* malformed block: skip */ }
+  }
+  return best;
+}
+
+export function fromDomDescription(doc: any): string {
+  const nodes = Array.from(doc?.querySelectorAll?.('[itemprop="description"]') || []) as any[];
+  let best = '';
+  for (const n of nodes) {
+    const t = txt(n);
+    if (t.length > best.length) best = t;
+  }
+  return best;
+}
+
+const MAX_DESC = 4000;
 
 /** Drop duplicates and anything the main extraction already carried. */
 export function dedupeRows(rows: SpecRow[], existingMarkdown = ''): SpecRow[] {
@@ -238,7 +287,19 @@ export function salvageSpecs(doc: any, jsonLd: string[] = [], opts: SalvageOptio
     ...fromDivGrids(doc),
   ];
   const deduped = dedupeRows(rows, opts.existingMarkdown).slice(0, opts.maxRows ?? MAX_ROWS_DEFAULT);
-  return rowsToMarkdown(deduped);
+  let out = rowsToMarkdown(deduped);
+
+  // The free-text description, recovered as prose. Only worth appending when it
+  // is genuinely long (a short blurb Readability already keeps) and not already
+  // in the captured markdown (probe the opening so we don't duplicate it).
+  const desc = [fromJsonLdDescription(jsonLd), fromDomDescription(doc)]
+    .reduce((a, b) => (b.length > a.length ? b : a), '');
+  if (desc.length > MAX_VALUE) {
+    const have = (opts.existingMarkdown || '').replace(/\s+/g, ' ').toLowerCase();
+    const probe = desc.slice(0, 120).toLowerCase();
+    if (!have.includes(probe)) out += `\n\n## Description\n\n${desc.slice(0, MAX_DESC)}\n`;
+  }
+  return out;
 }
 
 /** Read the page's JSON-LD blocks. Separate so callers can grab them pre-strip. */

@@ -1,6 +1,9 @@
 // @vitest-environment jsdom
 import { describe, it, expect } from 'vitest';
-import { salvageSpecs, fromJsonLd, dedupeRows, rowsToMarkdown, readJsonLdBlocks } from '../spec-salvage';
+import {
+  salvageSpecs, fromJsonLd, dedupeRows, rowsToMarkdown, readJsonLdBlocks,
+  fromJsonLdDescription, fromDomDescription,
+} from '../spec-salvage';
 
 // The reported case: a motorcycle listing whose spec data lives in div grids.
 // Readability keeps the description paragraph and drops the grid, so the
@@ -161,6 +164,20 @@ describe('JSON-LD', () => {
     expect(byLabel.price).toBe('5990');   // one level of nesting is followed
   });
 
+  it('descends into @graph — the wrapper real sites use', () => {
+    // Skipping @graph as a plain `@`-key threw away the whole payload, which is
+    // why a nettimoto-style listing salvaged nothing at all.
+    const rows = fromJsonLd([JSON.stringify({
+      '@context': 'https://schema.org',
+      '@graph': [
+        { '@type': 'Organization', name: 'Nettimoto' },
+        { '@type': 'Product', name: 'Suzuki DL 650 V-Strom', modelDate: '2018' },
+      ],
+    })]);
+    const byLabel = Object.fromEntries(rows.map(r => [r.label, r.value]));
+    expect(byLabel.modelDate).toBe('2018');
+  });
+
   it('survives a malformed block rather than failing the capture', () => {
     expect(() => fromJsonLd(['{not json', '{"a":"b"}'])).not.toThrow();
     expect(fromJsonLd(['{not json', '{"a":"b"}'])).toEqual([{ label: 'a', value: 'b' }]);
@@ -169,6 +186,41 @@ describe('JSON-LD', () => {
   it('is read from the document before scripts are stripped', () => {
     const doc = docFrom(`<script type="application/ld+json">{"a":1}</script>`);
     expect(readJsonLdBlocks(doc)).toEqual(['{"a":1}']);
+  });
+});
+
+describe('free-text description — the prose Readability drops beside a spec grid', () => {
+  const long = 'Erittäin siisti ja hyvin huollettu V-Strom. ' + 'Ajettu vain kesäisin, aina sisällä säilytetty. '.repeat(6);
+
+  it('recovers the description from JSON-LD, past the cell length cap', () => {
+    const desc = fromJsonLdDescription([JSON.stringify({
+      '@graph': [{ '@type': 'Product', name: 'V-Strom', description: long }],
+    })]);
+    expect(desc).toContain('hyvin huollettu');
+    expect(desc.length).toBeGreaterThan(200); // would have been rejected as a spec cell
+  });
+
+  it('recovers the description from schema.org microdata in the DOM', () => {
+    const doc = docFrom(`<div itemprop="description">${long}</div>`);
+    expect(fromDomDescription(doc)).toContain('V-Strom');
+  });
+
+  it('appends a ## Description block from salvageSpecs', () => {
+    const doc = docFrom(`<div itemprop="description">${long}</div>`);
+    const md = salvageSpecs(doc, []);
+    expect(md).toContain('## Description');
+    expect(md).toContain('hyvin huollettu');
+  });
+
+  it('does not duplicate a description Readability already captured', () => {
+    const doc = docFrom(`<div itemprop="description">${long}</div>`);
+    const md = salvageSpecs(doc, [], { existingMarkdown: long });
+    expect(md).not.toContain('## Description');
+  });
+
+  it('ignores a short blurb — that is not the missing prose', () => {
+    const md = salvageSpecs(docFrom('<div itemprop="description">Nice bike.</div>'), []);
+    expect(md).not.toContain('## Description');
   });
 });
 
