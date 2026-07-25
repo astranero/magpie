@@ -1713,6 +1713,7 @@ async function buildChatRequest(chatId: string, projectId: string, prompt: strin
         place: undefined,
       };
     }
+    try {
     let observed: string[] = [];
     let discovered: string[] = [];
     let host = '';
@@ -1769,6 +1770,20 @@ async function buildChatRequest(chatId: string, projectId: string, prompt: strin
       branch: (sources.length ? 'web' : 'general') as ChatBranch,
       place: undefined,
     };
+    } catch (dataErr) {
+      // Never let /data hard-fail the whole request ("Failed to construct URL"
+      // etc.). Degrade to an honest notice in the user's language.
+      console.warn('[DATA] branch failed:', dataErr);
+      return {
+        systemPrompt: LANGUAGE_DIRECTIVE + rulesBlock + localeBlock +
+          `The /data data-gathering step hit an internal error this turn. Tell the user plainly and briefly ` +
+          `that gathering failed and to try again or rephrase — in the SAME language as their request. Do NOT invent any data.`,
+        formattedHistory,
+        grounded: false,
+        branch: 'general' as ChatBranch,
+        place: undefined,
+      };
+    }
   }
 
   // Greetings / small talk must NOT run retrieval: it returns weak top-k
@@ -2167,7 +2182,7 @@ async function buildChatRequest(chatId: string, projectId: string, prompt: strin
     // getRepoTree only hits their public read APIs, which bounds the exposure.
     const { enterpriseGitHubUrl } = await chrome.storage.local.get(['enterpriseGitHubUrl']).catch(() => ({})) as Record<string, any>;
     const enterpriseHost = (enterpriseGitHubUrl && typeof enterpriseGitHubUrl === 'string')
-      ? new URL(enterpriseGitHubUrl).hostname : undefined;
+      ? (() => { try { return new URL(enterpriseGitHubUrl).hostname; } catch { return undefined; } })() : undefined;
     let repoRef = parseRepoUrl(pageContext.url, enterpriseHost);
     if (!repoRef && isImplementationQuestion(effectiveQuery)) {
       const linked = findRepoUrlInText(pageContext.markdown, enterpriseHost);
