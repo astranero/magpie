@@ -43,6 +43,16 @@ const indexingSem = semaphore(1);
  */
 const GATHER_WALL_BUDGET_MS = 35 * 60 * 1000;
 
+/**
+ * Wall-clock budget for the SECTIONED SYNTHESIS loop, measured from its own
+ * start. Gathering has a budget; section-writing did not, so a run with slow
+ * per-section calls wrote sections until the 60-min run watchdog aborted the
+ * whole job — throwing away every finished section. When this budget (or an
+ * abort/Stop) is hit, we stop starting new sections and ship what's written,
+ * flagged incomplete. A partial report beats an hour of work vanishing.
+ */
+const SYNTH_WALL_BUDGET_MS = 18 * 60 * 1000;
+
 // (The old 60k doc-level embed cap was removed: per-chunk embed truncation +
 // batched embedding already bound ONNX memory, and the cap silently left long
 // papers with zero chunks past 60k — a retrieval hole.)
@@ -3343,10 +3353,16 @@ async function synthesizeSectionedPaper(
   const chunkUse = new Map<string, number>();
   let retryBudget = 2;
   let failed = 0;
+  const synthStartedAt = Date.now();
+  let salvaged: 'stopped' | 'budget' | null = null;
 
   for (let i = 0; i < sections.length; i++) {
     const s = sections[i];
-    if (signal?.aborted) throwIfAborted(signal);
+    // Stop starting new sections when the run is aborted (Stop / watchdog) or
+    // this synthesis phase has run past its budget — but DON'T throw: break and
+    // ship the finished sections below, so the work isn't discarded.
+    if (signal?.aborted) { salvaged = 'stopped'; break; }
+    if (Date.now() - synthStartedAt > SYNTH_WALL_BUDGET_MS) { salvaged = 'budget'; break; }
 
     // Resume: a SW death mid-synthesis left finished sections in the checkpoint.
     if (sectionDrafts[s.id] && sectionDrafts[s.id].length > 150) {
@@ -3437,6 +3453,19 @@ ${RESEARCH_CITATION_RULES}`;
   }
 
   const body = written.join('\n\n');
+
+  // Salvage path: we stopped early (Stop/watchdog or the synthesis budget).
+  // Ship the finished sections with an incomplete banner — no capstone (it needs
+  // the LLM the abort just killed, and there's no time budget left). If nothing
+  // was written, fall through to null so the caller can try the cheaper merge.
+  if (salvaged) {
+    if (written.length === 0) return null;
+    crumb('synth', 'sectioned salvaged', { reason: salvaged, sections: written.length, of: sections.length });
+    const why = salvaged === 'stopped' ? 'the run was stopped' : 'the time budget was reached';
+    const banner = `> ⚠ **Incomplete report** — ${why} after ${written.length} of ${sections.length} planned sections. What follows is what had been written; the executive summary and verdict were not generated.\n\n`;
+    return banner + body;
+  }
+
   // Degradation gate: worse than the single-merge path → let the caller run it.
   if (failed > sections.length / 2 || body.length < 800) {
     crumb('synth', 'sectioned degraded → single merge', { failed, bodyChars: body.length });
@@ -4031,12 +4060,18 @@ async function runDeeperResearch(
         .map((b, i) => `## Stage ${i + 1} Research Brief\n\n${b}`)
         .join('\n\n---\n\n');
   }
-  synthesis = await evaluateAndRefine(
-    topic, synthesis, revisionContext, llmChatFn, evaluatorFn ?? llmChatFn, onProgress,
-    activeSourceMode === 'academic'
-      ? 'CORPUS NOTE: this run was papers-only BY DESIGN (/academic — Semantic Scholar, CrossRef, arXiv, HuggingFace). Do NOT penalize the absence of web, news, industry, or market sources; judge coverage against the academic literature only.'
-      : undefined
-  );
+  // The evaluator is a polish pass (another LLM round). Skip it when the run was
+  // stopped/timed out — the abort just killed the LLM, and the goal now is to
+  // save the salvaged partial, not improve it. Running it here would throw and
+  // lose the report.
+  if (!signal?.aborted) {
+    synthesis = await evaluateAndRefine(
+      topic, synthesis, revisionContext, llmChatFn, evaluatorFn ?? llmChatFn, onProgress,
+      activeSourceMode === 'academic'
+        ? 'CORPUS NOTE: this run was papers-only BY DESIGN (/academic — Semantic Scholar, CrossRef, arXiv, HuggingFace). Do NOT penalize the absence of web, news, industry, or market sources; judge coverage against the academic literature only.'
+        : undefined
+    );
+  }
   // The chat message renders this return value directly — strip pseudo-anchors
   // here too, not only in the saved-document path (saveSynthesisReport).
   synthesis = stripStageBriefPseudoCitations(synthesis);
