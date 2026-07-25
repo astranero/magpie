@@ -70,6 +70,15 @@ contacts `openrouter.ai` with a key read from env or the gitignored
    (`DATA_TRAILER` in `deep-researcher.ts`) after the source excerpts,
    re-asserting that the preceding text is untrusted data and instructing
    the model to ignore any instructions embedded in it.
+
+   The same class of flow now also runs through **`/teach` and `/flashcard`**
+   (`background/teach.ts`): scraped page context and the workspace's own
+   research (`researchSourceText`) are fed into lesson / quiz / flashcard
+   prompts via `chatWithCustom`. These calls do **not** currently append the
+   `DATA_TRAILER` sandwich trailer — the blast radius is lower (the output is
+   lesson/card text, never a tool action or a live link, and citations still
+   resolve only to real chunks), but whether to extend the sandwich defense to
+   these surfaces is an open hardening decision, not a settled mitigation.
 2. **Fetching a PDF with the user's session (`EXTRACT_PDF`).** When a
    background fetch of a PDF comes back empty — the usual cause is a host that
    gates downloads and answers with a verification page — the content script
