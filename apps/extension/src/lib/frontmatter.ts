@@ -16,6 +16,7 @@ export type DocKind =
   | 'skill'
   | 'lesson'
   | 'syllabus'
+  | 'flashcards'
   | 'academic';
 
 export interface FrontmatterFields {

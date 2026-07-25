@@ -58,6 +58,18 @@ export interface ChatMessage {
   /** Interactive quiz for a /teach lesson — rendered as a card under the text.
    *  UI state only (per-question answers/verdicts live here). */
   quiz?: QuizQuestion[];
+  /** A /flashcard deck — the message shows an "Open deck" button that launches
+   *  the full-panel player. */
+  deck?: Flashcard[];
+  /** Title for the deck (shown in the player header + open button). */
+  deckTitle?: string;
+}
+
+/** One flashcard: a recall cue and its answer. */
+export interface Flashcard {
+  front: string;
+  back: string;
+  hint?: string;
 }
 
 /**
@@ -117,4 +129,4 @@ export interface TabInfo {
   favIconUrl?: string;
 }
 
-export type View = 'lore' | 'chat' | 'settings' | 'document';
+export type View = 'lore' | 'chat' | 'settings' | 'document' | 'flashcards';

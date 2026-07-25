@@ -21,7 +21,7 @@ const sanitizeSegment = (name: string): string =>
     .trim()
     .slice(0, 100);
 import { FileText } from 'lucide-react';
-import { LocalDocument, Project, Chat, ChatMessage, ResearchPlan, ResolvedCitation, TabInfo, View } from './types';
+import { LocalDocument, Project, Chat, ChatMessage, ResearchPlan, ResolvedCitation, TabInfo, View, Flashcard } from './types';
 import { LinkPreview, LinkPreviewState } from './components/LinkPreview';
 import { Header } from './components/layout/Header';
 import { Navbar } from './components/layout/Navbar';
@@ -66,6 +66,7 @@ const LoreView = lazy(() => reloadableImport(() => import('./components/LoreView
 const ChatView = lazy(() => reloadableImport(() => import('./components/ChatView').then(m => ({ default: m.ChatView }))));
 const SettingsView = lazy(() => reloadableImport(() => import('./components/SettingsView').then(m => ({ default: m.SettingsView }))));
 const DocumentView = lazy(() => reloadableImport(() => import('./components/DocumentView').then(m => ({ default: m.DocumentView }))));
+const DeckView = lazy(() => reloadableImport(() => import('./components/DeckView').then(m => ({ default: m.DeckView }))));
 
 import { findPromptCommand, buildHelpText, loadCustomSkills, SlashCommand } from '../lib/commands';
 import { contentHasTag } from '../lib/frontmatter';
@@ -435,6 +436,8 @@ loadChatHistory(activeChatId).then(() => {
   // same stale-closure reason inputRef exists.
   const [pendingImage, setPendingImage] = useState<string | null>(null);
   const pendingImageRef = useRef<string | null>(null);
+  // Active flashcard deck for the full-panel player (view === 'flashcards').
+  const [activeDeck, setActiveDeck] = useState<{ title: string; cards: Flashcard[] } | null>(null);
   useEffect(() => { pendingImageRef.current = pendingImage; }, [pendingImage]);
   const [imageOutput, setImageOutput] = useState(false);
   const imageOutputRef = useRef(false);
@@ -1915,6 +1918,42 @@ loadChatHistory(activeChatId).then(() => {
 
     // /create-skill [focus] — distill the workspace's research into a
     // reusable custom slash command (saved to Settings → Custom Commands)
+    // /flashcard — build a study deck from the workspace's research and open the
+    // full-panel player. The message keeps the deck so it can be reopened later.
+    if (text.toLowerCase() === '/flashcard' || text.toLowerCase().startsWith('/flashcard ')) {
+      const topic = text.slice('/flashcard'.length).trim();
+      setInput('');
+      const currentChatId = activeChatId;
+      setMessages(prev => ({
+        ...prev,
+        [currentChatId]: [...(prev[currentChatId] || []), { id: uid(), role: 'user', text }]
+      }));
+      setGenerating(prev => ({ ...prev, [currentChatId]: true }));
+      const res = await msg('FLASHCARDS', { projectId: activeProjectId, chatId: currentChatId, topic, includePageContext });
+      setGenerating(prev => ({ ...prev, [currentChatId]: false }));
+      const deckCards = res.cards as Flashcard[] | undefined;
+      if (res.success !== false && Array.isArray(deckCards) && deckCards.length) {
+        const deckTitle = String(res.title || 'Study deck');
+        setMessages(prev => ({
+          ...prev,
+          [currentChatId]: [...(prev[currentChatId] || []), {
+            id: uid(), role: 'assistant' as const,
+            text: `**${deckTitle}** — ${deckCards.length} cards, built from this workspace's research and saved to Lore. Opening the deck…`,
+            deck: deckCards, deckTitle,
+          }]
+        }));
+        setActiveDeck({ title: deckTitle, cards: deckCards });
+        setView('flashcards');
+        if (res.docId) loadDocuments(activeProjectId);
+      } else {
+        setMessages(prev => ({
+          ...prev,
+          [currentChatId]: [...(prev[currentChatId] || []), { id: uid(), role: 'assistant', text: `Couldn't build a deck: ${res.error || 'unknown error'}` }]
+        }));
+      }
+      return;
+    }
+
     // /teach — mission on first use, then a saved lesson each time. The lesson
     // is saved to Lore AND previewed in chat so the learner reads it immediately.
     if (text.toLowerCase() === '/teach' || text.toLowerCase().startsWith('/teach ')) {
@@ -2618,9 +2657,19 @@ loadChatHistory(activeChatId).then(() => {
             </Suspense>
           )}
 
+          {view === 'flashcards' && activeDeck && (
+            <Suspense fallback={null}>
+              <DeckView
+                title={activeDeck.title}
+                cards={activeDeck.cards}
+                onBack={() => setView('chat')}
+              />
+            </Suspense>
+          )}
+
           <div className={`flex-1 min-h-0 flex-col overflow-hidden ${view === 'chat' ? 'flex' : 'hidden'}`}>
             <Suspense fallback={<div className="p-4 text-xs text-muted-foreground">Loading…</div>}>
-            <ChatView 
+            <ChatView
               messages={messages[activeChatId] || []}
               input={input}
               setInput={setInput}
@@ -2645,6 +2694,7 @@ loadChatHistory(activeChatId).then(() => {
                 const r = await msg('GRADE_ANSWER', { prompt: q.prompt, modelAnswer: q.modelAnswer || '', userAnswer: answer });
                 return { verdict: (r?.verdict as any) || 'partial', feedback: String(r?.feedback || '') };
               }}
+              onOpenDeck={(title, cards) => { setActiveDeck({ title, cards }); setView('flashcards'); }}
               onOpenSettings={() => setView('settings')}
               onRetryLast={retryLast}
               onUnqueue={unqueueMessage}

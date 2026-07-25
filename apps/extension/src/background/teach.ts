@@ -138,6 +138,102 @@ export function parseQuizBlock(raw: string): QuizQuestion[] {
   return [];
 }
 
+/** One flashcard: a recall cue (front) and its answer (back). */
+export interface Flashcard { front: string; back: string; hint?: string }
+
+/** Parse a flashcard deck from a model reply's fenced JSON. Fails soft to []. */
+export function parseFlashcards(raw: string): Flashcard[] {
+  for (const block of fencedBlocks(raw)) {
+    try {
+      const parsed = JSON.parse(block);
+      const arr = Array.isArray(parsed) ? parsed : Array.isArray(parsed?.cards) ? parsed.cards : null;
+      if (!arr) continue;
+      const out: Flashcard[] = [];
+      for (const c of arr) {
+        if (!c || typeof c.front !== 'string' || typeof c.back !== 'string') continue;
+        const front = c.front.trim(), back = c.back.trim();
+        if (!front || !back) continue;
+        out.push({
+          front: front.slice(0, 300),
+          back: back.slice(0, 800),
+          hint: typeof c.hint === 'string' && c.hint.trim() ? c.hint.trim().slice(0, 200) : undefined,
+        });
+      }
+      if (out.length >= 2) return out.slice(0, 40);
+    } catch { /* try the next fence */ }
+  }
+  return [];
+}
+
+/** Smart deck generation: atomic, recall-forcing cards grounded in the material. */
+async function generateFlashcards(topic: string, sourceText: string): Promise<Flashcard[]> {
+  const sys =
+    'You build an intelligent flashcard deck from the material below for spaced-repetition study.\n\n' +
+    'What makes a GOOD card:\n' +
+    '- ONE idea per card (atomic). Split a compound fact into several cards.\n' +
+    '- Front = a specific question or cue that forces RECALL; Back = the concise answer (1-3 sentences).\n' +
+    '- Test understanding, not trivia: prefer why / how / when-to-use / compare / trade-off questions over ' +
+    'bare definitions. If the material has numbers, comparisons, or failure modes, make cards that test them.\n' +
+    '- Base EVERY card only on the material — never invent facts. No duplicate cards; vary the angle.\n' +
+    '- Optionally add a short "hint" that nudges without giving the answer away.\n\n' +
+    'Return ONLY a fenced ```json block: an array of 8-20 objects {"front","back","hint"?}. No prose outside the JSON.';
+  const user = `TOPIC: ${topic}\n\nMATERIAL:\n${sourceText.slice(0, 16000)}`;
+  const raw = await chatWithCustom(sys, [], user).catch(() => '');
+  return parseFlashcards(raw);
+}
+
+/**
+ * `/flashcard [topic]` — build a study deck from the workspace's research (or the
+ * current page as a fallback), save it to Lore, and return the cards for the
+ * in-panel deck player.
+ */
+export async function handleFlashcards(
+  request: Record<string, unknown>,
+  pageContext?: { title: string; url: string; markdown: string } | null
+): Promise<Record<string, unknown>> {
+  const projectId = String(request.projectId || '');
+  let topic = String(request.topic || '').trim();
+  const chatId = String(request.chatId || '');
+  if (!projectId) throw new Error('No workspace selected');
+  if (isVagueTopic(topic)) topic = '';
+
+  const docs = await listDocuments(projectId);
+  let material = researchSourceText(docs);
+  let subject = topic;
+
+  // Fallbacks when there's no research yet: the current page, then the chat topic.
+  if (material.length < 400 && pageContext?.markdown) {
+    material = `# ${pageContext.title}\n\n${pageContext.markdown}`.slice(0, 16000);
+    subject = subject || pageContext.title;
+  }
+  if (!subject && chatId) {
+    const history = await getChatHistory(chatId).catch(() => []);
+    const lastUser = [...history].reverse().find((m: any) => m.role === 'user' && !m.text.startsWith('/'));
+    if (lastUser) subject = lastUser.text.trim().slice(0, 120);
+  }
+  if (material.trim().length < 200) {
+    throw new Error('No study material yet — capture a page or run /deepresearch first, then /flashcard.');
+  }
+
+  const cards = await generateFlashcards(subject || project(docs), material);
+  if (cards.length < 2) throw new Error("Couldn't build a deck from the material — add more sources and try again.");
+
+  const title = `Flashcards: ${(subject || 'Study deck').slice(0, 80)}`;
+  const body = `# ${title}\n\n${cards.map((c, i) => `**${i + 1}. ${c.front}**\n\n${c.back}`).join('\n\n')}\n\n\`\`\`json\n${JSON.stringify(cards)}\n\`\`\`\n`;
+  const { id } = await saveDocument({
+    title, url: '', content: buildFrontmatter({ title, type: 'flashcards', wordCount: cards.length }) + body,
+    capturedAt: new Date().toISOString(), favicon: '', wordCount: cards.length, syncedToDrive: false,
+  }, []).catch(() => ({ id: '' } as any));
+  if (id) await linkDocumentToProject(projectId, id).catch(() => {});
+
+  return { title, cards, docId: id };
+}
+
+/** Small helper: a readable subject when nothing else is known. */
+function project(docs: Array<{ title: string }>): string {
+  return docs[0]?.title?.slice(0, 60) || 'this workspace';
+}
+
 export type GradeVerdict = 'correct' | 'partial' | 'incorrect';
 export interface GradeResult { verdict: GradeVerdict; feedback: string }
 

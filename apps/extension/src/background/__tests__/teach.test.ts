@@ -117,7 +117,7 @@ ${'Explanatory prose. '.repeat(20)}`;
   });
 });
 
-import { parseSyllabus, nextStep, parseQuizBlock, parseGrade, isVagueTopic } from '../teach';
+import { parseSyllabus, nextStep, parseQuizBlock, parseGrade, isVagueTopic, parseFlashcards } from '../teach';
 
 describe('parseSyllabus', () => {
   const block = (steps: any) => `Here is your course:\n\`\`\`json\n${JSON.stringify(steps)}\n\`\`\``;
@@ -206,5 +206,25 @@ describe('isVagueTopic', () => {
     for (const t of ['spaced repetition', 'best practices for teaching', 'how transformers work']) {
       expect(isVagueTopic(t)).toBe(false);
     }
+  });
+});
+
+describe('parseFlashcards', () => {
+  const wrap = (cs: any) => `Deck:\n\`\`\`json\n${JSON.stringify(cs)}\n\`\`\``;
+  it('parses front/back cards with optional hint', () => {
+    const cards = parseFlashcards(wrap([
+      { front: 'What is X?', back: 'X is a thing', hint: 'starts with t' },
+      { front: 'Why Y?', back: 'because Z' },
+    ]));
+    expect(cards.length).toBe(2);
+    expect(cards[0]).toMatchObject({ front: 'What is X?', back: 'X is a thing', hint: 'starts with t' });
+    expect(cards[1].hint).toBeUndefined();
+  });
+  it('drops cards missing a front or back', () => {
+    expect(parseFlashcards(wrap([{ front: 'only front' }, { back: 'only back' }]))).toEqual([]);
+  });
+  it('accepts a {cards:[…]} wrapper and fails soft otherwise', () => {
+    expect(parseFlashcards(wrap({ cards: [{ front: 'a', back: 'b' }, { front: 'c', back: 'd' }] })).length).toBe(2);
+    expect(parseFlashcards('no json')).toEqual([]);
   });
 });

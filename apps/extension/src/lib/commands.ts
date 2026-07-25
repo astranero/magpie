@@ -102,6 +102,9 @@ export const SLASH_COMMANDS: SlashCommand[] = [
       'and ## Next steps (the concrete artifacts or actions that follow) — so the interview leaves behind a usable record.'
   },
   {
+    cmd: '/flashcard', desc: 'Build a smart study deck from this workspace and play it', takesArg: true, kind: 'builtin'
+  },
+  {
     cmd: '/teach', desc: 'Learn a topic across sessions — lessons saved to this workspace', takesArg: true, kind: 'builtin'
   },
   {

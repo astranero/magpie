@@ -51,6 +51,8 @@ interface ChatViewProps {
   onCancelAndEdit?: (userMsgId: string) => void;
   /** Grade a learner's open quiz answer (LLM). Resolves to a verdict + feedback. */
   onGradeAnswer?: (q: QuizQuestion, answer: string) => Promise<{ verdict: 'correct' | 'partial' | 'incorrect'; feedback: string }>;
+  /** Open a flashcard deck in the full-panel player. */
+  onOpenDeck?: (title: string, cards: import('../types').Flashcard[]) => void;
   /** Open the settings/config view — the recovery action for auth/config errors. */
   onOpenSettings?: () => void;
   /** Re-run the last question — the recovery action for a transient failure. */
@@ -1285,6 +1287,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
   onEditAndRerun,
   onCancelAndEdit,
   onGradeAnswer,
+  onOpenDeck,
   onOpenSettings,
   onRetryLast,
   onUnqueue,
@@ -1683,6 +1686,18 @@ export const ChatView: React.FC<ChatViewProps> = ({
               {/* Interactive quiz under a /teach lesson. */}
               {m.role === 'assistant' && m.quiz && m.quiz.length > 0 && onGradeAnswer && (
                 <QuizCard quiz={m.quiz} onGrade={onGradeAnswer} />
+              )}
+
+              {/* Open a flashcard deck in the full-panel player. */}
+              {m.role === 'assistant' && m.deck && m.deck.length > 0 && onOpenDeck && (
+                <button
+                  type="button"
+                  onClick={() => onOpenDeck(m.deckTitle || 'Study deck', m.deck!)}
+                  className="mt-2 inline-flex items-center gap-2 rounded-xl border border-primary/30 bg-primary/5 px-3 py-2 text-sm font-medium text-foreground hover:bg-primary/10 transition-colors"
+                >
+                  <BookOpen size={15} className="text-primary" />
+                  Study deck · {m.deck.length} cards
+                </button>
               )}
             </div>
 
