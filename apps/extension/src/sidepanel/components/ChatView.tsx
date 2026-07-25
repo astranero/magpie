@@ -1277,6 +1277,14 @@ export const ChatView: React.FC<ChatViewProps> = ({
   // messages, not pinned to the very bottom. Render it just before the first
   // queued message; if none, it stays at the end.
   const firstQueuedIdx = researching[activeProjectId] ? messages.findIndex(m => m.queued) : -1;
+
+  // The user message whose answer is currently generating — the last non-queued
+  // user message. Its "Cancel & edit" button stops that generation and reopens
+  // the message for editing (you can't edit while a reply is streaming).
+  let lastUserIdx = -1;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i].role === 'user' && !messages[i].queued) { lastUserIdx = i; break; }
+  }
   const fieldLog = researching[activeProjectId] ? (
     <div className="flex justify-start" key="field-log">
       <FieldLog log={researchLogs[activeProjectId] || []} onStop={cancelTask} />
@@ -1538,18 +1546,36 @@ export const ChatView: React.FC<ChatViewProps> = ({
 
             {/* Action row for the user's own messages */}
             {m.role === 'user' && !m.queued && editingId !== m.id && onEditAndRerun && (
-              <div className="flex items-center gap-2 px-1 mt-0.5 opacity-0 hover:opacity-100 focus-within:opacity-100 transition-opacity">
-                <button
-                  type="button"
-                  onClick={() => setEditingId(m.id)}
-                  disabled={busy}
-                  className="flex items-center gap-1 text-[10px] font-medium text-muted-foreground hover:text-foreground disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
-                  title="Edit this message and ask again"
-                >
-                  <Pencil size={10} />
-                  <span>Edit</span>
-                </button>
-              </div>
+              // While the answer to THIS message is generating, "Edit" is
+              // blocked — offer "Cancel & edit" instead: stop the reply and
+              // reopen the message. Kept visible (not hover-only) so it's
+              // reachable mid-generation without hunting for it.
+              busy && mi === lastUserIdx ? (
+                <div className="flex items-center gap-2 px-1 mt-0.5">
+                  <button
+                    type="button"
+                    onClick={() => { cancelTask(); setEditingId(m.id); }}
+                    className="flex items-center gap-1 text-[10px] font-medium text-muted-foreground hover:text-foreground transition-colors"
+                    title="Stop the reply and edit this message"
+                  >
+                    <StopCircle size={10} />
+                    <span>Cancel &amp; edit</span>
+                  </button>
+                </div>
+              ) : (
+                <div className="flex items-center gap-2 px-1 mt-0.5 opacity-0 hover:opacity-100 focus-within:opacity-100 transition-opacity">
+                  <button
+                    type="button"
+                    onClick={() => setEditingId(m.id)}
+                    disabled={busy}
+                    className="flex items-center gap-1 text-[10px] font-medium text-muted-foreground hover:text-foreground disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                    title="Edit this message and ask again"
+                  >
+                    <Pencil size={10} />
+                    <span>Edit</span>
+                  </button>
+                </div>
+              )
             )}
 
             {/* Action row for assistant messages. Kept faintly visible rather
