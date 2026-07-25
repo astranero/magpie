@@ -1761,7 +1761,9 @@ async function buildChatRequest(chatId: string, projectId: string, prompt: strin
           `State that neither the site's API nor a web search returned usable data this turn, and suggest the ` +
           `user reload the page and retry, or try a more specific query. Offer that one next step and nothing more.`);
     return {
-      systemPrompt: LANGUAGE_DIRECTIVE + rulesBlock + localeBlock + dataSys,
+      systemPrompt: LANGUAGE_DIRECTIVE + rulesBlock + localeBlock + dataSys +
+        `\n\nWRITE THE ENTIRE ANSWER IN THE SAME LANGUAGE AS THE USER'S REQUEST above (the /data question). ` +
+        `The gathered sources may be in other languages — translate as needed, but the answer's language must match the request, not the data.`,
       formattedHistory,
       grounded: false,
       branch: (sources.length ? 'web' : 'general') as ChatBranch,
@@ -2845,6 +2847,7 @@ async function agenticDataGather(
     `- Endpoints follow patterns: once you find one like \`https://site/api/search?...\`, vary its query (model, condition=used, sort=price_asc, page=2) and paginate to accumulate enough rows.\n\n` +
     `RULES:\n` +
     `- All fetches are CREDENTIAL-FREE (public data only). Budget: at most ${DATA_MAX_FETCHES} fetches. Never repeat a URL.\n` +
+    `- If http_get returns HTTP 403 / a block page (common for Reddit and other sites that reject direct API calls), DO NOT retry it — that site blocks credential-free API access. Instead use fetch_page on the relevant human-readable page URL (e.g. a reddit thread or a \`site:reddit.com …\` result you found via search_web): fetch_page routes through a reader service that retrieves pages these APIs block.\n` +
     `- Try several real sources before giving up (search_web + at least two candidate sites/endpoints). NEVER claim a site "has no API" — you cannot verify that.\n` +
     `- Never invent listings, prices, or links. Only report what you actually fetched.\n` +
     `- When you have enough, stop calling tools; the final answer is written separately from the data you gathered.`;
@@ -2890,11 +2893,17 @@ async function agenticDataGather(
             fetchCount++; fetchedUrls.add(url);
             const r = await fetchJson(url, { signal, maxChars: DATA_PER_CALL_CHARS });
             const body = r.json !== undefined ? JSON.stringify(r.json).slice(0, DATA_PER_CALL_CHARS) : (r.text || '');
-            if (body) {
+            // A 403/429 returns the block-page HTML as the body — do NOT store
+            // that as if it were data (the model then "analyzes" a CAPTCHA page).
+            // Report the block and steer to fetch_page, which uses a reader that
+            // isn't blocked.
+            if (!r.ok && (r.status === 403 || r.status === 429)) {
+              result = `blocked (HTTP ${r.status}) — ${host} rejects direct API calls; use fetch_page on the page URL instead`;
+            } else if (r.ok && body) {
               block = `\n\n--- GET ${url} (HTTP ${r.status}) ---\n${body}\n--- END ---\n`;
               charCount = block.length; src = { title: url, url };
               result = `fetched ${url} (${r.status})`;
-            } else result = `fetch failed: ${r.error || r.status}`;
+            } else result = `fetch failed: HTTP ${r.status}${r.error ? ' — ' + r.error : ''}`;
           }
         } else if (call.name === 'fetch_page') {
           const url = String(call.args?.url || '').trim();
