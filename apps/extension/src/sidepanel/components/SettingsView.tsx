@@ -353,6 +353,7 @@ interface SettingsViewProps {
   syncResearchSources: boolean;
   setSyncResearchSources: (val: boolean) => void;
   forceResync: () => void;
+  reconcileFromDrive: () => void;
   routeChatThroughCli: string;
   setRouteChatThroughCli: (val: string) => void;
   cliCommandTemplate: string;
@@ -442,7 +443,7 @@ const SyncStatusPanel: React.FC = () => {
 export const SettingsView: React.FC<SettingsViewProps> = ({
   customUrl, setCustomUrl, customKey, setCustomKey, customModel, visionModel, setVisionModel, classificationModel, setClassificationModel, customModels, copilotModels, byokModels, activateProviderModel, fetchCustomModels,
   docCount, globalDocCount, onCleanupOrphans, authed, profile, login, logout, folderName, setFolderName, exportWorkspace,
-  autoLinkCaptures, setAutoLinkCaptures, saveSettings, syncResearchSources, setSyncResearchSources, forceResync,
+  autoLinkCaptures, setAutoLinkCaptures, saveSettings, syncResearchSources, setSyncResearchSources, forceResync, reconcileFromDrive,
   routeChatThroughCli, setRouteChatThroughCli, cliCommandTemplate, setCliCommandTemplate,
   localMcpCompanionUrl, enterpriseGitHubUrl, setEnterpriseGitHubUrl,
   workspaceName, workspaceRules, saveWorkspaceRules
@@ -1529,6 +1530,18 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
               >
                 Force Resync All
               </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                className="w-full rounded-lg font-medium text-xs mt-1"
+                onClick={reconcileFromDrive}
+              >
+                Restore all from Drive
+              </Button>
+              <p className="text-[10px] text-muted-foreground mt-1 leading-normal">
+                Pulls every workspace back from Drive — recreating any that exist
+                only in the cloud. Use this after a reinstall to get your library back.
+              </p>
             </div>
           )}
       </Section>

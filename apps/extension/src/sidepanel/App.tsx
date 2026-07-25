@@ -1556,9 +1556,10 @@ loadChatHistory(activeChatId).then(() => {
     if (res.success && res.token) {
       setAuthed(true);
       loadProfile(res.token as string);
-      // "Login and it just works": pull the user's Drive folder in, then push
-      // anything local that isn't there yet — no separate Sync click needed.
-      importFromDrive().then(() => syncToDrive()).catch(() => {});
+      // "Login and it just works": pull EVERY workspace back from Drive
+      // (recreating any that exist only in remote), then push anything local
+      // that isn't there yet — no separate Sync click needed.
+      reconcileFromDrive().then(() => syncToDrive()).catch(() => {});
     } else {
       const err = String(res.error || '');
       // A missing/placeholder oauth2.client_id surfaces as "bad client id" /
@@ -1666,6 +1667,33 @@ loadChatHistory(activeChatId).then(() => {
       showToast('error', e?.message || 'Could not read Drive.');
     } finally {
       // ALWAYS release — a throw here used to freeze the Lore status and lock Sync.
+      setImporting(false);
+      setSyncStatus('');
+    }
+  };
+
+  // Full two-way pull: rebuild every workspace from its Drive subfolder,
+  // creating any workspace that exists only in Drive. This is the "sync it all
+  // back" path — used on login and from the Settings "Restore all from Drive".
+  const reconcileFromDrive = async () => {
+    setImporting(true);
+    setSyncStatus('Restoring from Drive…');
+    try {
+      const res = await msg('RECONCILE_FROM_DRIVE', { interactive: true });
+      if (res.success) {
+        const n = Number(res.imported) || 0;
+        const p = Number(res.projectsCreated) || 0;
+        showToast(n > 0 ? 'success' : 'info',
+          n > 0
+            ? `✓ Restored ${n} document${n === 1 ? '' : 's'} from Drive${p ? ` into ${p} workspace${p === 1 ? '' : 's'}` : ''}`
+            : 'Drive is already in sync with your local library.');
+        if (activeProjectId) loadDocuments(activeProjectId);
+      } else {
+        showToast('error', (res.error as string) || 'Could not restore from Drive.');
+      }
+    } catch (e: any) {
+      showToast('error', e?.message || 'Could not restore from Drive.');
+    } finally {
       setImporting(false);
       setSyncStatus('');
     }
@@ -2902,6 +2930,7 @@ onOpenDocument={(docId, anchorId) => openDocById(docId, anchorId, 'chat')}
                 }
               }}
               forceResync={forceResync}
+              reconcileFromDrive={reconcileFromDrive}
               routeChatThroughCli={routeChatThroughCli}
               setRouteChatThroughCli={(v) => {
                 setRouteChatThroughCli(v);

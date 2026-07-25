@@ -7,7 +7,7 @@
 import {
   saveDocument, listDocuments, updateDocumentSync,
   getUnsyncedDocuments, getChatHistory, clearChatHistory, truncateChatFrom, saveChatMessage,
-  linkDocumentToProject, getProject, listProjects,
+  linkDocumentToProject, getProject, listProjects, createProject,
   getChunkByAnchor, deleteOrphanDocuments, resetSyncStatus, getKnownDriveFileIds, getSyncStats,
   saveDocImages, getDocImage, listDocImages
 } from '../lib/db';
@@ -678,6 +678,7 @@ const messageHandlers: Record<string, MessageHandler> = {
     return { resetCount };
   },
   IMPORT_FROM_DRIVE: handleImportFromDrive,
+  RECONCILE_FROM_DRIVE: handleReconcileFromDrive,
   LIST_DRIVE_FILES: handleListDriveFiles,
   SYNC_STATUS: async () => {
     const stats = await getSyncStats();
@@ -4495,12 +4496,15 @@ async function handleSyncToDrive(request?: Record<string, unknown>): Promise<Rec
     try {
       const fileName = doc.title.replace(/[/\\?%*:|"<>]+/g, '-').substring(0, 120) + '.md';
 
-      // Determine the target folder: project subfolder when the doc belongs
-      // to a named project, otherwise the root Magpie folder.
+      // Every project — including the Default Session — gets its OWN subfolder,
+      // so the Drive layout is always Magpie/<project>/<docs> and never a flat
+      // dump of loose .md at the root (which made a wiped install unable to sort
+      // anything back into the right workspace). Only a doc with no/unknown
+      // project falls back to the root.
       let targetFolderId = magpieFolderId;
       if (doc.projectId) {
         const projectName = projectMap.get(doc.projectId);
-        if (projectName && projectName !== 'Default Session') {
+        if (projectName) {
           let subId = subfolderCache.get(doc.projectId);
           if (!subId) {
             subId = await ensureSubfolder(token, magpieFolderId, sanitizeSegment(projectName));
@@ -4725,6 +4729,85 @@ async function handleImportFromDrive(request: Record<string, unknown>): Promise<
   await Promise.all(Array.from({ length: Math.min(CONCURRENCY, allFiles.length) }, () => worker()));
 
   return { imported, total: allFiles.length, skipped };
+}
+
+/**
+ * Two-way reconcile: pull EVERY project back from Drive. For each subfolder
+ * directly under the Magpie root, find (or create) a local project with that
+ * name and import every .md the library does not already hold. This is what
+ * makes "the data exists only in Drive" self-heal — after a wiped install, one
+ * run rebuilds all workspaces from remote, no per-project clicking. Root-level
+ * loose .md are intentionally ignored: the forward layout is Magpie/<project>/…
+ * and orphan root files can't be attributed to a workspace.
+ */
+async function handleReconcileFromDrive(request?: Record<string, unknown>): Promise<Record<string, unknown>> {
+  const interactive = !!(request?.interactive);
+  const token = await getToken(interactive);
+  const rootId = await ensureFolder(token);
+
+  const report = (text: string) =>
+    chrome.runtime.sendMessage({ action: 'SYNC_PROGRESS', text }).catch(() => {});
+  report('Scanning Drive…');
+
+  // Direct child subfolders of the Magpie root — one per project.
+  const fq = encodeURIComponent(
+    `'${rootId}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false`
+  );
+  const foldersRes = await driveRequest(`/drive/v3/files?q=${fq}&fields=files(id,name)&pageSize=1000`, token);
+  const subfolders: Array<{ id: string; name: string }> = (await foldersRes.json()).files || [];
+
+  const projects = await listProjects();
+  const byTitle = new Map(projects.map(p => [p.title.toLowerCase(), p.id]));
+  const known = await getKnownDriveFileIds();
+
+  let imported = 0, projectsCreated = 0;
+  const errors: string[] = [];
+
+  for (const folder of subfolders) {
+    // Find or create the local project this subfolder belongs to.
+    let projectId = byTitle.get(folder.name.toLowerCase());
+    if (!projectId) {
+      projectId = await createProject(folder.name);
+      byTitle.set(folder.name.toLowerCase(), projectId);
+      projectsCreated++;
+    }
+
+    // Markdown sitting directly in this subfolder that we don't already hold.
+    const mq = encodeURIComponent(`'${folder.id}' in parents and trashed=false`);
+    const filesRes = await driveRequest(
+      `/drive/v3/files?q=${mq}&fields=files(id,name,createdTime)&pageSize=1000`, token,
+    );
+    const mdFiles = ((await filesRes.json()).files || [])
+      .filter((f: any) => f.name?.endsWith('.md') && !known.has(f.id));
+
+    for (const file of mdFiles) {
+      try {
+        const contentRes = await driveRequest(`/drive/v3/files/${file.id}?alt=media`, token);
+        const content = await contentRes.text();
+        const docShortId = makeDocShortId(crypto.randomUUID?.() ?? `${Date.now()}`);
+        const chunks = chunkDocument({ docShortId, content });
+        const { id: docId, chunks: savedChunks } = await saveDocument({
+          title: file.name.replace(/\.md$/i, '') || 'Imported',
+          url: '',
+          content,
+          capturedAt: file.createdTime || new Date().toISOString(),
+          wordCount: content.split(/\s+/).length,
+          syncedToDrive: true,
+          driveFileId: file.id,
+        }, chunks);
+        await linkDocumentToProject(projectId, docId);
+        await addChunksToVectorStore(projectId, savedChunks);
+        known.add(file.id);
+        imported++;
+        report(`Restoring ${imported} from Drive…`);
+      } catch (err) {
+        errors.push(`${file.name}: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+  }
+
+  report(imported ? `Restored ${imported} document(s) from Drive.` : 'Everything already in sync.');
+  return { imported, projectsCreated, folders: subfolders.length, errors };
 }
 
 async function handleListDriveFiles(request?: Record<string, unknown>): Promise<Record<string, unknown>> {
