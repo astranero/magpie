@@ -1184,6 +1184,8 @@ export const ChatView: React.FC<ChatViewProps> = ({
   const scrollBox = useRef<HTMLDivElement>(null);
   /** Which user message is open in the inline editor (one at a time). */
   const [editingId, setEditingId] = useState<string | null>(null);
+  // A chat image opened full-size in the panel lightbox, or null.
+  const [zoomImage, setZoomImage] = useState<string | null>(null);
   // Re-running while a turn is in flight would race two streams into the same
   // chat, so both controls are inert until the current one settles.
   const busy = !!generating[activeChatId];
@@ -1283,6 +1285,27 @@ export const ChatView: React.FC<ChatViewProps> = ({
 
   return (
     <div className="flex-1 flex flex-col h-full bg-background overflow-hidden relative">
+      {/* Image lightbox — full-size in the panel. A data: URL can't be opened
+          as a new tab (Chrome blocks it), so images are viewed here. */}
+      {zoomImage && (
+        <div
+          className="fixed inset-0 z-[200] flex items-center justify-center bg-black/80 p-4 cursor-zoom-out animate-in fade-in"
+          onClick={() => setZoomImage(null)}
+          role="dialog"
+          aria-modal="true"
+          aria-label="Image preview"
+        >
+          <img src={zoomImage} alt="Enlarged" className="max-h-full max-w-full object-contain rounded-lg shadow-2xl" />
+          <button
+            type="button"
+            onClick={() => setZoomImage(null)}
+            className="absolute top-3 right-3 rounded-full bg-white/15 hover:bg-white/25 text-white p-1.5"
+            aria-label="Close"
+          >
+            <XCircle size={18} />
+          </button>
+        </div>
+      )}
       {/* Context bar */}
       <div className="flex items-center justify-between gap-2 px-4 py-2 border-b border-border bg-card shrink-0">
         <div className="flex items-center gap-2 min-w-0 text-xs text-muted-foreground font-medium">
@@ -1486,23 +1509,32 @@ export const ChatView: React.FC<ChatViewProps> = ({
                   </CollapsibleMessage>
                 )}
               </ErrorBoundary>
-            </div>
 
-            {/* Images on this turn — the user's attachment or ones the model
-                generated. Click to open full-size in a new tab. */}
-            {m.images && m.images.length > 0 && (
-              <div className="flex flex-wrap gap-2 mt-1.5 px-1">
-                {m.images.map((src, i) => (
-                  <a key={i} href={src} target="_blank" rel="noopener noreferrer" className="block">
-                    <img
-                      src={src}
-                      alt={m.role === 'user' ? 'Attached image' : 'Generated image'}
-                      className="max-h-48 max-w-[85%] rounded-lg border border-border object-contain"
-                    />
-                  </a>
-                ))}
-              </div>
-            )}
+              {/* Images on this turn — the user's attachment or ones the model
+                  generated — INSIDE the bubble so they read as part of the same
+                  message, not a detached thumbnail. Click opens a lightbox in
+                  the panel (a data: URL cannot be navigated to as a new tab —
+                  Chrome blocks it, which is the "opens a broken page" bug). */}
+              {m.images && m.images.length > 0 && (
+                <div className={`flex flex-wrap gap-2 ${m.text?.trim() ? 'mt-2' : ''}`}>
+                  {m.images.map((src, i) => (
+                    <button
+                      key={i}
+                      type="button"
+                      onClick={() => setZoomImage(src)}
+                      className="block rounded-lg overflow-hidden border border-border/60 hover:border-primary/50 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                      aria-label={m.role === 'user' ? 'Attached image — click to enlarge' : 'Generated image — click to enlarge'}
+                    >
+                      <img
+                        src={src}
+                        alt={m.role === 'user' ? 'Attached image' : 'Generated image'}
+                        className="max-h-56 max-w-full object-contain"
+                      />
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
 
             {/* Action row for the user's own messages */}
             {m.role === 'user' && !m.queued && editingId !== m.id && onEditAndRerun && (

@@ -2889,11 +2889,35 @@ chrome.runtime.onConnect.addListener((port) => {
     interactiveDepth++;
     try {
       const pageCtx = req.includePageContext ? await getPageContext().catch(() => null) : null;
-      const built = await buildChatRequest(
-        chatId, projectId, prompt, localController.signal, pageCtx,
-        (text) => safePost({ type: 'STATUS', text }),
-        (req.sourceMode as SourceMode) || 'auto',
-      );
+
+      // An IMAGE turn is a pure look-at-this Q&A — it must NOT go through the
+      // router. Routing "what is this about?" on the TEXT alone sent it to the
+      // web branch, which searched the web and answered from those results while
+      // ignoring the picture entirely (the "it answered about GitHub repos"
+      // bug). Short-circuit: a vision system prompt, recent history for
+      // follow-ups, and grounded:false so the web-escalation net below never
+      // fires. The image itself rides in userContent to the vision model.
+      let built: { systemPrompt: string; formattedHistory: Array<{ role: string; content: string }>; grounded: boolean; place?: string; branch: ChatBranch };
+      if (imageDataUrl) {
+        safePost({ type: 'STATUS', text: 'Looking at your image…' });
+        const recent = (await getChatHistory(chatId).catch(() => []))
+          .slice(-6)
+          .map(m => ({ role: m.role, content: m.text }));
+        built = {
+          systemPrompt: LANGUAGE_DIRECTIVE +
+            `You are answering the user's question about an IMAGE they attached. Look at the image and answer DIRECTLY from what you see in it — the image is your source. Do NOT search the web, do NOT talk about anything not visible in the image. If the question can't be answered from the image, describe what you do see.` +
+            RESPONSE_STYLE,
+          formattedHistory: recent,
+          grounded: false,
+          branch: 'general',
+        };
+      } else {
+        built = await buildChatRequest(
+          chatId, projectId, prompt, localController.signal, pageCtx,
+          (text) => safePost({ type: 'STATUS', text }),
+          (req.sourceMode as SourceMode) || 'auto',
+        );
+      }
       const { formattedHistory, grounded, place, branch } = built;
       let systemPrompt = built.systemPrompt;
 
