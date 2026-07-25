@@ -295,16 +295,48 @@ export function findSyllabus(docs: Array<{ title: string; content: string }>): S
   return doc ? parseSyllabus(doc.content) : [];
 }
 
+/**
+ * A vague reference ("about this topic", "this", "it") is not a real subject —
+ * it points at "what we've been doing here", i.e. the workspace's research.
+ * Treat it as unspecified so the research drives the course, not the literal words.
+ */
+export function isVagueTopic(t: string): boolean {
+  const s = (t || '').trim();
+  if (!s) return true;
+  return /^(about\s+)?(this|that|it|these|those|the)(\s+(topic|research|report|subject|stuff|thing|material|paper|study))?[.?!]*$/i.test(s);
+}
+
+/**
+ * Infer the learning goal from the RESEARCH the learner collected — the
+ * strongest signal of intent. The current browser tab is deliberately ignored
+ * here: a learner may be on an unrelated page, and letting it define the course
+ * is exactly how a teaching-research workspace produced a Google Workspace course.
+ */
+async function draftMissionFromResearch(researchText: string, topicHint: string, workspaceTitle: string): Promise<string> {
+  const sys =
+    'A learner has collected research in a workspace and now wants to LEARN it. Infer their real learning ' +
+    'goal from the research material below.\n\nWrite 2-4 sentences: what they want to be able to DO with ' +
+    'this material, and the level they are likely starting from. Base it ONLY on the research (and the ' +
+    'hint, if given) — do NOT introduce tools, products, or topics that are not in the material. Return ' +
+    'ONLY the mission text, no preamble or heading.';
+  const user = `Workspace: ${workspaceTitle}\n${topicHint ? `Hint about their focus: ${topicHint}\n` : ''}\nRESEARCH THEY COLLECTED:\n${researchText.slice(0, 10000)}`;
+  const out = await chatWithCustom(sys, [], user).catch(() => '');
+  return out.trim().slice(0, 1200) || `Learn and apply the key ideas from the research collected in ${workspaceTitle}.`;
+}
+
 /** Ask the model to sequence the research into an easy-steps course. */
 async function buildSyllabus(mission: string, sourceText: string): Promise<SyllabusStep[]> {
   const sys =
-    'You design a short, well-sequenced course that teaches someone the material below IN EASY STEPS, ' +
+    'You design a short, well-sequenced course that teaches someone THE MATERIAL BELOW in easy steps, ' +
     'building from fundamentals to the harder ideas. Each step is one finishable lesson.\n\n' +
+    'The mission is context for WHY they care, but the course teaches the MATERIAL. If the mission names ' +
+    'tools, products, or topics that do NOT appear in the material, IGNORE the mission and teach the ' +
+    'material — the material is the source of truth.\n\n' +
     'Return ONLY a fenced ```json block: an array of 3-7 objects {"title","covers","goal"} where "title" ' +
     'names the step, "covers" lists the concepts it teaches (comma-separated), and "goal" is the one ' +
     'concrete thing the learner can DO after it. Order matters: earlier steps must not depend on later ' +
     'ones. No prose outside the JSON.';
-  const user = `MISSION (why they are learning this):\n${mission}\n\nMATERIAL TO TEACH (their own research):\n${sourceText.slice(0, 14000)}`;
+  const user = `MATERIAL TO TEACH (their own research — this is what the course covers):\n${sourceText.slice(0, 14000)}\n\nMISSION (context only):\n${mission}`;
   const raw = await chatWithCustom(sys, [], user).catch(() => '');
   return parseSyllabus(raw);
 }
@@ -400,6 +432,10 @@ export async function handleTeach(request: Record<string, unknown>, pageContext?
   const project = await getProject(projectId);
   if (!project) throw new Error('Workspace not found');
 
+  // "/teach about this topic" points at the research, not the literal words —
+  // drop a vague arg so it can't misdirect the mission.
+  if (isVagueTopic(topic)) topic = '';
+
   if (!topic && chatId) {
     const history = await getChatHistory(chatId).catch(() => []);
     const lastUser = [...history].reverse().find((m: any) => m.role === 'user' && !m.text.startsWith('/'));
@@ -408,24 +444,31 @@ export async function handleTeach(request: Record<string, unknown>, pageContext?
     }
   }
 
+  const docs = await listDocuments(projectId);
+  const prior = priorLessons(docs);
+  const lessonNumber = nextLessonNumber(prior);
+  // The workspace's research: the ground truth for what a course teaches.
+  const sourceText = researchSourceText(docs);
+
   let mission = parseMissionBlock(project.rules);
   let missionCreated = false;
   if (!mission) {
-    if (!topic) {
-      throw new Error('Tell me what you want to learn — e.g. `/teach spaced repetition for language learning`');
+    if (sourceText.length > 400) {
+      // Ground the mission in the RESEARCH, not the current tab — the research is
+      // what they want to learn; the page they happen to be on is incidental.
+      mission = await draftMissionFromResearch(sourceText, topic, project.title || 'this workspace');
+    } else {
+      if (!topic) {
+        throw new Error('Tell me what you want to learn — e.g. `/teach spaced repetition for language learning`');
+      }
+      mission = await draftMission(topic, project.title || 'this workspace', pageContext || undefined);
     }
-    mission = await draftMission(topic, project.title || 'this workspace', pageContext || undefined);
     await updateProjectRules(projectId, upsertMissionBlock(project.rules, mission));
     missionCreated = true;
   }
 
-  const docs = await listDocuments(projectId);
-  const prior = priorLessons(docs);
-  const lessonNumber = nextLessonNumber(prior);
-
   // Build a course FROM the workspace's research the first time — so /teach
   // walks the report in easy steps instead of teaching from the model's recall.
-  const sourceText = researchSourceText(docs);
   let syllabus = findSyllabus(docs);
   let syllabusJustBuilt: SyllabusStep[] | undefined;
   if (syllabus.length === 0 && sourceText.length > 400) {

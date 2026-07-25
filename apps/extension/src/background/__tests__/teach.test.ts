@@ -117,7 +117,7 @@ ${'Explanatory prose. '.repeat(20)}`;
   });
 });
 
-import { parseSyllabus, nextStep, parseQuizBlock, parseGrade } from '../teach';
+import { parseSyllabus, nextStep, parseQuizBlock, parseGrade, isVagueTopic } from '../teach';
 
 describe('parseSyllabus', () => {
   const block = (steps: any) => `Here is your course:\n\`\`\`json\n${JSON.stringify(steps)}\n\`\`\``;
@@ -193,5 +193,18 @@ describe('parseGrade', () => {
   });
   it('defaults to partial when no verdict is found', () => {
     expect(parseGrade('some rambling with no verdict').verdict).toBe('partial');
+  });
+});
+
+describe('isVagueTopic', () => {
+  it('treats vague references as unspecified', () => {
+    for (const t of ['', '   ', 'this', 'this topic', 'about this topic', 'that research', 'it', 'the report', 'these']) {
+      expect(isVagueTopic(t)).toBe(true);
+    }
+  });
+  it('keeps a real topic', () => {
+    for (const t of ['spaced repetition', 'best practices for teaching', 'how transformers work']) {
+      expect(isVagueTopic(t)).toBe(false);
+    }
   });
 });
