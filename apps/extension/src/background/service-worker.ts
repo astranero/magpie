@@ -28,7 +28,7 @@ import { getResearchLimits } from '../lib/research-limits';
 import { DEFAULT_COMPANION_MCP_URL, CLI_TEMPLATE_AUTO } from '../lib/settings';
 import { looksLikeBuildLog, looksLikeDebugPage, extractLogHighlights } from '../lib/log-highlights';
 import { addChunksToVectorStore, searchSessionChunks, resetSessionIndex, resetAllSessionIndexes, isConfidentMatch } from '../lib/vector-store';
-import { replaceChunksForDoc } from '../lib/db';
+import { replaceChunksForDoc, embedChunksForDoc, resumePendingEmbeds } from '../lib/db';
 import { pdfUrlToBody, pdfOpfsToBody, pdfBase64ToBody, ensureOffscreen as ensureOffscreenDoc, recreateOffscreen } from '../lib/pdf-parser';
 import { setEnsureOffscreen, setRecreateOffscreen, sendToOffscreen } from '../lib/offscreen-client';
 import { crumb, dumpCrashLog, installCrashHandlers, installCrumbReceiver } from '../lib/crash-log';
@@ -77,6 +77,15 @@ let offscreenHealthCheckInterval: number | null = null;
 // Register ensureOffscreen with the robust client for auto-recreation
 setEnsureOffscreen(ensureOffscreenDoc);
 setRecreateOffscreen(recreateOffscreen);
+
+// Resume any capture whose background embedding was cut off by a worker
+// suspension. Runs on each worker wake (module load); no-op when nothing is
+// pending. Delayed so it never competes with an in-flight capture's own embed.
+setTimeout(() => {
+  resumePendingEmbeds()
+    .then(n => { if (n) console.log(`[embed] resumed ${n} pending capture(s)`); })
+    .catch(() => { /* best-effort; docs stay lexically searchable regardless */ });
+}, 8000);
 
 // Start periodic offscreen health check (every 60s)
 function startOffscreenHealthCheck() {
@@ -948,8 +957,11 @@ async function captureTab(tab: chrome.tabs.Tab, explicitProjectId: string | null
     content: fullMarkdown
   });
 
-  // Save to IndexedDB globally (always), then link if there's a target
-  const { id: docId, chunks: savedChunks } = await saveDocument({
+  // Save the .md + chunks FIRST, vector-less, so capture returns immediately —
+  // embedding is the slow step and made capture "feel" slow. The doc is
+  // persisted and lexically (BM25) searchable now; embeddings backfill in the
+  // background below. deferEmbed flags the doc pendingEmbed for crash recovery.
+  const { id: docId } = await saveDocument({
     title: scraped.title,
     url: scraped.url,
     content: fullMarkdown,
@@ -957,13 +969,18 @@ async function captureTab(tab: chrome.tabs.Tab, explicitProjectId: string | null
     favicon: scraped.favicon || tab.favIconUrl || '',
     wordCount,
     syncedToDrive: false
-  }, chunks);
+  }, chunks, { deferEmbed: true });
 
   if (linkTarget) {
     await linkDocumentToProject(linkTarget, docId);
-    // Add to vector store (chunks now carry their final id + docId)
-    await addChunksToVectorStore(linkTarget, savedChunks);
   }
+
+  // Backfill embeddings without blocking the capture response. Best-effort: if
+  // the worker is suspended before this finishes, resumePendingEmbeds() (called
+  // on the next worker startup) completes it. The doc is already searchable.
+  void embedChunksForDoc(docId)
+    .then(async embedded => { if (linkTarget && embedded.length) await addChunksToVectorStore(linkTarget, embedded); })
+    .catch(e => console.warn('[capture] background embed failed (doc still lexically searchable):', e));
 
   // Auto sync to Drive in the background
   handleSyncToDrive().catch(() => {});

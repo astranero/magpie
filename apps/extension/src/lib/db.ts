@@ -83,6 +83,10 @@ export interface StoredDocument {
   driveFileId?: string;
   /** BibTeX entry — present on academic papers with known metadata. */
   bibtex?: string;
+  /** Chunks were saved vector-less to return capture fast; embeddings are being
+   *  backfilled in the background. Cleared once embeddings are written. A killed
+   *  service worker leaves this set, so resumePendingEmbeds() can finish it. */
+  pendingEmbed?: boolean;
 }
 
 export interface Chunk {
@@ -559,7 +563,8 @@ export async function findExistingDocumentByUrl(url: string): Promise<StoredDocu
 
 export async function saveDocument(
   doc: Omit<StoredDocument, 'id' | 'enabled'> & { enabled?: boolean },
-  chunks: Omit<Chunk, 'id' | 'docId'>[]
+  chunks: Omit<Chunk, 'id' | 'docId'>[],
+  opts: { deferEmbed?: boolean } = {}
 ): Promise<SaveDocumentResult> {
   // Deduplication: check if document with same URL already exists
   if (doc.url) {
@@ -589,16 +594,22 @@ export async function saveDocument(
   }));
 
   // Generate embeddings BEFORE opening the IDB transaction — in small batches so
-  // a big document can't spike memory and crash the offscreen renderer.
-  const embs = await embedTextsBatched(finalChunks.map(c => c.text));
-  embs.forEach((embedding, idx) => { if (embedding && finalChunks[idx]) finalChunks[idx].embedding = embedding; });
+  // a big document can't spike memory and crash the offscreen renderer. UNLESS
+  // the caller defers: embedding is the slow step, so capture persists chunks
+  // vector-less (still lexically searchable) and returns immediately, then
+  // backfills embeddings in the background (see embedChunksForDoc). The doc is
+  // flagged pendingEmbed so a killed worker can be resumed.
+  if (!opts.deferEmbed) {
+    const embs = await embedTextsBatched(finalChunks.map(c => c.text));
+    embs.forEach((embedding, idx) => { if (embedding && finalChunks[idx]) finalChunks[idx].embedding = embedding; });
+  }
 
   // Now open the transaction and write everything synchronously
   const transaction = tx(db, ['documents', 'chunks'], 'readwrite');
   const docStore = transaction.objectStore('documents');
   const chunkStore = transaction.objectStore('chunks');
 
-  docStore.put({ ...doc, id, enabled: doc.enabled ?? true });
+  docStore.put({ ...doc, id, enabled: doc.enabled ?? true, ...(opts.deferEmbed ? { pendingEmbed: true } : {}) });
 
   for (const chunk of finalChunks) {
     chunkStore.put(chunk);
@@ -644,6 +655,53 @@ export async function replaceChunksForDoc(docId: string, chunks: Omit<Chunk, 'id
     transaction.onerror = () => reject(transaction.error);
   });
   return finalChunks;
+}
+
+/**
+ * Backfill embeddings for a doc saved with `deferEmbed`. Loads its (vector-less)
+ * chunks, embeds them, rewrites them with vectors, and clears `pendingEmbed`.
+ * Returns the embedded chunks so the caller can add them to the vector store.
+ * Idempotent: a doc with no pending flag / already-embedded chunks is a no-op.
+ */
+export async function embedChunksForDoc(docId: string): Promise<Chunk[]> {
+  const existing = await getChunksForDoc(docId);
+  if (existing.length === 0) return [];
+
+  const embs = await embedTextsBatched(existing.map(c => c.text));
+  const withVecs: Omit<Chunk, 'id' | 'docId'>[] = existing.map((c, i) => {
+    const { id: _id, docId: _docId, ...rest } = c;
+    return { ...rest, embedding: embs[i] ?? c.embedding };
+  });
+  const saved = await replaceChunksForDoc(docId, withVecs);
+
+  // Clear the pending flag (best-effort; the chunks are what matter).
+  try {
+    const db = await openDB();
+    const t = tx(db, 'documents', 'readwrite');
+    const store = t.objectStore('documents');
+    const doc = await reqToPromise<StoredDocument | undefined>(store.get(docId));
+    if (doc?.pendingEmbed) { delete doc.pendingEmbed; store.put(doc); }
+    await txComplete(t);
+  } catch { /* flag is a hint, not correctness — chunks already carry vectors */ }
+
+  return saved;
+}
+
+/**
+ * Finish any captures whose background embed was cut off (e.g. the MV3 worker
+ * was suspended right after a fast capture returned). Called on worker startup.
+ * Sequential + best-effort; each doc's chunks stay lexically searchable until
+ * its turn comes.
+ */
+export async function resumePendingEmbeds(): Promise<number> {
+  const docs = await listDocuments();
+  const pending = docs.filter(d => d.pendingEmbed);
+  let done = 0;
+  for (const d of pending) {
+    try { await embedChunksForDoc(d.id); done++; }
+    catch (e) { console.warn('[embed] resume failed for', d.id, e); }
+  }
+  return done;
 }
 
 export async function listDocuments(projectId?: string): Promise<StoredDocument[]> {
