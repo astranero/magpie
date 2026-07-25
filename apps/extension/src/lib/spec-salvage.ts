@@ -240,12 +240,15 @@ export function fromJsonLdDescription(raw: string[]): string {
 // and the live DOM both match; a bad selector is caught per-selector below.
 const DESC_SELECTORS = [
   '[itemprop="description"]',
-  '[class*="ilmoitusteksti"]',      // Finnish "listing text" (nettimoto/nettiauto)
+  '[class*="ilmoitusteksti"]',      // Finnish "listing text" (nettiauto)
+  '[class*="note-disc"]',           // nettimoto seller note (short-note-disc / full-note-disc)
+  '[class*="seller-note"]',
   '[class*="listing-description"]',
   '[class*="vehicle-description"]',
   '[class*="ad-description"]',
+  '[class*="ad-text"]',
   '[class*="item-description"]',
-  '[class*="seller-notes"]',
+  '[class*="listing-body"]',
   '[class*="description-text"]',
   '[data-testid*="description"]',
   '[id*="description"]',

@@ -200,6 +200,16 @@ describe('free-text description — the prose Readability drops beside a spec gr
     expect(desc.length).toBeGreaterThan(200); // would have been rejected as a spec cell
   });
 
+  it('recovers the seller note from real nettimoto markup (short + full note, no doubling)', () => {
+    const desc = 'Sisäänajettu V-Strom seuraavalle seikkailijalle. Säilytetty talvet sisällä ja pysynyt hyvässä kunnossa. Uusitut renkaat ja akku. Tiedossa oleva vika: pitkät valot eivät jää päälle.';
+    const root = docFrom(`<div id="noteSection" class="technical-information word-wrap"><div class="block-row vehicle-all-info__details_paragraph"><div id="shortNote" class="short-note-disc"><p>${desc}</p></div><div id="fullNote" class="full-note-disc"><p>${desc}</p></div></div></div>`);
+    const d = fromDomDescription(root);
+    expect(d).toContain('hyvässä kunnossa');
+    expect(d).toContain('Tiedossa oleva vika');
+    // Not the doubled short+full concatenation — one copy only.
+    expect((d.match(/Sisäänajettu V-Strom/g) || []).length).toBe(1);
+  });
+
   it('recovers a listing description from a class container (nettimoto ilmoitusteksti)', () => {
     const long = 'Erittäin siisti V-Strom, aina sisällä säilytetty ja hyvin huollettu. ' + 'Uudet renkaat ja ketjut. '.repeat(6);
     const root = docFrom(`<div class="ilmoitusteksti-body">${long}</div><nav class="menu-description">Osta Myy</nav>`);
