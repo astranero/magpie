@@ -1712,11 +1712,21 @@ async function buildChatRequest(chatId: string, projectId: string, prompt: strin
       };
     }
     let observed: string[] = [];
+    let discovered: string[] = [];
+    let host = '';
     try {
       const tabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
-      if (tabs[0]?.id) observed = await getObservedApiCalls(tabs[0].id);
+      if (tabs[0]?.id) {
+        const [obs, disc] = await Promise.all([
+          getObservedApiCalls(tabs[0].id),
+          discoverPageEndpoints(tabs[0].id),
+        ]);
+        observed = obs;
+        discovered = disc.candidates;
+        host = disc.host;
+      }
     } catch { /* no tab / restricted page */ }
-    const gathered = await agenticDataGather(q, observed, signal, onStatus).catch((e) => {
+    const gathered = await agenticDataGather(q, observed, discovered, host, signal, onStatus).catch((e) => {
       console.warn('[DATA] gather failed:', e); return { blocks: [], sources: [] as Array<{ title: string; url: string }> };
     });
     const dataSys =
@@ -2744,6 +2754,42 @@ async function getObservedApiCalls(tabId: number): Promise<string[]> {
   }
 }
 
+/**
+ * Discover candidate API endpoints from the page SOURCE at call time — no reload
+ * or runtime XHR needed. Scans inline scripts / HTML for api-ish URLs
+ * (`/api/`, `/graphql`, `.json`, `/vN/`), embedded state blobs (__NEXT_DATA__ etc),
+ * and api-ish `<link>`/`<script src>`. Runs in the page (ISOLATED) via
+ * executeScript and returns absolute, deduped candidates.
+ */
+async function discoverPageEndpoints(tabId: number): Promise<{ host: string; url: string; candidates: string[] }> {
+  try {
+    const results = await chrome.scripting.executeScript({
+      target: { tabId },
+      func: () => {
+        const found = new Set<string>();
+        const push = (u: string) => { try { const a = new URL(u, location.href).href; if (/^https?:/.test(a)) found.add(a); } catch { /* */ } };
+        const html = document.documentElement.outerHTML;
+        const apiish = '(?:/api/|/rest/|/graphql|/gql|/v\\d+/|/ajax/|\\.json)';
+        let m: RegExpExecArray | null; let n = 0;
+        const reRel = new RegExp('["\'`](/[^"\'`\\s]*?' + apiish + '[^"\'`\\s]*)["\'`]', 'gi');
+        while ((m = reRel.exec(html)) !== null && n < 300) { push(m[1]); n++; }
+        const reAbs = new RegExp('https?://[^"\'`\\s)]+' + apiish + '[^"\'`\\s)]*', 'gi');
+        n = 0; while ((m = reAbs.exec(html)) !== null && n < 300) { push(m[0]); n++; }
+        document.querySelectorAll('link[href],script[src],a[href]').forEach(el => {
+          const h = (el.getAttribute('href') || el.getAttribute('src') || '');
+          if (h && new RegExp(apiish, 'i').test(h)) push(h);
+        });
+        return { host: location.host, url: location.href, candidates: Array.from(found).slice(0, 60) };
+      },
+    });
+    const r = (results?.[0]?.result || { host: '', url: '', candidates: [] }) as { host: string; url: string; candidates: string[] };
+    const candidates = (r.candidates || []).filter(isAllowedFetchUrl).map(redactObservedUrl).slice(0, 40);
+    return { host: r.host || '', url: r.url || '', candidates };
+  } catch {
+    return { host: '', url: '', candidates: [] };
+  }
+}
+
 const DATA_MAX_ROUNDS = 6;
 const DATA_MAX_FETCHES = 30;
 const DATA_PER_CALL_CHARS = 8_000;
@@ -2758,11 +2804,11 @@ const DATA_HOST_MIN_GAP_MS = 400;
  * Guardrails: URL policy, a global fetch cap, and a per-host rate limit.
  */
 async function agenticDataGather(
-  question: string, observed: string[], signal: AbortSignal, onStatus?: (s: string) => void,
+  question: string, observed: string[], discovered: string[], host: string, signal: AbortSignal, onStatus?: (s: string) => void,
 ): Promise<{ blocks: string[]; sources: Array<{ title: string; url: string }> }> {
   const webAllowed = await isChatWebFallbackEnabled();
   const tools: ToolDef[] = [
-    { type: 'function', function: { name: 'list_page_api_calls', description: 'List the API/XHR endpoints the CURRENT page actually called (the site\'s real API, not a guess). Token-like query values are redacted. Use these as the basis for http_get calls.', parameters: { type: 'object', properties: {} } } },
+    { type: 'function', function: { name: 'list_page_api_calls', description: 'List candidate API endpoints for the CURRENT page: (1) the requests it actually made at runtime, and (2) api-ish URLs found in its page source. These are the site\'s real API, not guesses. Token-like values are redacted. Use them as the basis for http_get.', parameters: { type: 'object', properties: {} } } },
     { type: 'function', function: { name: 'http_get', description: 'GET a public API endpoint or URL and return its JSON/text body. CREDENTIAL-FREE — public data only, no logins. Use it to fetch an endpoint, then paginate (next page) and fan out to related endpoints. Do not fetch the same URL twice.', parameters: { type: 'object', properties: { url: { type: 'string', description: 'Absolute https:// URL' } }, required: ['url'] } } },
   ];
   if (webAllowed) {
@@ -2770,12 +2816,13 @@ async function agenticDataGather(
   }
 
   const sys =
-    `You are a web-data agent. Collect the data needed to answer, then stop.\n` +
-    `- Start with list_page_api_calls to see the current site's real endpoints; call http_get on the most relevant one.\n` +
-    `- Inspect each response, then construct the next call: paginate (page/offset/limit params) and fan out to related endpoints. Accumulate enough rows to answer.\n` +
-    `- You may also fetch known public APIs directly: Reddit (append .json to a listing URL, or /search.json?q=…), the GitHub REST API, HN Algolia.\n` +
+    `You are a web-data agent for the site "${host || 'the current page'}". Collect the data needed to answer, then stop.\n` +
+    `- ALWAYS begin with list_page_api_calls — it gives the site's real endpoints (runtime requests + api-ish URLs from the page source). http_get the most relevant candidate.\n` +
+    `- Inspect each JSON response, then construct the next call: paginate (page/offset/limit/start params) and fan out to related endpoints. Accumulate enough rows to answer.\n` +
+    `- Endpoints often follow a pattern — if you see one like \`${host ? 'https://' + host : 'https://site'}/api/search?...\`, vary its query (model, condition=used, sort=price_asc, page=2) to get what the user asked for.\n` +
+    `- You may also fetch known public APIs directly: Reddit (append .json / /search.json?q=…), the GitHub REST API, HN Algolia.\n` +
     `- All fetches are CREDENTIAL-FREE (public data only). Budget: at most ${DATA_MAX_FETCHES} fetches. Never repeat a URL.\n` +
-    `- If list_page_api_calls returns nothing, the page's requests weren't observed (it may need a reload). Do NOT conclude the site "has no API" — try a search_web for its API, or a plausible endpoint, before giving up.\n` +
+    `- DO NOT GIVE UP without trying: try at least 3 candidate endpoints (from list_page_api_calls, a same-origin \`/api/…\` guess, and search_web) before concluding you couldn't fetch data. NEVER claim the site "has no API" — you cannot verify that.\n` +
     `- When you have enough, stop calling tools; the final answer is written separately from the data you gathered.`;
   const messages: any[] = [{ role: 'system', content: sys }, { role: 'user', content: question }];
 
@@ -2796,11 +2843,15 @@ async function agenticDataGather(
       let result = 'error'; let block: string | null = null; let src: { title: string; url: string } | null = null; let charCount = 0;
       try {
         if (call.name === 'list_page_api_calls') {
-          if (!observed.length) result = 'no API calls observed on this page';
-          else {
-            block = `\n\n--- OBSERVED PAGE API CALLS ---\n${observed.join('\n')}\n--- END ---\n`;
+          const parts: string[] = [];
+          if (observed.length) parts.push(`OBSERVED (requests the page made at runtime):\n${observed.join('\n')}`);
+          if (discovered.length) parts.push(`FROM PAGE SOURCE (api-ish URLs found in the page):\n${discovered.join('\n')}`);
+          if (!parts.length) {
+            result = 'no endpoints observed or found in the page source — try a same-origin /api/ guess or search_web';
+          } else {
+            block = `\n\n--- CANDIDATE API ENDPOINTS (${host}) ---\n${parts.join('\n\n')}\n--- END ---\n`;
             charCount = block.length;
-            result = `${observed.length} observed endpoint(s)`;
+            result = `${observed.length} observed + ${discovered.length} from source`;
           }
         } else if (call.name === 'http_get') {
           const url = String(call.args?.url || '').trim();
