@@ -368,7 +368,7 @@ export async function updateProjectRules(id: string, rules: string): Promise<voi
 
 export async function linkDocumentToProject(projectId: string, documentId: string): Promise<void> {
   const db = await openDB();
-  const transaction = tx(db, 'projects', 'readwrite');
+  const transaction = tx(db, ['projects', 'documents'], 'readwrite');
   const store = transaction.objectStore('projects');
   const project = await reqToPromise<Project | undefined>(store.get(projectId));
   if (project) {
@@ -378,6 +378,15 @@ export async function linkDocumentToProject(projectId: string, documentId: strin
       project.updatedAt = new Date().toISOString();
       store.put(project);
     }
+  }
+  // Stamp the document's OWN projectId. Without this the field stayed empty on
+  // every captured doc, so Drive sync (which routes by doc.projectId) dumped
+  // everything into the Magpie root instead of Magpie/<project>/.
+  const docStore = transaction.objectStore('documents');
+  const doc = await reqToPromise<StoredDocument | undefined>(docStore.get(documentId));
+  if (doc && doc.projectId !== projectId) {
+    doc.projectId = projectId;
+    docStore.put(doc);
   }
   await txComplete(transaction);
   notifySync();
