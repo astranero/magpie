@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc && vite build && cross-env CONTENT_ENTRY=content vite build -c vite.content.config.ts && cross-env CONTENT_ENTRY=inject vite build -c vite.content.config.ts",
+    "build": "tsc && vite build && cross-env CONTENT_ENTRY=content vite build -c vite.content.config.ts && cross-env CONTENT_ENTRY=inject vite build -c vite.content.config.ts && cross-env CONTENT_ENTRY=net-observer vite build -c vite.content.config.ts",
     "preview": "vite preview",
     "test": "vitest run",
     "test:e2e": "playwright test",

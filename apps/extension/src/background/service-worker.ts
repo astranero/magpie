@@ -19,6 +19,7 @@ import { buildCitationContext, CITATION_SYSTEM_PROMPT, parseResponseCitations } 
 import { buildFrontmatter, hasFrontmatter } from '../lib/frontmatter';
 import { get as idbGet } from 'idb-keyval';
 import { runDeepResearch, generateSubQuestions, scrapeUrl, isJunkUrl, gatherWebSnippets } from './deep-researcher';
+import { isAllowedFetchUrl, redactObservedUrl, fetchJson } from '../lib/fetch-guard';
 import { harvestReferences } from '../lib/reference-harvest';
 import { needsIntentResolution, formatHistoryForIntent, parseRepoUrl, selectTreePaths, formatTreeBlock, isChitchat, isRefusalAnswer, isStructureQuestion, isImplementationQuestion, findRepoUrlInText, isPageMetaQuestion, questionKeywords, mentionsPageDeixis, overlapsPage, isLocationDependent, isGeneralKnowledgeQuestion, timezoneToPlace, isAssistantMetaQuestion, RepoRef } from '../lib/query-intent';
 import { sanitizeCliOutput, isCliErrorOutput, composeCliPrompt } from '../lib/cli-output';
@@ -1491,6 +1492,16 @@ async function isChatWebFallbackEnabled(): Promise<boolean> {
   }
 }
 
+/** Web-data agent (/data) — OFF by default (powerful + network-heavy, opt-in). */
+async function isWebDataAgentEnabled(): Promise<boolean> {
+  try {
+    const s = await chrome.storage.local.get(['webDataAgentEnabled']);
+    return s.webDataAgentEnabled === true;
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Optional fast model for classification/intent calls (routing, question
  * rewriting, page-relevance). Falls back to the main chat model when unset.
@@ -1684,6 +1695,46 @@ async function buildChatRequest(chatId: string, projectId: string, prompt: strin
   // Sliding window: keep only the most recent turns so long chats don't
   // balloon prompt size → slow TTFT.
   let formattedHistory = fullHistory.slice(-MAX_HISTORY_TURNS);
+
+  // ── /data — the web-data agent ────────────────────────────────────────────
+  // Discover the API endpoints the current page uses, fetch them (credential-free)
+  // in a loop, and analyze. Short-circuits the normal RAG/page enrich.
+  const dataMatch = /^\/data\s+([\s\S]+)/i.exec(prompt.trim());
+  if (dataMatch) {
+    const q = dataMatch[1].trim();
+    if (!(await isWebDataAgentEnabled())) {
+      return {
+        systemPrompt: 'The user tried to use the /data web-data agent, which is currently disabled. Reply with EXACTLY this and nothing else: "The Web-data agent is off. Turn it on in Settings → Research to let `/data` discover and fetch public API data."',
+        formattedHistory: [],
+        grounded: false,
+        branch: 'general' as ChatBranch,
+        place: undefined,
+      };
+    }
+    let observed: string[] = [];
+    try {
+      const tabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+      if (tabs[0]?.id) observed = await getObservedApiCalls(tabs[0].id);
+    } catch { /* no tab / restricted page */ }
+    const gathered = await agenticDataGather(q, observed, signal, onStatus).catch((e) => {
+      console.warn('[DATA] gather failed:', e); return { blocks: [], sources: [] as Array<{ title: string; url: string }> };
+    });
+    const dataSys =
+      `You are a data analyst. You were given data fetched from public APIs (below). Answer the user's ` +
+      `request using ONLY that data — build the table/ranking/summary they asked for, cite the endpoints ` +
+      `you used, and state plainly if the data is incomplete or a call failed. Do not invent rows.\n\n` +
+      (gathered.blocks.length
+        ? `FETCHED DATA:\n${gathered.blocks.join('\n')}`
+        : `No data could be fetched (the agent found no usable public endpoint, or fetches were blocked). ` +
+          `Tell the user that, and suggest what endpoint or page would help.`);
+    return {
+      systemPrompt: LANGUAGE_DIRECTIVE + rulesBlock + localeBlock + dataSys,
+      formattedHistory,
+      grounded: false,
+      branch: (gathered.sources.length ? 'web' : 'general') as ChatBranch,
+      place: undefined,
+    };
+  }
 
   // Greetings / small talk must NOT run retrieval: it returns weak top-k
   // chunks that trip the strict "I cannot answer from the sources" refusal
@@ -2656,6 +2707,139 @@ const sys = isDebugPage
     if (used >= TOTAL_CTX_BUDGET) break;
   }
   console.log(`[CTX/agentic] gathered ${blocks.length} block(s), ${sources.length} source(s)`);
+  return { blocks, sources };
+}
+
+// ─────────────────────────────────────────────
+// Web-data agent (/data) — discover endpoints, fetch loop, analyze
+// ─────────────────────────────────────────────
+
+/** Read the MAIN-world network observer's buffer for a tab, filtered + redacted. */
+async function getObservedApiCalls(tabId: number): Promise<string[]> {
+  try {
+    const results = await chrome.scripting.executeScript({
+      target: { tabId }, world: 'MAIN',
+      func: () => (window as any).__magpieNet || [],
+    });
+    const raw = (results?.[0]?.result || []) as Array<{ method: string; url: string }>;
+    const out: string[] = [];
+    const seen = new Set<string>();
+    for (const e of raw) {
+      if (!e?.url || !isAllowedFetchUrl(e.url)) continue; // drops assets/trackers/non-http
+      const line = `${e.method || 'GET'} ${redactObservedUrl(e.url)}`;
+      if (seen.has(line)) continue;
+      seen.add(line);
+      out.push(line);
+      if (out.length >= 50) break;
+    }
+    return out;
+  } catch {
+    return [];
+  }
+}
+
+const DATA_MAX_ROUNDS = 6;
+const DATA_MAX_FETCHES = 30;
+const DATA_PER_CALL_CHARS = 8_000;
+const DATA_HOST_MIN_GAP_MS = 400;
+
+/**
+ * The web-data agent loop: mirror of `agenticGather` with two tools —
+ * `list_page_api_calls` (the site's real endpoints, from the network observer)
+ * and `http_get` (credential-free fetch of a public API/URL), plus `search_web`
+ * for finding public API docs. The model paginates + fans out, we accumulate the
+ * fetched JSON as context blocks; the caller's system prompt asks it to analyze.
+ * Guardrails: URL policy, a global fetch cap, and a per-host rate limit.
+ */
+async function agenticDataGather(
+  question: string, observed: string[], signal: AbortSignal, onStatus?: (s: string) => void,
+): Promise<{ blocks: string[]; sources: Array<{ title: string; url: string }> }> {
+  const webAllowed = await isChatWebFallbackEnabled();
+  const tools: ToolDef[] = [
+    { type: 'function', function: { name: 'list_page_api_calls', description: 'List the API/XHR endpoints the CURRENT page actually called (the site\'s real API, not a guess). Token-like query values are redacted. Use these as the basis for http_get calls.', parameters: { type: 'object', properties: {} } } },
+    { type: 'function', function: { name: 'http_get', description: 'GET a public API endpoint or URL and return its JSON/text body. CREDENTIAL-FREE — public data only, no logins. Use it to fetch an endpoint, then paginate (next page) and fan out to related endpoints. Do not fetch the same URL twice.', parameters: { type: 'object', properties: { url: { type: 'string', description: 'Absolute https:// URL' } }, required: ['url'] } } },
+  ];
+  if (webAllowed) {
+    tools.push({ type: 'function', function: { name: 'search_web', description: 'Live web search — use to find a public API\'s docs/endpoints (e.g. Reddit .json, GitHub API) when the page has none.', parameters: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'] } } });
+  }
+
+  const sys =
+    `You are a web-data agent. Collect the data needed to answer, then stop.\n` +
+    `- Start with list_page_api_calls to see the current site's real endpoints; call http_get on the most relevant one.\n` +
+    `- Inspect each response, then construct the next call: paginate (page/offset/limit params) and fan out to related endpoints. Accumulate enough rows to answer.\n` +
+    `- You may also fetch known public APIs directly: Reddit (append .json to a listing URL, or /search.json?q=…), the GitHub REST API, HN Algolia.\n` +
+    `- All fetches are CREDENTIAL-FREE (public data only). Budget: at most ${DATA_MAX_FETCHES} fetches. Never repeat a URL.\n` +
+    `- When you have enough, stop calling tools; the final answer is written separately from the data you gathered.`;
+  const messages: any[] = [{ role: 'system', content: sys }, { role: 'user', content: question }];
+
+  const blocks: string[] = [];
+  const sources: Array<{ title: string; url: string }> = [];
+  let used = 0;
+  let fetchCount = 0;
+  const hostLast = new Map<string, number>();
+  const fetchedUrls = new Set<string>();
+  const sleep = (ms: number) => new Promise<void>(r => setTimeout(r, ms));
+
+  for (let round = 0; round < DATA_MAX_ROUNDS; round++) {
+    const resp = await chatWithTools(messages, tools, signal);
+    if (resp.toolCalls.length === 0) break;
+    messages.push(resp.assistantMessage);
+
+    const pending = resp.toolCalls.map(async (call) => {
+      let result = 'error'; let block: string | null = null; let src: { title: string; url: string } | null = null; let charCount = 0;
+      try {
+        if (call.name === 'list_page_api_calls') {
+          if (!observed.length) result = 'no API calls observed on this page';
+          else {
+            block = `\n\n--- OBSERVED PAGE API CALLS ---\n${observed.join('\n')}\n--- END ---\n`;
+            charCount = block.length;
+            result = `${observed.length} observed endpoint(s)`;
+          }
+        } else if (call.name === 'http_get') {
+          const url = String(call.args?.url || '').trim();
+          if (fetchCount >= DATA_MAX_FETCHES) result = 'fetch budget exhausted';
+          else if (fetchedUrls.has(url)) result = 'already fetched that URL';
+          else if (!isAllowedFetchUrl(url)) result = 'URL blocked by policy (https, or http to loopback only; no assets/trackers)';
+          else {
+            let host = ''; try { host = new URL(url).host; } catch { /* */ }
+            const wait = Math.max(0, DATA_HOST_MIN_GAP_MS - (Date.now() - (hostLast.get(host) || 0)));
+            if (wait) await sleep(wait);
+            hostLast.set(host, Date.now());
+            fetchCount++; fetchedUrls.add(url);
+            const r = await fetchJson(url, { signal, maxChars: DATA_PER_CALL_CHARS });
+            const body = r.json !== undefined ? JSON.stringify(r.json).slice(0, DATA_PER_CALL_CHARS) : (r.text || '');
+            if (body) {
+              block = `\n\n--- GET ${url} (HTTP ${r.status}) ---\n${body}\n--- END ---\n`;
+              charCount = block.length; src = { title: url, url };
+              result = `fetched ${url} (${r.status})`;
+            } else result = `fetch failed: ${r.error || r.status}`;
+          }
+        } else if (call.name === 'search_web' && webAllowed) {
+          const web = await gatherWebSnippets(String(call.args?.query || question), { signal });
+          if (web.context && used + web.context.length <= TOTAL_CTX_BUDGET) {
+            block = `\n\n--- WEB RESULTS ---\n${web.context}\n--- END WEB RESULTS ---`;
+            charCount = web.context.length; src = web.sources?.[0] || null; result = 'web results added';
+          } else result = 'no useful web results';
+        } else result = 'unknown tool';
+      } catch (e) {
+        if (signal.aborted) throw e;
+        result = 'error fetching';
+      }
+      return { call, result, block, src, charCount };
+    });
+
+    const settled = await Promise.all(pending);
+    for (const { call, result, block, src, charCount } of settled) {
+      if (block && used + charCount <= TOTAL_CTX_BUDGET) {
+        blocks.push(block); used += charCount;
+        if (src) sources.push(src);
+      }
+      onStatus?.(result.length > 60 ? result.slice(0, 60) + '…' : result);
+      messages.push({ role: 'tool', tool_call_id: call.id, content: result });
+    }
+    if (used >= TOTAL_CTX_BUDGET || fetchCount >= DATA_MAX_FETCHES) break;
+  }
+  console.log(`[DATA] gathered ${blocks.length} block(s), ${fetchCount} fetch(es)`);
   return { blocks, sources };
 }
 

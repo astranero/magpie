@@ -5,6 +5,17 @@ versions follow the extension manifest.
 
 ## [Unreleased]
 
+### Added — web-data agent
+
+- **`/data` — discover a site's APIs, fetch, and analyze.** A gated agent loop
+  that observes the API/XHR endpoints the current page actually calls (a
+  MAIN-world network observer, URLs only, token values redacted), fetches public
+  endpoints in a loop (paginate + fan out), and analyzes the results — e.g.
+  "list the cheapest V-Stroms and compare", "top Reddit posts about X".
+  **Credential-free** (public data only; `isAllowedFetchUrl` = https anywhere /
+  http loopback), fetch-count + per-host rate capped, and **off by default**
+  (enable in Settings → Answering). See `docs/SECURITY.md` for the boundary.
+
 ### Added — learn from your research
 
 - **`/teach` builds a course from the workspace's research.** The first `/teach`

@@ -105,6 +105,9 @@ export const SLASH_COMMANDS: SlashCommand[] = [
     cmd: '/flashcard', desc: 'Build a smart study deck from this workspace and play it', takesArg: true, kind: 'builtin'
   },
   {
+    cmd: '/data', desc: 'Web-data agent: discover a site’s APIs, fetch + analyze (enable in Settings)', takesArg: true, kind: 'builtin'
+  },
+  {
     cmd: '/teach', desc: 'Learn a topic across sessions — lessons saved to this workspace', takesArg: true, kind: 'builtin'
   },
   {

@@ -98,6 +98,32 @@ contacts `openrouter.ai` with a key read from env or the gitignored
    cross-origin) would be a genuine escalation and belongs in this document
    before it is written.
 
+2a. **Web-data agent (`/data`) — arbitrary URL fetch, but CREDENTIAL-FREE.**
+   The `/data` mode lets the model construct and fetch API/URL requests in a loop
+   (`agenticDataGather` → `http_get` → `fetchJson`, `lib/fetch-guard.ts`). This is
+   the "broader" channel item 2 warned about — so it is deliberately built on the
+   opposite side of that boundary:
+   - **No credentials, ever.** `fetchJson` uses `credentials: 'omit'`; no cookies
+     or session ride along, even same-origin. Public data only. There is nothing
+     of the user's logged-in accounts to exfiltrate, which is what neutralises the
+     SSRF risk from a page-steered URL (page content is attacker-influenceable and
+     could try to steer a fetch).
+   - **URL policy.** `isAllowedFetchUrl` mirrors `isAllowedMcpUrl`: `https://` to
+     any host, `http://` only to loopback; static assets and known tracking hosts
+     rejected.
+   - **Caps.** A per-turn fetch cap (`DATA_MAX_FETCHES`), a per-host min-delay
+     rate limit (politeness / avoid bans), and per-call + total body-size caps.
+   - **Opt-in.** OFF by default (`webDataAgentEnabled`); the user turns it on in
+     Settings.
+   - **Endpoint discovery is URL-only.** The MAIN-world network observer
+     (`content/net-observer.ts`) records only `{method, url}` of the page's own
+     requests — never request/response bodies or headers — and the service worker
+     redacts token-like query values (`redactObservedUrl`) before the model sees
+     an endpoint.
+   The line vs `EXTRACT_PDF` (item 2): that one is credentialed but scoped to an
+   open-tab PDF; this one is arbitrary-URL but credential-free. Neither is a
+   credentialed-arbitrary-URL channel — that combination remains forbidden.
+
 3. **LLM output → side panel.** Rendered via react-markdown (no
    `dangerouslySetInnerHTML`); `urlTransform` restricts URLs to
    markdown-safe schemes plus `data:image/`. Citation chips only resolve

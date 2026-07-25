@@ -517,6 +517,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   const [s2ApiKey, setS2ApiKey] = useState('');
   // Chat web-search fallback — default ON; only an explicit false disables it.
   const [webFallback, setWebFallback] = useState(true);
+  const [webDataAgent, setWebDataAgent] = useState(false);
   const [jinaEnabled, setJinaEnabled] = useState(true);
   // How chat gathers extra detail from the open page (repo files / links).
   const [pageCtxStrategy, setPageCtxStrategy] = useState<'semantic' | 'router' | 'agentic'>('semantic');
@@ -526,7 +527,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   const tzGuess = (() => { try { return (Intl.DateTimeFormat().resolvedOptions().timeZone || '').split('/').pop()?.replace(/_/g, ' ') || ''; } catch { return ''; } })();
   useEffect(() => {
     if (typeof chrome === 'undefined' || !chrome.storage) return;
-    chrome.storage.local.get(['researchDepth', 'reportLength', 'contextTokens', 's2ApiKey', 'sourceQuality', 'academicDepth', 'chatWebFallback', 'jinaReaderEnabled', 'pageContextStrategy', 'userLocation', 'inferenceDevice']).then(r => {
+    chrome.storage.local.get(['researchDepth', 'reportLength', 'contextTokens', 's2ApiKey', 'sourceQuality', 'academicDepth', 'chatWebFallback', 'webDataAgentEnabled', 'jinaReaderEnabled', 'pageContextStrategy', 'userLocation', 'inferenceDevice']).then(r => {
       if (r.inferenceDevice === 'webgpu') setInferenceDevice('webgpu');
       if (r.researchDepth === 'deep' || r.researchDepth === 'exhaustive') setResearchDepth(r.researchDepth);
       if (r.reportLength === 'concise' || r.reportLength === 'comprehensive') setReportLength(r.reportLength);
@@ -535,6 +536,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
       if (r.contextTokens) setContextTokens(String(r.contextTokens));
       if (r.s2ApiKey) setS2ApiKey(r.s2ApiKey);
       setWebFallback(r.chatWebFallback !== false);
+      setWebDataAgent(r.webDataAgentEnabled === true);
       setJinaEnabled(r.jinaReaderEnabled !== false);
       if (r.pageContextStrategy === 'router' || r.pageContextStrategy === 'agentic') setPageCtxStrategy(r.pageContextStrategy);
       if (typeof r.userLocation === 'string') setUserLocation(r.userLocation);
@@ -921,6 +923,31 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
             <span
               className={`pointer-events-none block h-4 w-4 rounded-full bg-background shadow-sm transition-transform duration-200 ${
                 webFallback ? 'translate-x-[18px]' : 'translate-x-0.5'
+              }`}
+            />
+          </button>
+        </div>
+
+        <div className="flex items-center justify-between gap-3">
+          <div className="min-w-0">
+            <span className="text-xs font-medium">Web-data agent (<code>/data</code>)</span>
+            <p className="text-[10px] text-muted-foreground font-mono mt-0.5 leading-normal">
+              Let <code>/data</code> discover a site's public APIs (from the page's own network calls) and fetch + analyze them. Credential-free — public data only. Off by default.
+            </p>
+          </div>
+          <button
+            type="button"
+            role="switch"
+            aria-checked={webDataAgent}
+            onClick={() => { const next = !webDataAgent; setWebDataAgent(next); saveResearchSetting({ webDataAgentEnabled: next }); }}
+            className={`shrink-0 relative inline-flex h-5 w-9 items-center rounded-full transition-colors duration-200 focus:outline-none ${
+              webDataAgent ? 'bg-primary' : 'bg-border'
+            }`}
+            title="Toggle the web-data agent"
+          >
+            <span
+              className={`pointer-events-none block h-4 w-4 rounded-full bg-background shadow-sm transition-transform duration-200 ${
+                webDataAgent ? 'translate-x-[18px]' : 'translate-x-0.5'
               }`}
             />
           </button>
