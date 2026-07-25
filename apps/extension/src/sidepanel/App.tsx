@@ -2275,6 +2275,39 @@ loadChatHistory(activeChatId).then(() => {
     }
   };
 
+  /**
+   * "Cancel & edit" on the message being answered: an UNDO of the send. Stop the
+   * in-flight reply, remove the user message (and its partial answer) from both
+   * the transcript and saved history, and drop its text + image back into the
+   * input — as if it was never sent. Distinct from Edit&re-run, which keeps the
+   * message and re-asks; this takes it back.
+   */
+  const cancelAndEdit = async (msgId: string) => {
+    const chatId = activeChatId;
+    if (!chatId) return;
+    const list = messages[chatId] || [];
+    const target = list.find(m => m.id === msgId);
+    if (!target) return;
+
+    // Stop the worker first so it can't persist a trailing message after the
+    // truncate below (cancelTask awaits the CANCEL_TASK ack).
+    await cancelTask();
+
+    // Remove the message + everything after it from saved history, then mirror
+    // that in the transcript on screen.
+    await msg('TRUNCATE_CHAT_FROM', { chatId, messageId: msgId });
+    setMessages(prev => {
+      const l = prev[chatId] || [];
+      const idx = l.findIndex(m => m.id === msgId);
+      return idx === -1 ? prev : { ...prev, [chatId]: l.slice(0, idx) };
+    });
+
+    // Restore it to the composer (strip the page-context prefix a forced-context
+    // turn is stored with) so the user can edit or discard it.
+    setInput(target.text.replace(/^\[📄 Current Page\]\s*/, ''));
+    if (target.images?.[0]) setPendingImage(target.images[0]);
+  };
+
   const clearChat = async () => {
     if (!activeChatId) return;
     await msg('CLEAR_CHAT_HISTORY', { chatId: activeChatId });
@@ -2597,6 +2630,7 @@ loadChatHistory(activeChatId).then(() => {
               }}
               onRegenerate={regenerateAnswer}
               onEditAndRerun={editAndRerun}
+              onCancelAndEdit={cancelAndEdit}
               onOpenSettings={() => setView('settings')}
               onRetryLast={retryLast}
               onUnqueue={unqueueMessage}

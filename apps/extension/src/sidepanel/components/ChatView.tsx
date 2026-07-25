@@ -46,6 +46,9 @@ interface ChatViewProps {
   onRegenerate?: (assistantMsgId: string) => void;
   /** Replace an earlier question and re-run from it; later turns are discarded. */
   onEditAndRerun?: (userMsgId: string, newText: string) => void;
+  /** Undo a send that's mid-generation: cancel, remove it from chat, and put
+   *  its text + image back in the input. */
+  onCancelAndEdit?: (userMsgId: string) => void;
   /** Open the settings/config view — the recovery action for auth/config errors. */
   onOpenSettings?: () => void;
   /** Re-run the last question — the recovery action for a transient failure. */
@@ -1148,6 +1151,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
   onSourceModeChange,
   onRegenerate,
   onEditAndRerun,
+  onCancelAndEdit,
   onOpenSettings,
   onRetryLast,
   onUnqueue,
@@ -1550,13 +1554,13 @@ export const ChatView: React.FC<ChatViewProps> = ({
               // blocked — offer "Cancel & edit" instead: stop the reply and
               // reopen the message. Kept visible (not hover-only) so it's
               // reachable mid-generation without hunting for it.
-              busy && mi === lastUserIdx ? (
+              busy && mi === lastUserIdx && onCancelAndEdit ? (
                 <div className="flex items-center gap-2 px-1 mt-0.5">
                   <button
                     type="button"
-                    onClick={() => { cancelTask(); setEditingId(m.id); }}
+                    onClick={() => onCancelAndEdit(m.id)}
                     className="flex items-center gap-1 text-[10px] font-medium text-muted-foreground hover:text-foreground transition-colors"
-                    title="Stop the reply and edit this message"
+                    title="Undo: stop the reply, remove this message, and put its text back in the input"
                   >
                     <StopCircle size={10} />
                     <span>Cancel &amp; edit</span>
