@@ -15,6 +15,36 @@ versions follow the extension manifest.
   **Credential-free** (public data only; `isAllowedFetchUrl` = https anywhere /
   http loopback), fetch-count + per-host rate capped, and **off by default**
   (enable in Settings → Answering). See `docs/SECURITY.md` for the boundary.
+- **`/data` is intent-driven, not tab-bound.** It ignores an unrelated open tab
+  (a "best deals" query run on a Google Drive tab no longer fetches Drive's API),
+  discovers the right sites via web search, and reads their search API or search
+  page (`fetch_page`) with per-item links. Endpoint discovery adds a page-source
+  scan on top of the runtime observer. A keyless web-search **floor** runs when
+  the model emits no tool calls (some providers don't support function calling),
+  so it still returns cited data. A `403`/block response is reported and retried
+  via `fetch_page` (a server-side reader) instead of being stored as if it were
+  data. The answer is pinned to the request's language, and the whole branch is
+  wrapped so an internal error degrades to a notice instead of failing the turn.
+
+### Added — Drive sync is now truly two-way
+
+- **One subfolder per workspace.** Documents sync as `Magpie/<workspace>/<doc>.md`
+  instead of a flat dump in the root. Routing keys off each document's own
+  `projectId` — which capture never actually set, so everything used to land in
+  the root; `linkDocumentToProject` now stamps it. A workspace's subfolder is
+  created eagerly when the workspace is made, so it appears before the first sync.
+- **Restore all from Drive.** A reconcile (`RECONCILE_FROM_DRIVE`) walks every
+  subfolder, recreates any workspace that exists only in the cloud, and imports
+  the `.md` it doesn't already hold — so "data only in remote" self-heals in one
+  pass. Runs on Google sign-in and from a new Settings button.
+
+### Fixed — Drive sign-in after a reinstall
+
+- The optional `identity` permission is reset by a reinstall, but nothing
+  re-requested it, so sign-in dead-ended on "Google sign-in is not available"
+  with no way to grant it. `login` now calls `chrome.permissions.request` from
+  the click. An unguarded `new URL()` in the Copilot settings row (and one on the
+  code-question path) that could crash the whole panel is guarded.
 
 ### Added — learn from your research
 

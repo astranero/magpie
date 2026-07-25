@@ -100,14 +100,19 @@ contacts `openrouter.ai` with a key read from env or the gitignored
 
 2a. **Web-data agent (`/data`) — arbitrary URL fetch, but CREDENTIAL-FREE.**
    The `/data` mode lets the model construct and fetch API/URL requests in a loop
-   (`agenticDataGather` → `http_get` → `fetchJson`, `lib/fetch-guard.ts`). This is
-   the "broader" channel item 2 warned about — so it is deliberately built on the
-   opposite side of that boundary:
-   - **No credentials, ever.** `fetchJson` uses `credentials: 'omit'`; no cookies
-     or session ride along, even same-origin. Public data only. There is nothing
-     of the user's logged-in accounts to exfiltrate, which is what neutralises the
-     SSRF risk from a page-steered URL (page content is attacker-influenceable and
-     could try to steer a fetch).
+   (`agenticDataGather` → `http_get`/`fetch_page` → `fetchJson`/`scrapeUrl`,
+   `lib/fetch-guard.ts`). This is the "broader" channel item 2 warned about — so
+   it is deliberately built on the opposite side of that boundary:
+   - **No credentials, ever.** `http_get`'s `fetchJson` uses `credentials: 'omit'`;
+     no cookies or session ride along, even same-origin. `fetch_page` (used when a
+     site returns a `403`/block page to a direct API call) routes through the Jina
+     reader, which fetches the page server-side from Jina's own infrastructure —
+     so it too carries none of the user's session. Public data only. There is
+     nothing of the user's logged-in accounts to exfiltrate, which is what
+     neutralises the SSRF risk from a page-steered URL (page content is
+     attacker-influenceable and could try to steer a fetch). Note the reader is a
+     third party that sees the fetched URL — the same Jina trade-off already
+     flagged for research scraping.
    - **URL policy.** `isAllowedFetchUrl` mirrors `isAllowedMcpUrl`: `https://` to
      any host, `http://` only to loopback; static assets and known tracking hosts
      rejected.
@@ -115,11 +120,18 @@ contacts `openrouter.ai` with a key read from env or the gitignored
      rate limit (politeness / avoid bans), and per-call + total body-size caps.
    - **Opt-in.** OFF by default (`webDataAgentEnabled`); the user turns it on in
      Settings.
-   - **Endpoint discovery is URL-only.** The MAIN-world network observer
-     (`content/net-observer.ts`) records only `{method, url}` of the page's own
-     requests — never request/response bodies or headers — and the service worker
-     redacts token-like query values (`redactObservedUrl`) before the model sees
-     an endpoint.
+   - **Endpoint discovery is URL-only + read-only.** The MAIN-world network
+     observer (`content/net-observer.ts`) records only `{method, url}` of the
+     page's own requests — never request/response bodies or headers — and the
+     service worker redacts token-like query values (`redactObservedUrl`) before
+     the model sees an endpoint. A complementary page-source scan
+     (`discoverPageEndpoints`) only reads the current DOM's outerHTML for api-ish
+     URLs. Neither reads credentials or storage.
+   - **Intent-driven, not tab-bound.** The loop is instructed to ignore the open
+     tab when it is not the answer's source and to discover the right sites via
+     web search; a keyless web-search floor runs when the model emits no tool
+     calls. None of this changes the fetch policy above — every fetch still passes
+     `isAllowedFetchUrl` and is credential-free.
    The line vs `EXTRACT_PDF` (item 2): that one is credentialed but scoped to an
    open-tab PDF; this one is arbitrary-URL but credential-free. Neither is a
    credentialed-arbitrary-URL channel — that combination remains forbidden.
@@ -153,10 +165,13 @@ contacts `openrouter.ai` with a key read from env or the gitignored
 - `<all_urls>` host permission + content script: capture must work on any
   page the user is reading. Capture is user-initiated (toolbar/context menu).
 - `unlimitedStorage`: exempts the library from quota eviction.
-- `identity` is **optional** and only requested for Drive sync. The OAuth
-  grant (`manifest.json` `oauth2.scopes`) is `drive.file` (files Magpie
-  itself created — not the whole Drive) plus `userinfo.email` +
-  `userinfo.profile`, used solely to show which Google account is connected.
+- `identity` is **optional** and only requested for Drive sync — via a runtime
+  `chrome.permissions.request(['identity'])` from the user's click on "Sign in
+  with Google" (a reinstall resets the optional grant, so it must be re-requested
+  from a user gesture, not assumed). The OAuth grant (`manifest.json`
+  `oauth2.scopes`) is `drive.file` (files Magpie itself created — not the whole
+  Drive) plus `userinfo.email` + `userinfo.profile`, used solely to show which
+  Google account is connected.
 
 ## ⚖ Open decisions (tracked, not settled here)
 

@@ -77,6 +77,7 @@ Magpie provides two main synchronization mechanisms for matching your local rese
 ### 1. Google Drive Sync (Remote)
 * **Auth & Scopes:** Uses Google OAuth2 (interactive sign-in). The `drive.file` scope means Magpie can only view and edit files/folders it created itself; `userinfo.email` + `userinfo.profile` are also granted, used only to display the connected account. See `docs/SECURITY.md` for the full egress inventory.
 * **Obsidian Formatting:** Syncs research documents as `.md` files with Obsidian-compatible YAML frontmatter to a configured sync folder (`driveFolderName`, default: `Magpie`).
+* **Layout — one subfolder per workspace:** documents are stored as `Magpie/<workspace>/<doc>.md`, never as loose files in the root. Routing keys off the document's own `projectId` (stamped by `linkDocumentToProject`), and a workspace's subfolder is created eagerly the moment the workspace is made (`ENSURE_PROJECT_SUBFOLDER`), so it appears before the first document syncs.
 * **Automatic Background Sync:** Runs silently in the background:
   * When capturing a web page (`captureTab`).
   * When importing local files (Markdown, PDF, Images).
@@ -84,6 +85,7 @@ Magpie provides two main synchronization mechanisms for matching your local rese
   * Periodically every 5 minutes via the `sync-workspace` alarm.
 * **Sync Filtering:** By default, raw crawled research sources (which clutter Obsidian vaults) are excluded from sync. Turning on **"Sync raw research sources"** (`syncResearchSources`) in the Config tab forces all crawled pages to sync.
 * **Force Resync:** Clears the `syncedToDrive` flag and `driveFileId` on all documents, enabling a complete re-upload of your library to Google Drive (e.g. if the folder name is changed).
+* **Restore all from Drive (two-way pull):** `RECONCILE_FROM_DRIVE` walks every subfolder under the Magpie root, finds or **creates** a local workspace of that name, and imports every `.md` the library does not already hold (deduped by Drive file id). This is what makes "the data exists only in remote" self-heal — one pass rebuilds all workspaces. It runs automatically on Google sign-in and from **Settings → Restore all from Drive**, and is the recovery path after a reinstall (which wipes local IndexedDB). Root-level loose `.md` are intentionally ignored — they can't be attributed to a workspace.
 
 ### 2. Local Folder Sync (Desktop)
 * Uses the browser File System Access API (requiring a user gesture to grant permission).

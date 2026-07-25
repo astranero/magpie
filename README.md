@@ -49,7 +49,7 @@ reranking, and the whole library run locally.
 | **Ask** | Answers grounded in what you actually saved |
 | **Research** | Multi-stage agents: web, academic and news, cross-checked |
 | **Trace** | Every citation is a link back to the source paragraph |
-| **Sync** | Optional Google Drive backup of your workspaces |
+| **Sync** | Optional two-way Google Drive sync — one subfolder per workspace, restores everything back after a reinstall |
 
 ## Quick start
 
