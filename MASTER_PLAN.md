@@ -1,6 +1,6 @@
 # MASTER PLAN — Magpie (née AI Research Assistant)
 
-> **Status as of 2026-07-23**: Build ✅ | Tests 535/535 ✅ | 52 unit suites + 12 e2e specs | Committed locally, 9 commits ahead of `github.com/astranero/magpie` (not yet pushed)
+> **Status as of 2026-07-25**: Build ✅ | Tests 842 passing (+1 skipped) ✅ | 72 unit suites + 16 e2e specs | Committed locally, many commits ahead of `github.com/astranero/magpie` (not yet pushed)
 
 ---
 
@@ -9,7 +9,7 @@
 | Metric | Status |
 |--------|--------|
 | **Build** | ✅ `tsc` + Vite × 3 configs clean |
-| **Tests** | ✅ 535/535 unit passing (52 suites) + 12 Playwright e2e specs (smoke, chat, capture, citation-chips, live-*, render, research-plan, stream-finalize, memory-budget, link-preview) |
+| **Tests** | ✅ 842 unit passing, 1 skipped (72 suites) + 16 Playwright e2e specs (smoke, chat, capture, citation-chips, live-*, render, research-plan, stream-finalize, memory-budget, link-preview) |
 | **CI** | ✅ `.github/workflows/verify.yml` — build + typecheck + test on push/PR to `main` |
 | **Git** | Local `main`, 9 commits ahead of `github.com/astranero/magpie` — push pending |
 | **Copilot + BYOK coexistence** | ✅ Both provider catalogs live simultaneously; distinct model lists; asymmetric spend-confirm on switch |
@@ -123,9 +123,9 @@
 
 | Area | Severity | Notes |
 |------|----------|-------|
-| `service-worker.ts` — 4073 lines | **High** | Message router + domain modules needed; grew from ~4000 |
-| `deep-researcher.ts` — 3570 lines | **High** | Agents as separate modules; grew from ~3500 |
-| `App.tsx` — 2477 lines | **High** | Extract view components; grew from ~2200 |
+| `service-worker.ts` — 4486 lines | **High** | Message router + domain modules needed; keeps growing |
+| `deep-researcher.ts` — 4083 lines | **High** | Agents as separate modules; keeps growing |
+| `App.tsx` — 2965 lines | **High** | Extract view components; keeps growing |
 | `free-apis.ts` — 547 lines | Low | Already modular; monitor growth |
 | No request coalescing for parallel search calls | Low | Low priority |
 | No retry/backoff on `chrome.storage.local` | Low | Rare failures |
@@ -179,7 +179,7 @@
 | Chat UI | `ChatView.tsx` `MessageBody`, `App.tsx` `messages` state |
 | Document view | `DocumentView.tsx`, `LoreView.tsx` |
 | Debug-page detection | `lib/log-highlights.ts` — `looksLikeDebugPage`, `extractLogHighlights` |
-| `/teach` | `background/teach.ts` |
+| `/teach` (course + quizzes + reset), `/flashcard` (deck) | `background/teach.ts` (`handleTeach`, `handleFlashcards`, `gradeAnswer`) |
 | Settings | `SettingsView.tsx` (MCP, custom skills, research depth, provider config) |
 | Tests | `lib/__tests__/*.test.ts`, `background/__tests__/*.test.ts`, `sidepanel/components/__tests__/*.test.ts` |
 | E2E | `e2e/*.spec.ts` (`smoke`, `chat`, `capture`, `citation-chips`, `render`, `research-plan`, `stream-finalize`, `memory-budget`, `link-preview`, `live-*`) |

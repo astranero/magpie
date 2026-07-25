@@ -5,6 +5,25 @@ versions follow the extension manifest.
 
 ## [Unreleased]
 
+### Added — learn from your research
+
+- **`/teach` builds a course from the workspace's research.** The first `/teach`
+  after a report reads the workspace's research docs and sequences them into an
+  easy-steps syllabus (saved to Lore); each later `/teach` advances one lesson,
+  written from the retrieved material rather than the model's recall. Lessons
+  carry an interactive quiz — MCQ checked instantly, open answers graded by the
+  LLM with a reveal-answer fallback — and "Continue → next lesson" / "Reset
+  course" buttons. `/teach reset` wipes the mission + syllabus + lessons so the
+  next run rebuilds from scratch. Lessons and their quizzes persist across chat
+  switches and reloads.
+- **`/flashcard` builds a smart study deck and opens a full-panel player.**
+  Atomic, recall-forcing cards grounded only in the workspace's research (falls
+  back to the current page or chat topic); the player flips on click/Space,
+  recycles "Again" cards, tracks progress, and returns to chat at the same spot.
+  Decks persist and reopen from their chat message.
+- **`/grill` closes with a record.** Once shared understanding is reached, the
+  interview ends with `## Decisions`, `## Open gaps`, and `## Next steps`.
+
 ### Fixed — non-English use
 
 - **Research answered in English regardless of the question's language.** Only

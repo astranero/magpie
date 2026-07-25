@@ -38,6 +38,12 @@ Before resuming a job at startup, require ALL of: job marked `active`, job age u
 
 A dead worker can't wake itself — but Chrome starts a fresh instance on the next event (a message, an alarm, browser launch). The resume check runs once per worker instance at startup; a periodic `chrome.alarms` job (the 5-minute sync alarm) guarantees such an event eventually arrives even if the user never touches the extension.
 
+The same startup-waker pattern has a **second consumer**: `resumePendingEmbeds()` finishes deferred capture embeddings (capture saves vector-less and returns; the embedding backfill may be cut off by a worker death — the `pendingEmbed` flag lets the next worker instance complete it). Both are instances of "worker startup completes work a prior instance couldn't."
+
+### Resume is not the only answer: partial-report salvage
+
+Resuming a job assumes there's still time to finish it. When a run instead **runs out of time** — the 60-min run watchdog (`RESEARCH_MAX_WALL_MS`), the 18-min synthesis budget (`SYNTH_WALL_BUDGET_MS`), or a user Stop — the synthesis loop **breaks rather than throws**, ships the sections already written under an "Incomplete report" banner, and skips the capstone/evaluator. An hour of work is delivered partial instead of discarded. Sections are checkpointed per-section, so this only changes the failure path, never the happy path.
+
 ## The 5-Minute Resume Loop War Story
 
 A critical bug occurs if the heartbeat check is absent or mismanaged: the service worker thinks a job is active and starts resuming it repeatedly while the offscreen document is still working. This manifests as:

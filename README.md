@@ -91,8 +91,9 @@ Then load it:
 | `/academic <topic>` | Papers only (Semantic Scholar, arXiv, CrossRef, HuggingFace) |
 | `/recall <topic>` | Search your captured library |
 | `/page <question>` | Ask about the current browser tab |
-| `/grill <topic>` | Stress-test a plan — one question at a time |
-| `/teach <topic>` | Learn a topic across sessions, tracked in this workspace |
+| `/grill <topic>` | Stress-test a plan — one question at a time; closes with Decisions / Open gaps / Next steps |
+| `/teach [topic]` | Build a course from this workspace's research and step through numbered lessons, each with an interactive quiz; `/teach reset` rebuilds it |
+| `/flashcard [topic]` | Build a smart study deck from this workspace and play it in a full-panel card player |
 | `/create-skill <instruction>` | Turn findings into a reusable command |
 | `/clear` | Reset chat |
 

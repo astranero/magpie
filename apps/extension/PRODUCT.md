@@ -14,7 +14,7 @@ Primary: **researchers** — academics, analysts, journalists, and serious knowl
 
 ## Product Purpose
 
-Magpie lives in your browser's side panel. It gleefully captures web pages, PDFs, academic papers, and YouTube transcripts into your personal Lore, then answers questions across that knowledge with citations linking to the exact paragraph the answer came from. The deep research agent runs multi-agent web + academic + news searches autonomously, indexes every source as a real library document, and synthesizes a report where every claim is traceable. Success looks like: the user never has to wonder where a fact came from.
+Magpie lives in your browser's side panel. It gleefully captures web pages, PDFs, academic papers, and YouTube transcripts into your personal Lore, then answers questions across that knowledge with citations linking to the exact paragraph the answer came from. The deep research agent runs multi-agent web + academic + news searches autonomously, indexes every source as a real library document, and synthesizes a report where every claim is traceable. And once the research is in, it can teach it back: `/teach` turns a workspace's research into a stepped course with interactive quizzes, and `/flashcard` into a study deck. Success looks like: the user never has to wonder where a fact came from — and can actually learn it.
 
 ## Positioning
 

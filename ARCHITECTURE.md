@@ -47,8 +47,10 @@ page/PDF/YouTube ──content script / offscreen──▶ markdown
   ▶ quality gate (anti-bot, paywall, thin, table-soup rejected)
   ▶ frontmatter (Obsidian-compatible YAML)
   ▶ chunker (heading/paragraph-aware, stable citation anchors d{id}.s{n}.p{n})
-  ▶ embeddings (384-dim, multilingual-e5-small in offscreen)
-  ▶ IndexedDB (documents + chunks WITH vectors)
+  ▶ IndexedDB save (documents + chunks, vector-less first — BM25-searchable now)
+  ▶ background embeddings (384-dim, multilingual-e5-small in offscreen) backfilled
+    onto the chunks; capture returns before this finishes (deferEmbed/pendingEmbed,
+    resumed by resumePendingEmbeds() if the worker dies mid-backfill)
 
 question ──▶ hybrid retrieval (Orama BM25 + vectors, in-memory per project,
              rehydrated from IDB after SW restarts — no re-embedding)
@@ -70,6 +72,14 @@ question ──▶ hybrid retrieval (Orama BM25 + vectors, in-memory per project
   (see `docs/MV3-PERSISTENT-AGENT-STATE.md`).
 - **Storage durability**: `unlimitedStorage` permission exempts the library
   from quota eviction.
+- **Partial-report salvage**: an aborted run (Stop / the 60-min run watchdog
+  `RESEARCH_MAX_WALL_MS`, or the 18-min synthesis budget `SYNTH_WALL_BUDGET_MS`
+  on top of the 35-min gather budget `GATHER_WALL_BUDGET_MS`) delivers the
+  sections written so far under an "Incomplete report" banner and skips the
+  capstone + evaluator — never discards an hour of work.
+- **Capture defers embedding**: capture persists the doc vector-less and
+  returns; embeddings backfill in the background, and `resumePendingEmbeds()`
+  on worker startup finishes any capture whose backfill was cut off.
 
 ## Design invariants
 

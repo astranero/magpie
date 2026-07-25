@@ -17,8 +17,11 @@ Three command kinds:
   chat input refines it (see RESEARCH-PIPELINE.md, "Plan negotiation").
 - **`builtin`** — special-cased in App: `/page` (ephemeral current-page
   context), `/recall` (pull Global Lore into the workspace), `/follow`
-  (preview a link in-panel), `/teach` (cross-session lessons), `/analyze`,
-  `/create-skill`, `/clear`, `/help`.
+  (preview a link in-panel), `/teach` (research-grounded course — a syllabus
+  built from the workspace's research, numbered lessons each with an interactive
+  MCQ + LLM-graded quiz, `/teach reset` to wipe and rebuild), `/flashcard`
+  (smart study deck + full-panel card player), `/analyze`, `/create-skill`,
+  `/clear`, `/help`.
 
 ## Custom skills (Config → Custom Commands)
 

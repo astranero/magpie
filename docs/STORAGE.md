@@ -9,7 +9,7 @@ Object stores:
 | `projects` | `id` | Workspaces; `documentIds[]` links docs (many-to-many) |
 | `chats` | `id` | Chat metadata per project |
 | `chatHistory` | `id` | Messages (role, text, timestamp) |
-| `documents` | `id` | Full markdown (`content`, incl. frontmatter), title, url, `capturedAt`, `wordCount`, `enabled` (false = excluded from retrieval), optional `bibtex` |
+| `documents` | `id` | Full markdown (`content`, incl. frontmatter), title, url, `capturedAt`, `wordCount`, `enabled` (false = excluded from retrieval), optional `bibtex`, optional `pendingEmbed` (chunks saved vector-less, embeddings backfilling — recovered by `resumePendingEmbeds()`) |
 | `chunks` | `id`, index on `docId` | Chunk text, `anchorId`, heading/sectionPath, char offsets, **optional `embedding` (384-dim)** |
 | `settings` | `key` | Misc key/value |
 | `docImages` | `${docId}/${imgId}`, index on `docId` | Extracted PDF figures / inlined import images (`blob`, `width`, `height`) |
@@ -25,9 +25,16 @@ so they are browsable but can never enter retrieval or citations:
 `research-sources` (the consolidated source list of a research run) and
 `skill` (the persisted copy of a /create-skill command).
 
-**Vectors are data**: embeddings are computed once at save time (offscreen
-model) and persisted on the chunk. Worker restarts rehydrate the in-memory
-search index from stored chunks with **no re-embedding**.
+**Vectors are data**: embeddings are computed by the offscreen model and
+persisted on the chunk. Worker restarts rehydrate the in-memory search index
+from stored chunks with **no re-embedding**. Two wrinkles: (1) **capture defers
+embedding** — the doc + chunks are saved vector-less first (BM25-searchable
+immediately) and embeddings backfill in the background (`deferEmbed`/
+`pendingEmbed`; `resumePendingEmbeds()` on worker startup finishes any that were
+cut off). (2) `embedTextsBatched` has a **45s per-batch timeout with stall-skip**,
+so a cold/stalled ONNX model can leave chunks **permanently vector-less
+(BM25-only)** rather than hanging the capture — semantic search simply misses
+those chunks until a re-index.
 
 `replaceChunksForDoc(docId, chunks)` swaps a document's chunk set atomically
 (used by Re-index: re-chunk with the current pipeline + backfill embeddings).
@@ -52,7 +59,9 @@ visionModel`), `researchDepth`, `sourceQuality`, `academicDepth`,
 `mcpServers`, `customSkills`, `autoLinkCaptures`, `includePageContext`,
 `driveFolderName`, `syncResearchSources`, and the crash-safe
 **research job checkpoint** (`magpie-research-job`: plan, phase,
-logs, `active`, `lastHeartbeatAt`, `resumeAttempts`).
+logs, `active`, `lastHeartbeatAt`, `resumeAttempts`, and the fields that make
+partial-resume work — `sectionDrafts` (per-section synthesis drafts), evolved
+stage queries, stage briefs, outline + handoff, gathered doc ids).
 
 ## Auxiliary IndexedDB
 
