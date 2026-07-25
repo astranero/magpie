@@ -1658,13 +1658,16 @@ export const ChatView: React.FC<ChatViewProps> = ({
                 type="button"
                 role="switch"
                 aria-checked={!!imageOutput}
-                title="Let the model return images (needs an image-capable model)"
+                aria-label="Generate images in the reply"
+                title={imageOutput
+                  ? 'On: the model may reply with generated images (needs an image-capable model). Click to turn off.'
+                  : 'Off: replies are text only. Click to let the model generate images (needs an image-capable model).'}
                 onClick={() => onImageOutputChange(!imageOutput)}
                 className={`ml-auto flex items-center gap-1 text-[10px] font-medium px-2 py-0.5 rounded-full transition-colors ${
                   imageOutput ? 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-400' : 'text-muted-foreground hover:text-foreground hover:bg-accent'
                 }`}
               >
-                <ImageIcon size={11} /> Images
+                <ImageIcon size={11} /> {imageOutput ? 'Image reply: on' : 'Image reply'}
               </button>
             )}
           </div>

@@ -72,6 +72,10 @@ function extract(html: string, url: string): { title: string; markdown: string; 
   // document, not from Readability's output — the point is what it removed.
   markdown += salvageSpecs(parsed, readJsonLdBlocks(parsed), { existingMarkdown: markdown });
 
+  // Final pass, after the coverage fallback (which re-runs turndown and can
+  // reintroduce a paragraph-as-heading) and every append.
+  markdown = demoteRunawayHeadings(markdown);
+
   const wordCount = markdown.split(/\s+/).filter(w => w.length > 0).length;
   return { title, markdown, wordCount };
 }

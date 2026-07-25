@@ -743,6 +743,13 @@ async function scrapePage(): Promise<{
     }
   } catch { /* extraction is best-effort — never break page capture over it */ }
 
+  // Demote runaway headings ONE LAST TIME, after every fallback and append.
+  // The coverage fallback above re-runs turndown on the full body and can
+  // reintroduce a paragraph-as-heading the line-632 pass already removed; this
+  // final pass runs before title extraction so a runaway heading can't become a
+  // giant title either.
+  markdown = demoteRunawayHeadings(markdown);
+
   // If the title looks like a generic site name (e.g. "Google Gemini"),
   // try to extract a real content title from the first markdown heading.
   if (isGenericTitle(title)) {
