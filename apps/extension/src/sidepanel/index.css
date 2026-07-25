@@ -9,6 +9,11 @@
 @import "@fontsource/caveat/latin-700.css";
 @import "@fontsource/klee-one/latin-400.css";
 @import "@fontsource/klee-one/latin-600.css";
+/* Dark → Space Grotesk (techy geometric grotesque); Village → Lora (a real
+   book serif that renders everywhere, unlike the Mac-only Iowan it replaces).
+   Both variable, one file each. Every palette now has its OWN bundled font. */
+@import "@fontsource-variable/space-grotesk";
+@import "@fontsource-variable/lora";
 @import "katex/dist/katex.min.css";
 @tailwind base;
 @tailwind components;
@@ -375,19 +380,32 @@
     font-family: 'Geist Variable', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
     letter-spacing: -0.01em;
   }
+  /* Dark ("plumage at night") → Space Grotesk, a techy geometric grotesque,
+     bundled so it looks the same everywhere. Its display AND body differ from
+     the light theme's Geist. */
   .dark .font-display,
   .dark .prose-headings-display :is(h1, h2, h3, h4) {
-    font-family: 'Geist Variable', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
-    letter-spacing: -0.03em;
-    font-weight: 640;
+    font-family: 'Space Grotesk Variable', 'Geist Variable', 'Segoe UI', sans-serif;
+    letter-spacing: -0.02em;
+    font-weight: 600;
+  }
+  .dark body,
+  .dark .prose {
+    font-family: 'Space Grotesk Variable', 'Geist Variable', 'Segoe UI', system-ui, sans-serif;
   }
 
-  /* Village speaks in a serif — a system stack, so it costs no webfont.
-     Applies to both display slots (headings here, prose headings below). */
+  /* Village speaks in a serif — now Lora, a real bundled book serif, so it
+     reads the same everywhere instead of falling back to Georgia off a Mac.
+     Display headings AND body get it, for a cozy printed-page feel. */
   .village .font-display,
   .village .prose-headings-display :is(h1, h2, h3, h4) {
-    font-family: 'Iowan Old Style', 'Palatino Linotype', Palatino, 'Book Antiqua', Georgia, serif;
+    font-family: 'Lora Variable', 'Iowan Old Style', 'Palatino Linotype', Georgia, serif;
     letter-spacing: 0;
+    font-weight: 600;
+  }
+  .village body,
+  .village .prose {
+    font-family: 'Lora Variable', 'Iowan Old Style', 'Palatino Linotype', Georgia, serif;
   }
   .village .shadow-card {
     box-shadow: 0 1px 2px hsl(25 30% 20% / 0.06), 0 3px 10px hsl(25 30% 20% / 0.08);
