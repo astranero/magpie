@@ -1346,7 +1346,9 @@ async function handleReindexLibrary(): Promise<Record<string, unknown>> {
           const raw = chunkDocument({ docShortId: makeDocShortId(doc.id), content: doc.content });
           let embeddings: (number[] | undefined)[] = [];
     try {
-            const res: any = await sendToOffscreen({ action: 'OFFSCREEN_GET_EMBEDDINGS', texts: raw.map(c => c.text) });
+            // Bound it: a cold/stalled ONNX embedder hangs rather than rejecting,
+            // and the default 3-min timeout would freeze the reindex per doc.
+            const res: any = await sendToOffscreen({ action: 'OFFSCREEN_GET_EMBEDDINGS', texts: raw.map(c => c.text) }, 90_000);
             if (res?.ok && Array.isArray(res.embeddings)) embeddings = res.embeddings;
           } catch { /* vectorless chunks are valid — BM25 still works */ }
           const withVecs = raw.map((c, i) => ({ ...c, embedding: embeddings[i] }));

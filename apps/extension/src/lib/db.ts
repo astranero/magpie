@@ -16,16 +16,28 @@ import { makeDocShortId } from './chunker';
 // mid-research. Batching bounds per-call payload, worker memory, and time; a
 // failed batch only loses its own chunks (null), the rest still index.
 const EMBED_CALL_BATCH = 64;
+// Per-batch cap. The default offscreen timeout is 3 minutes — fine for a
+// research run, but on a COLD ONNX model the embedder can stall indefinitely
+// (it hangs rather than rejecting). At 3 min PER batch, a multi-batch capture
+// froze the panel for many minutes ("capturing is stuck"). 45s comfortably
+// covers a cold model-load + a warm batch; past that we degrade, not wait.
+const EMBED_BATCH_TIMEOUT_MS = 45_000;
 async function embedTextsBatched(texts: string[]): Promise<(number[] | null)[]> {
   const out: (number[] | null)[] = [];
+  let stalled = false;
   for (let i = 0; i < texts.length; i += EMBED_CALL_BATCH) {
     const slice = texts.slice(i, i + EMBED_CALL_BATCH);
+    // Once the embedder has timed out once, it is stalled — don't make the user
+    // wait the full timeout again for every remaining batch. Store the rest
+    // vector-less (still lexically searchable) and let the capture finish.
+    if (stalled) { for (let j = 0; j < slice.length; j++) out.push(null); continue; }
     try {
-      const res: any = await sendToOffscreen({ action: 'OFFSCREEN_GET_EMBEDDINGS', texts: slice });
+      const res: any = await sendToOffscreen({ action: 'OFFSCREEN_GET_EMBEDDINGS', texts: slice }, EMBED_BATCH_TIMEOUT_MS);
       const emb: any[] = res?.ok && Array.isArray(res.embeddings) ? res.embeddings : [];
       for (let j = 0; j < slice.length; j++) out.push(emb[j] ?? null);
     } catch (e) {
-      console.warn(`[embed] batch ${i}-${i + slice.length} failed, chunks stored vector-less:`, e);
+      if (/timed out/i.test(String((e as any)?.message || e))) stalled = true;
+      console.warn(`[embed] batch ${i}-${i + slice.length} failed, chunks stored vector-less${stalled ? ' (embedder stalled — skipping rest)' : ''}:`, e);
       for (let j = 0; j < slice.length; j++) out.push(null);
     }
   }
