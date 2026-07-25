@@ -2809,7 +2809,8 @@ async function agenticDataGather(
   const webAllowed = await isChatWebFallbackEnabled();
   const tools: ToolDef[] = [
     { type: 'function', function: { name: 'list_page_api_calls', description: 'List candidate API endpoints for the CURRENT page: (1) the requests it actually made at runtime, and (2) api-ish URLs found in its page source. These are the site\'s real API, not guesses. Token-like values are redacted. Use them as the basis for http_get.', parameters: { type: 'object', properties: {} } } },
-    { type: 'function', function: { name: 'http_get', description: 'GET a public API endpoint or URL and return its JSON/text body. CREDENTIAL-FREE — public data only, no logins. Use it to fetch an endpoint, then paginate (next page) and fan out to related endpoints. Do not fetch the same URL twice.', parameters: { type: 'object', properties: { url: { type: 'string', description: 'Absolute https:// URL' } }, required: ['url'] } } },
+    { type: 'function', function: { name: 'http_get', description: 'GET a public API/JSON endpoint and return its JSON/text body. CREDENTIAL-FREE — public data only, no logins. Use it to fetch an endpoint, then paginate (next page) and fan out. Do not fetch the same URL twice.', parameters: { type: 'object', properties: { url: { type: 'string', description: 'Absolute https:// URL' } }, required: ['url'] } } },
+    { type: 'function', function: { name: 'fetch_page', description: 'Fetch a full web PAGE (not an API) and read its cleaned text. Use this on a site\'s SEARCH RESULTS page — construct the search URL (host + a search path with the query + a price sort, e.g. sort=price_asc) or find it via search_web — to read the listings directly when there is no JSON API. Credential-free.', parameters: { type: 'object', properties: { url: { type: 'string', description: 'Absolute https:// URL of a page to read' } }, required: ['url'] } } },
   ];
   if (webAllowed) {
     tools.push({ type: 'function', function: { name: 'search_web', description: 'Live web search — use to find a public API\'s docs/endpoints (e.g. Reddit .json, GitHub API) when the page has none.', parameters: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'] } } });
@@ -2820,6 +2821,7 @@ async function agenticDataGather(
     `- ALWAYS begin with list_page_api_calls — it gives the site's real endpoints (runtime requests + api-ish URLs from the page source). http_get the most relevant candidate.\n` +
     `- Inspect each JSON response, then construct the next call: paginate (page/offset/limit/start params) and fan out to related endpoints. Accumulate enough rows to answer.\n` +
     `- Endpoints often follow a pattern — if you see one like \`${host ? 'https://' + host : 'https://site'}/api/search?...\`, vary its query (model, condition=used, sort=price_asc, page=2) to get what the user asked for.\n` +
+    `- The CURRENT page may be a single item (a detail page). Questions like "cheapest / all / list the X on the market" need the site's SEARCH RESULTS, which a detail page never loads. In that case DO NOT stop at the current page's endpoints: construct the site's search URL (host + a search path with the query + a price sort, e.g. sort=price_asc) — or find it with search_web — and fetch_page it to read the listings, or http_get its JSON search endpoint if you can find one.\n` +
     `- You may also fetch known public APIs directly: Reddit (append .json / /search.json?q=…), the GitHub REST API, HN Algolia.\n` +
     `- All fetches are CREDENTIAL-FREE (public data only). Budget: at most ${DATA_MAX_FETCHES} fetches. Never repeat a URL.\n` +
     `- DO NOT GIVE UP without trying: try at least 3 candidate endpoints (from list_page_api_calls, a same-origin \`/api/…\` guess, and search_web) before concluding you couldn't fetch data. NEVER claim the site "has no API" — you cannot verify that.\n` +
@@ -2871,6 +2873,25 @@ async function agenticDataGather(
               charCount = block.length; src = { title: url, url };
               result = `fetched ${url} (${r.status})`;
             } else result = `fetch failed: ${r.error || r.status}`;
+          }
+        } else if (call.name === 'fetch_page') {
+          const url = String(call.args?.url || '').trim();
+          if (fetchCount >= DATA_MAX_FETCHES) result = 'fetch budget exhausted';
+          else if (fetchedUrls.has(url)) result = 'already fetched that URL';
+          else if (!isAllowedFetchUrl(url)) result = 'URL blocked by policy (https, or http to loopback only; no assets/trackers)';
+          else {
+            let h = ''; try { h = new URL(url).host; } catch { /* */ }
+            const wait = Math.max(0, DATA_HOST_MIN_GAP_MS - (Date.now() - (hostLast.get(h) || 0)));
+            if (wait) await sleep(wait);
+            hostLast.set(h, Date.now());
+            fetchCount++; fetchedUrls.add(url);
+            const page = await scrapeUrl(url, signal).catch(() => null);
+            const md = (page?.markdown || '').slice(0, DATA_PER_CALL_CHARS * 2);
+            if (md) {
+              block = `\n\n--- PAGE ${url} ---\n${md}\n--- END ---\n`;
+              charCount = block.length; src = { title: page?.title || url, url };
+              result = `read page ${url}`;
+            } else result = 'page unreadable or empty';
           }
         } else if (call.name === 'search_web' && webAllowed) {
           const web = await gatherWebSnippets(String(call.args?.query || question), { signal });
