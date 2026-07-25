@@ -451,13 +451,16 @@ const COLLAPSE_WORD_THRESHOLD = 150;
 interface CollapsibleMessageProps {
   text: string;
   streaming?: boolean;
+  /** Render open by default (still collapsible) — used for /teach lessons, which
+   *  are meant to be read in full, not clamped behind a "show more". */
+  defaultExpanded?: boolean;
   children: React.ReactNode;
 }
 
-const CollapsibleMessage: React.FC<CollapsibleMessageProps> = ({ text, streaming, children }) => {
+const CollapsibleMessage: React.FC<CollapsibleMessageProps> = ({ text, streaming, defaultExpanded, children }) => {
   const wordCount = useMemo(() => text.split(/\s+/).filter(Boolean).length, [text]);
   const isLong = wordCount > COLLAPSE_WORD_THRESHOLD;
-  const [expanded, setExpanded] = useState(false);
+  const [expanded, setExpanded] = useState(!!defaultExpanded);
 
   if (!isLong || streaming) return <>{children}</>;
 
@@ -1642,7 +1645,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
                 {m.role === 'system' && m.error ? (
                   <ErrorRecovery raw={m.error} onSettings={onOpenSettings} onRetry={onRetryLast} />
                 ) : m.role === 'assistant' || m.role === 'system' ? (
-                  <CollapsibleMessage text={m.text} streaming={m.streaming}>
+                  <CollapsibleMessage text={m.text} streaming={m.streaming} defaultExpanded={!!(m.quiz?.length || m.actions?.length)}>
                     <MessageBody text={m.text} compact={m.role === 'system'} streaming={m.streaming} renderLive={m.renderLive} resolveCitations={resolveCitations} onOpenDocument={onOpenDocument} onOpenExternalLink={onOpenExternalLink} />
                   </CollapsibleMessage>
                 ) : editingId === m.id ? (
