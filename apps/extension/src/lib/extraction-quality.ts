@@ -129,3 +129,33 @@ export function demoteRunawayHeadings(markdown: string, maxLen = 100): string {
     return (tooLong || multiSentence) ? text : line;
   }).join('\n');
 }
+
+/**
+ * Clean chat-UI noise out of a DOM subtree BEFORE Readability/Turndown run.
+ * Mutates in place. Works on a real DOM (content script) and on linkedom (parse
+ * worker) — only querySelectorAll / removeAttribute / remove are used.
+ *
+ * Two things, both seen on Gemini/ChatGPT-style pages:
+ *  - Screen-reader-only text (`.cdk-visually-hidden`, `sr-only`, …) is invisible
+ *    to a sighted reader, so capturing it leaks labels like "Sinä sanoit"
+ *    ("You said") into the document.
+ *  - The user's query bubble is marked `role="heading" aria-level="2"` for
+ *    accessibility. That is NOT a document heading; left in place it can be
+ *    captured as one (or picked as the title). Strip the heading semantics from
+ *    any non-`<h1>-<h6>` element so it captures as ordinary prose.
+ */
+export function sanitizeCaptureDom(root: any): void {
+  if (!root || typeof root.querySelectorAll !== 'function') return;
+
+  const dropSel = '.cdk-visually-hidden, [class*="visually-hidden"], [class*="visuallyhidden"], [class*="sr-only"], [class*="screen-reader"]';
+  for (const el of Array.from(root.querySelectorAll(dropSel)) as any[]) {
+    try { el.remove?.(); } catch { /* detached / read-only node — skip */ }
+  }
+
+  for (const el of Array.from(root.querySelectorAll('[role="heading"]')) as any[]) {
+    const tag = String(el.tagName || '').toLowerCase();
+    if (!/^h[1-6]$/.test(tag)) {
+      try { el.removeAttribute?.('role'); el.removeAttribute?.('aria-level'); } catch { /* skip */ }
+    }
+  }
+}

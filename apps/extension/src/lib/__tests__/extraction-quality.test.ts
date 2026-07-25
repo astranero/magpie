@@ -1,7 +1,8 @@
+// @vitest-environment jsdom
 import { describe, it, expect } from 'vitest';
 import {
   assessCoverage, looksLikeChallengePage, approxPageText,
-  MIN_COVERAGE, MIN_PAGE_CHARS, demoteRunawayHeadings,
+  MIN_COVERAGE, MIN_PAGE_CHARS, demoteRunawayHeadings, sanitizeCaptureDom,
 } from '../extraction-quality';
 
 // No heuristic extractor works on every site. What this buys is that a bad
@@ -135,5 +136,40 @@ describe('demoteRunawayHeadings', () => {
   it('keeps a genuinely short heading like "what can fix this?"', () => {
     // If a site marks this as its own <h3>, it IS a heading — do not strip it.
     expect(demoteRunawayHeadings('### what can fix this?')).toBe('### what can fix this?');
+  });
+});
+
+describe('sanitizeCaptureDom', () => {
+  function docFrom(html: string): any {
+    const d = document.implementation.createHTMLDocument('t');
+    d.body.innerHTML = html;
+    return d.body;
+  }
+
+  it('removes screen-reader-only labels so they do not leak into the capture', () => {
+    const root = docFrom('<div><span class="cdk-visually-hidden">Sinä sanoit</span><p>real text</p></div>');
+    sanitizeCaptureDom(root);
+    expect(root.textContent).not.toContain('Sinä sanoit');
+    expect(root.textContent).toContain('real text');
+  });
+
+  it('strips role=heading + aria-level from a non-heading element (Gemini query bubble)', () => {
+    const root = docFrom('<div role="heading" aria-level="2" class="query-text"><p>what can fix this?</p></div>');
+    sanitizeCaptureDom(root);
+    const div = root.querySelector('div.query-text');
+    expect(div?.getAttribute('role')).toBe(null);
+    expect(div?.getAttribute('aria-level')).toBe(null);
+  });
+
+  it('leaves a real heading element untouched', () => {
+    const root = docFrom('<h2 role="heading" aria-level="2">Real heading</h2>');
+    sanitizeCaptureDom(root);
+    // A genuine <h2> keeps its semantics (harmless either way, but not stripped).
+    expect(root.querySelector('h2')?.getAttribute('role')).toBe('heading');
+  });
+
+  it('is safe on a null / DOM-less input', () => {
+    expect(() => sanitizeCaptureDom(null)).not.toThrow();
+    expect(() => sanitizeCaptureDom({})).not.toThrow();
   });
 });

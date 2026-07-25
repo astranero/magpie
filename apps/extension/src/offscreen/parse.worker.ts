@@ -24,7 +24,7 @@ import { Readability } from '@mozilla/readability';
 import TurndownService from 'turndown';
 import { salvageSpecs, readJsonLdBlocks } from '../lib/spec-salvage';
 import { funnyCaptureTitle, titleIsUnusable } from '../lib/funny-title';
-import { assessCoverage, approxPageText, demoteRunawayHeadings } from '../lib/extraction-quality';
+import { assessCoverage, approxPageText, demoteRunawayHeadings, sanitizeCaptureDom } from '../lib/extraction-quality';
 
 interface ParseReq { type: 'parse'; id: number; html: string; url: string }
 
@@ -36,6 +36,10 @@ function extract(html: string, url: string): { title: string; markdown: string; 
   const base = parsed.createElement('base');
   base.href = url;
   parsed.head?.prepend(base);
+
+  // Same chat-UI cleanup as the content script (screen-reader labels;
+  // role="heading" on a query bubble) before Readability runs.
+  sanitizeCaptureDom(parsed);
 
   const reader = new Readability(parsed, { keepClasses: true });
   const article = reader.parse();

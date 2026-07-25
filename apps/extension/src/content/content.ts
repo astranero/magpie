@@ -2,7 +2,7 @@ import { Readability } from '@mozilla/readability';
 import TurndownService from 'turndown';
 import { extractMailboxList } from './mailbox';
 import { salvageSpecs, readJsonLdBlocks } from '../lib/spec-salvage';
-import { assessCoverage, demoteRunawayHeadings } from '../lib/extraction-quality';
+import { assessCoverage, demoteRunawayHeadings, sanitizeCaptureDom } from '../lib/extraction-quality';
 import { funnyCaptureTitle, titleIsUnusable } from '../lib/funny-title';
 
 // ─────────────────────────────────────────────
@@ -611,6 +611,10 @@ async function scrapePage(): Promise<{
   // Remove all scripts and styles from the clone to avoid CSP warnings when Readability/Turndown does innerHTML
   const elementsToRemove = documentClone.querySelectorAll('script, noscript, style, link[rel="stylesheet"]');
   elementsToRemove.forEach(el => el.parentNode?.removeChild(el));
+
+  // Strip chat-UI noise (screen-reader-only labels; role="heading" on the user's
+  // query bubble) BEFORE Readability so it captures as prose, not a heading.
+  sanitizeCaptureDom(documentClone);
 
   const reader = new Readability(documentClone, {
     keepClasses: true,
