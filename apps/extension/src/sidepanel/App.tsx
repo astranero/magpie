@@ -265,7 +265,7 @@ const [enterpriseGitHubUrl, setEnterpriseGitHubUrl] = useState('');
   // Chat questions queued behind an active research run (per chat), drained in
   // order when the run finishes. A ref so the once-registered DONE listener
   // always calls the freshest drain closure.
-  const queuedRef = useRef<Record<string, Array<{ id: string; text: string; forcePageContext: boolean; projectId: string }>>>({});
+  const queuedRef = useRef<Record<string, Array<{ id: string; text: string; forcePageContext: boolean; projectId: string; imageDataUrl?: string; allowImageOutput?: boolean }>>>({});
   const drainQueueRef = useRef<(projectId: string) => void>(() => {});
 
 
@@ -2000,6 +2000,13 @@ loadChatHistory(activeChatId).then(() => {
     const currentProjectId = activeProjectId;
     setInput('');
 
+    // Consume the pending image + image-output preference for THIS send (queued
+    // or not) so an attachment isn't dropped when the send is deferred behind a
+    // research run.
+    const imageDataUrl = pendingImageRef.current || undefined;
+    const allowImageOutput = imageOutputRef.current;
+    if (imageDataUrl) setPendingImage(null);
+
     // Real queue: while research runs on this project, a chat question waits
     // behind it instead of racing it. Show the message now with a "Queued"
     // badge; drainQueue runs it (and any others, in order) once research ends.
@@ -2010,18 +2017,15 @@ loadChatHistory(activeChatId).then(() => {
         [currentChatId]: [...(prev[currentChatId] || []), {
           id: queuedId, role: 'user' as const,
           text: forcePageContext ? `[📄 Current Page] ${messageText}` : messageText,
-          queued: true
+          queued: true,
+          ...(imageDataUrl ? { images: [imageDataUrl] } : {}),
         }]
       }));
-      (queuedRef.current[currentChatId] ||= []).push({ id: queuedId, text: messageText, forcePageContext, projectId: currentProjectId });
+      (queuedRef.current[currentChatId] ||= []).push({ id: queuedId, text: messageText, forcePageContext, projectId: currentProjectId, imageDataUrl, allowImageOutput });
       return;
     }
 
     maybeAutoNameProject(messageText).catch(() => {});
-    // Consume the pending image and image-output preference for this send only.
-    const imageDataUrl = pendingImageRef.current || undefined;
-    const allowImageOutput = imageOutputRef.current;
-    if (imageDataUrl) setPendingImage(null);
     await runChatStream(currentChatId, currentProjectId, messageText, forcePageContext, undefined, { imageDataUrl, allowImageOutput });
   };
 
@@ -2223,12 +2227,33 @@ loadChatHistory(activeChatId).then(() => {
       for (const it of mine) {
         // Sequential — each waits for the prior stream to finish (and the
         // offscreen mutex keeps embeds from colliding regardless).
-        await runChatStream(chatId, projectId, it.text, it.forcePageContext, it.id).catch(() => {});
+        await runChatStream(chatId, projectId, it.text, it.forcePageContext, it.id,
+          { imageDataUrl: it.imageDataUrl, allowImageOutput: it.allowImageOutput }).catch(() => {});
       }
     }
   };
   // Latest drainQueue for the once-registered DONE listener to call.
   drainQueueRef.current = drainQueue;
+
+  /**
+   * Pull a still-queued message back out — remove it from the queue and the
+   * transcript, and drop its text back into the input so the user can edit or
+   * discard it. The only escape from a queue that otherwise runs on its own
+   * when research finishes.
+   */
+  const unqueueMessage = (msgId: string) => {
+    const chatId = activeChatId;
+    const item = (queuedRef.current[chatId] || []).find(it => it.id === msgId);
+    queuedRef.current[chatId] = (queuedRef.current[chatId] || []).filter(it => it.id !== msgId);
+    setMessages(prev => ({
+      ...prev,
+      [chatId]: (prev[chatId] || []).filter(m => m.id !== msgId),
+    }));
+    if (item) {
+      setInput(item.text);
+      if (item.imageDataUrl) setPendingImage(item.imageDataUrl);
+    }
+  };
 
   const clearChat = async () => {
     if (!activeChatId) return;
@@ -2554,6 +2579,7 @@ loadChatHistory(activeChatId).then(() => {
               onEditAndRerun={editAndRerun}
               onOpenSettings={() => setView('settings')}
               onRetryLast={retryLast}
+              onUnqueue={unqueueMessage}
               pendingImage={pendingImage}
               onAttachImage={async (file) => {
                 try { setPendingImage(await downscaleImage(file)); }

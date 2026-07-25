@@ -50,6 +50,8 @@ interface ChatViewProps {
   onOpenSettings?: () => void;
   /** Re-run the last question — the recovery action for a transient failure. */
   onRetryLast?: () => void;
+  /** Pull a queued message back out of the queue and into the input. */
+  onUnqueue?: (msgId: string) => void;
   /** The image attached to the next send (downscaled data URL), or null. */
   pendingImage?: string | null;
   /** User picked an image file to attach. */
@@ -1148,6 +1150,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
   onEditAndRerun,
   onOpenSettings,
   onRetryLast,
+  onUnqueue,
   pendingImage,
   onAttachImage,
   onClearImage,
@@ -1433,9 +1436,20 @@ export const ChatView: React.FC<ChatViewProps> = ({
             </div>
 
             {m.queued && (
-              <span className="mb-1 inline-flex items-center gap-1 rounded-full bg-highlight/15 text-amber-700 dark:text-highlight px-2 py-0.5 text-[10px] font-medium">
+              <span className="mb-1 inline-flex items-center gap-1 rounded-full bg-highlight/15 text-amber-700 dark:text-highlight pl-2 pr-1 py-0.5 text-[10px] font-medium">
                 <span className="w-1.5 h-1.5 rounded-full bg-current animate-pulse motion-reduce:animate-none" aria-hidden="true" />
                 Queued — runs after research
+                {onUnqueue && (
+                  <button
+                    type="button"
+                    onClick={() => onUnqueue(m.id)}
+                    className="ml-0.5 rounded-full p-0.5 hover:bg-amber-700/15 dark:hover:bg-highlight/20"
+                    aria-label="Remove from queue and return to input"
+                    title="Take it back — returns the text to the input"
+                  >
+                    <XCircle size={12} />
+                  </button>
+                )}
               </span>
             )}
 
