@@ -444,11 +444,11 @@ export const LoreView: React.FC<LoreViewProps> = ({
       {authed && documents.length > 0 && (
         <div className="border-t border-border bg-card shrink-0">
           <div className="flex items-center justify-between p-3">
-            <Button variant="ghost" size="sm" className="h-8 text-xs text-muted-foreground" onClick={syncToDrive} disabled={syncing}>
+            <Button variant="ghost" size="sm" className="h-8 text-xs text-muted-foreground" onClick={syncToDrive} disabled={syncing || importing}>
               {syncing ? 'Syncing...' : <><Cloud size={14} className="mr-1.5" /> Sync to Drive</>}
             </Button>
-            <Button variant="ghost" size="sm" className="h-8 text-xs text-muted-foreground" onClick={importFromDrive} disabled={syncing}>
-              <CloudDownload size={14} className="mr-1.5" /> Import from Drive
+            <Button variant="ghost" size="sm" className="h-8 text-xs text-muted-foreground" onClick={importFromDrive} disabled={syncing || importing}>
+              {importing ? 'Importing…' : <><CloudDownload size={14} className="mr-1.5" /> Import from Drive</>}
             </Button>
           </div>
           {/* Which document, out of how many. Uploading 55 files ran for a

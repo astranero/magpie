@@ -1564,50 +1564,59 @@ loadChatHistory(activeChatId).then(() => {
   const syncToDrive = async () => {
     setSyncing(true);
     setSyncStatus('Uploading to Drive…');
-    const res = await msg('SYNC_TO_DRIVE', { interactive: true });
-    setSyncing(false);
-    setSyncStatus('');
-    if (res.success) {
-      const n = Number(res.synced) || 0;
-      showToast(n > 0 ? 'success' : 'info',
-        n > 0 ? `✓ Synced ${n}/${res.total} documents to Drive`
-              : 'Nothing to sync — every document is already up to date in Drive.');
-      loadDocuments(activeProjectId);
-    } else {
-      showToast('error', (res.error as string) || 'Sync failed — sign in to Google in Settings');
+    try {
+      const res = await msg('SYNC_TO_DRIVE', { interactive: true });
+      if (res.success) {
+        const n = Number(res.synced) || 0;
+        showToast(n > 0 ? 'success' : 'info',
+          n > 0 ? `✓ Synced ${n}/${res.total} documents to Drive`
+                : 'Nothing to sync — every document is already up to date in Drive.');
+        loadDocuments(activeProjectId);
+      } else {
+        showToast('error', (res.error as string) || 'Sync failed — sign in to Google in Settings');
+      }
+    } catch (e: any) {
+      showToast('error', e?.message || 'Sync failed');
+    } finally {
+      setSyncing(false);
+      setSyncStatus('');
     }
   };
 
   const forceResync = async () => {
     setSyncing(true);
-    // Clear cached folder ID so ensureFolder re-checks/creates the folder
-    // (fixes the case where the cached ID points at a trashed/deleted folder)
-    if (typeof chrome !== 'undefined' && chrome.storage) {
-      await chrome.storage.local.remove('driveFolderId');
-    }
-    const resetRes = await msg('RESET_SYNC_STATUS');
-    if (!resetRes.success) {
+    try {
+      // Clear cached folder ID so ensureFolder re-checks/creates the folder
+      // (fixes the case where the cached ID points at a trashed/deleted folder)
+      if (typeof chrome !== 'undefined' && chrome.storage) {
+        await chrome.storage.local.remove('driveFolderId');
+      }
+      const resetRes = await msg('RESET_SYNC_STATUS');
+      if (!resetRes.success) {
+        showToast('error', (resetRes.error as string) || 'Reset failed');
+        return;
+      }
+      // resetCount is what makes "force" meaningful: it is how many documents
+      // were marked unsynced and will therefore be re-uploaded. Reporting it up
+      // front is the difference between "nothing happened" and "re-uploading 55".
+      const queued = Number(resetRes.resetCount) || 0;
+      setSyncStatus(queued > 0 ? `Re-uploading ${queued} document${queued === 1 ? '' : 's'}…` : 'Checking Drive…');
+      const res = await msg('SYNC_TO_DRIVE', { interactive: true });
+      if (res.success) {
+        const n = Number(res.synced) || 0;
+        // "✓ Resynced 0/0" read as success while looking like nothing happened.
+        showToast(n > 0 ? 'success' : 'info',
+          n > 0 ? `✓ Resynced ${n}/${res.total} documents to Drive`
+                : 'Nothing to sync — every document is already up to date in Drive.');
+        loadDocuments(activeProjectId);
+      } else {
+        showToast('error', (res.error as string) || 'Sync failed');
+      }
+    } catch (e: any) {
+      showToast('error', e?.message || 'Resync failed');
+    } finally {
       setSyncing(false);
-      showToast('error', (resetRes.error as string) || 'Reset failed');
-      return;
-    }
-    // resetCount is what makes "force" meaningful: it is how many documents
-    // were marked unsynced and will therefore be re-uploaded. Reporting it up
-    // front is the difference between "nothing happened" and "re-uploading 55".
-    const queued = Number(resetRes.resetCount) || 0;
-    setSyncStatus(queued > 0 ? `Re-uploading ${queued} document${queued === 1 ? '' : 's'}…` : 'Checking Drive…');
-    const res = await msg('SYNC_TO_DRIVE', { interactive: true });
-    setSyncing(false);
-    setSyncStatus('');
-    if (res.success) {
-      const n = Number(res.synced) || 0;
-      // "✓ Resynced 0/0" read as success while looking like nothing happened.
-      showToast(n > 0 ? 'success' : 'info',
-        n > 0 ? `✓ Resynced ${n}/${res.total} documents to Drive`
-              : 'Nothing to sync — every document is already up to date in Drive.');
-      loadDocuments(activeProjectId);
-    } else {
-      showToast('error', (res.error as string) || 'Sync failed');
+      setSyncStatus('');
     }
   };
 
@@ -1624,40 +1633,51 @@ loadChatHistory(activeChatId).then(() => {
     // "projectId is required for importing" — the id was in scope the whole
     // time, two lines below in loadDocuments.
     if (!activeProjectId) { showToast('error', 'Select a workspace first — imported documents are linked to one.'); return; }
-    setSyncing(true);
+    setImporting(true);
     setSyncStatus('Reading your Drive folder…');
-    const res = await msg('LIST_DRIVE_FILES', { projectId: activeProjectId });
-    setSyncing(false);
-    setSyncStatus('');
-    if (!res.success) {
-      showToast('error', (res.error as string) || 'Could not read Drive — sign in to Google in Settings');
-      return;
+    try {
+      const res = await msg('LIST_DRIVE_FILES', { projectId: activeProjectId });
+      if (!res.success) {
+        showToast('error', (res.error as string) || 'Could not read Drive — sign in to Google in Settings');
+        return;
+      }
+      const files = ((res.files as DriveFile[]) || []).filter(f => /\.md$/i.test(f.name || ''));
+      if (files.length === 0) {
+        showToast('info', 'No Markdown files found in this workspace’s Drive folder.');
+        return;
+      }
+      setDriveFiles(files);
+    } catch (e: any) {
+      showToast('error', e?.message || 'Could not read Drive.');
+    } finally {
+      // ALWAYS release — a throw here used to freeze the Lore status and lock Sync.
+      setImporting(false);
+      setSyncStatus('');
     }
-    const files = ((res.files as DriveFile[]) || []).filter(f => /\.md$/i.test(f.name || ''));
-    if (files.length === 0) {
-      showToast('info', 'No Markdown files found in your Drive folder.');
-      return;
-    }
-    setDriveFiles(files);
   };
 
   /** Step 2: import exactly what was ticked. */
   const runDriveImport = async (fileIds: string[]) => {
     setDriveFiles(null);
     if (!activeProjectId) return;
-    setSyncing(true);
+    setImporting(true);
     setSyncStatus(`Importing 0/${fileIds.length} from Drive…`);
-    const res = await msg('IMPORT_FROM_DRIVE', { projectId: activeProjectId, fileIds });
-    setSyncing(false);
-    setSyncStatus('');
-    if (res.success) {
-      const n = Number(res.imported) || 0;
-      showToast(n > 0 ? 'success' : 'info',
-        n > 0 ? `✓ Imported ${n} document${n === 1 ? '' : 's'} from Drive`
-              : 'Nothing new to import — Drive matches your library.');
-      if (n > 0) loadDocuments(activeProjectId);
-    } else {
-      showToast('error', (res.error as string) || 'Import failed');
+    try {
+      const res = await msg('IMPORT_FROM_DRIVE', { projectId: activeProjectId, fileIds });
+      if (res.success) {
+        const n = Number(res.imported) || 0;
+        showToast(n > 0 ? 'success' : 'info',
+          n > 0 ? `✓ Imported ${n} document${n === 1 ? '' : 's'} from Drive`
+                : 'Nothing new to import — Drive matches your library.');
+        if (n > 0) loadDocuments(activeProjectId);
+      } else {
+        showToast('error', (res.error as string) || 'Import failed');
+      }
+    } catch (e: any) {
+      showToast('error', e?.message || 'Import failed');
+    } finally {
+      setImporting(false);
+      setSyncStatus('');
     }
   };
 

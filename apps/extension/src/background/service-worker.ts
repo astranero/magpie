@@ -4342,14 +4342,17 @@ async function listProjectMarkdown(
   token: string, rootId: string, subfolderId: string | null,
 ): Promise<Array<{ id: string; name: string; createdTime: string; alreadyImported?: boolean }>> {
   const out: Array<{ id: string; name: string; createdTime: string }> = [];
-  // Root: this level only — do NOT descend into sibling project folders.
-  const rootTree = await listDriveTree(token, rootId, () => false);
-  for (const f of rootTree) if (f.name?.endsWith('.md')) out.push({ id: f.id, name: f.name, createdTime: f.createdTime });
-  // The project's own subfolder: everything under it.
-  if (subfolderId) {
-    const subTree = await listDriveTree(token, subfolderId);
-    for (const f of subTree) if (f.name?.endsWith('.md')) out.push({ id: f.id, name: f.name, createdTime: f.createdTime });
-  }
+  // A named project has its OWN subfolder — show ONLY that, so import scopes to
+  // this workspace instead of dumping the whole Drive folder. Root-level files
+  // belong to the Default Session / no project, so they only show when THIS
+  // project has no subfolder (i.e. it is the Default Session). This is the fix
+  // for "import still shows all the data".
+  const scanId = subfolderId ?? rootId;
+  // onFolder → false: this level only, never descend into sibling project
+  // folders (so a named project never pulls in another project's files, and
+  // the Default Session never pulls in the subfolders).
+  const tree = await listDriveTree(token, scanId, () => false);
+  for (const f of tree) if (f.name?.endsWith('.md')) out.push({ id: f.id, name: f.name, createdTime: f.createdTime });
   return out;
 }
 
