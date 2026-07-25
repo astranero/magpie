@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   assessCoverage, looksLikeChallengePage, approxPageText,
-  MIN_COVERAGE, MIN_PAGE_CHARS,
+  MIN_COVERAGE, MIN_PAGE_CHARS, demoteRunawayHeadings,
 } from '../extraction-quality';
 
 // No heuristic extractor works on every site. What this buys is that a bad
@@ -88,5 +88,39 @@ describe('approxPageText', () => {
 
   it('collapses entities and whitespace', () => {
     expect(approxPageText('<p>a&nbsp;&amp;   b</p>')).toBe('a b');
+  });
+});
+
+describe('demoteRunawayHeadings', () => {
+  it('keeps a short, real heading', () => {
+    expect(demoteRunawayHeadings('## Key findings')).toBe('## Key findings');
+    expect(demoteRunawayHeadings('# Introduction')).toBe('# Introduction');
+  });
+
+  it('demotes a paragraph that was captured as one giant heading', () => {
+    const para = '# ' + 'What can fix this? The fetch agent produced a real grounded summary of the actual discussions and it is now visible in the results file for everyone to read.';
+    const out = demoteRunawayHeadings(para);
+    expect(out.startsWith('#')).toBe(false);
+    expect(out).toContain('What can fix this?');
+  });
+
+  it('demotes a multi-sentence heading even when not very long', () => {
+    // "hf-notifications: X happened. Y also happened." — two sentences.
+    const out = demoteRunawayHeadings('### hf-notifications: the fetch worked. The file did not exist.');
+    expect(out.startsWith('#')).toBe(false);
+    expect(out).toContain('hf-notifications');
+  });
+
+  it('leaves a heading with a trailing question mark alone if it is short', () => {
+    expect(demoteRunawayHeadings('## What now?')).toBe('## What now?');
+  });
+
+  it('only touches heading lines, not body prose', () => {
+    const md = '## Real heading\n\nA normal paragraph that is quite long but is not a heading at all, so it must survive verbatim without any change whatsoever here.';
+    expect(demoteRunawayHeadings(md)).toBe(md);
+  });
+
+  it('is empty-safe', () => {
+    expect(demoteRunawayHeadings('')).toBe('');
   });
 });

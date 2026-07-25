@@ -2,7 +2,7 @@ import { Readability } from '@mozilla/readability';
 import TurndownService from 'turndown';
 import { extractMailboxList } from './mailbox';
 import { salvageSpecs, readJsonLdBlocks } from '../lib/spec-salvage';
-import { assessCoverage } from '../lib/extraction-quality';
+import { assessCoverage, demoteRunawayHeadings } from '../lib/extraction-quality';
 
 // ─────────────────────────────────────────────
 // Enhanced Content Script — AI Research Assistant
@@ -627,6 +627,9 @@ async function scrapePage(): Promise<{
 
   // Clean up excessive newlines
   markdown = markdown.replace(/\n{4,}/g, '\n\n\n').trim();
+  // A paragraph a site wrapped in a heading tag arrives as one giant `#` line;
+  // demote it back to prose so the capture doesn't read as a wall of headers.
+  markdown = demoteRunawayHeadings(markdown);
 
   // Did we actually get the page, or a sliver of it? Readability is a scoring
   // algorithm and some layout will always score wrong; the guarantee worth

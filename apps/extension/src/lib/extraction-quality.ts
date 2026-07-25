@@ -105,3 +105,27 @@ export function approxPageText(html: string): string {
     .replace(/\s+/g, ' ')
     .trim();
 }
+
+/**
+ * Demote runaway headings — a paragraph that got captured as a heading.
+ *
+ * Turndown maps <h1>–<h6> to `# …` faithfully, but some sites (chat UIs,
+ * app shells) wrap a whole sentence or paragraph in a heading tag, so a
+ * 400-character block arrives as one giant `#` line. A real heading is short
+ * and rarely reads as a full sentence; this converts an over-long or clearly
+ * sentence-shaped heading back into plain text. Pure and conservative — a
+ * genuinely short heading is never touched.
+ */
+export function demoteRunawayHeadings(markdown: string, maxLen = 100): string {
+  return (markdown || '').split('\n').map(line => {
+    const m = /^(#{1,6})\s+(.*\S)\s*$/.exec(line);
+    if (!m) return line;
+    const text = m[2];
+    // A heading is a label, not prose. Demote when it is long, OR when it runs
+    // to multiple sentences (a period/!/? mid-line followed by more words) —
+    // both are the signature of a paragraph mis-tagged as a heading.
+    const tooLong = text.length > maxLen;
+    const multiSentence = /[.!?]\s+\S/.test(text) && text.length > 40;
+    return (tooLong || multiSentence) ? text : line;
+  }).join('\n');
+}
