@@ -2,6 +2,7 @@ import React from 'react';
 import { Edit2, Trash2, PanelRightClose } from 'lucide-react';
 import { Select, SelectContent, SelectItem, SelectSeparator, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Project, View } from '../../types';
+import { isImeComposing } from '../../../lib/ime';
 
 interface HeaderProps {
   view: View;
@@ -39,7 +40,11 @@ export const Header: React.FC<HeaderProps> = ({
           className="flex h-8 w-full rounded-lg border border-primary/50 bg-background px-2.5 text-sm font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/15"
           defaultValue={projects.find(p => p.id === activeProjectId)?.title || ''}
           onBlur={(e) => handleProjectRenameSubmit(e.target.value)}
+          dir="auto"
           onKeyDown={(e) => {
+            // Enter while an IME is composing confirms a candidate, not the
+            // rename — submitting there saves a half-typed workspace name.
+            if (isImeComposing(e)) return;
             if (e.key === 'Enter') handleProjectRenameSubmit(e.currentTarget.value);
             if (e.key === 'Escape') setEditingProjectId('');
           }}

@@ -49,7 +49,7 @@ reranking, and the whole library run locally.
 | **Ask** | Answers grounded in what you actually saved |
 | **Research** | Multi-stage agents: web, academic and news, cross-checked |
 | **Trace** | Every citation is a link back to the source paragraph |
-| **Sync** | Optional Google Drive backup of your workspaces |
+| **Sync** | Optional two-way Google Drive sync — one subfolder per workspace, restores everything back after a reinstall |
 
 ## Quick start
 
@@ -91,8 +91,9 @@ Then load it:
 | `/academic <topic>` | Papers only (Semantic Scholar, arXiv, CrossRef, HuggingFace) |
 | `/recall <topic>` | Search your captured library |
 | `/page <question>` | Ask about the current browser tab |
-| `/grill <topic>` | Stress-test a plan — one question at a time |
-| `/teach <topic>` | Learn a topic across sessions, tracked in this workspace |
+| `/grill <topic>` | Stress-test a plan — one question at a time; closes with Decisions / Open gaps / Next steps |
+| `/teach [topic]` | Build a course from this workspace's research and step through numbered lessons, each with an interactive quiz; `/teach reset` rebuilds it |
+| `/flashcard [topic]` | Build a smart study deck from this workspace and play it in a full-panel card player |
 | `/create-skill <instruction>` | Turn findings into a reusable command |
 | `/clear` | Reset chat |
 
@@ -133,6 +134,7 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for the full breakdown.
 | [docs/CITATIONS.md](docs/CITATIONS.md) | Anchor grammar |
 | [docs/MCP.md](docs/MCP.md) | MCP server config |
 | [docs/TESTING.md](docs/TESTING.md) | Test suite |
+| [CHANGELOG.md](CHANGELOG.md) | What changed, newest first |
 
 ## Contributing
 

@@ -13,12 +13,14 @@ const entry = process.env.CONTENT_ENTRY || 'content';
 
 const entries: Record<string, { input: string; fileName: string }> = {
   content: { input: 'src/content/content.ts', fileName: 'content.js' },
-  inject: { input: 'src/content/inject.ts', fileName: 'inject.js' }
+  inject: { input: 'src/content/inject.ts', fileName: 'inject.js' },
+  'net-observer': { input: 'src/content/net-observer.ts', fileName: 'net-observer.js' }
 };
 
 const target = entries[entry];
 
 export default defineConfig({
+  define: { __BUILD_STAMP__: JSON.stringify(new Date().toISOString()) },
   resolve: {
     alias: {
       "@": resolve(__dirname, "./src"),

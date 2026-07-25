@@ -4,12 +4,19 @@ import ReactMarkdown, { defaultUrlTransform } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import remarkMath from 'remark-math';
 import rehypeKatex from 'rehype-katex';
-import { LocalDocument, ChatMessage, ResearchPlan, ResolvedCitation } from '../types';
-import { Send, StopCircle, Sparkles, ChevronDown, ChevronUp, Loader2, Microscope, Search, BookOpen, User, Copy, Check, Paperclip, FileText } from 'lucide-react';
+import { LocalDocument, ChatMessage, ResearchPlan, ResolvedCitation, QuizQuestion } from '../types';
+import { Send, StopCircle, Sparkles, ChevronDown, ChevronUp, Loader2, Microscope, Search, BookOpen, User, Copy, Check, Paperclip, FileText, RotateCcw, Pencil, Globe, Newspaper, Plug, PenLine, ShieldCheck, CheckCircle2, XCircle, Image as ImageIcon } from 'lucide-react';
+import { parseResearchActivity, PHASE_ORDER, PHASE_LABEL, type ResearchPhase } from '../../lib/research-activity';
+import { diagnoseError } from '../../lib/error-recovery';
+import { continueList } from '../../lib/list-continue';
+import type { LucideIcon } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { paletteEntries, SlashCommand } from '../../lib/commands';
 import { ErrorBoundary } from './ErrorBoundary';
 import { shouldRestoreScroll } from '../../lib/scroll-restore';
+import { reasoningTail } from '../../lib/reasoning-stream';
+import { FlyingMagpie } from './FlyingMagpie';
+import { isImeComposing } from '../../lib/ime';
 import { stripInvisibleMathOps } from '../../lib/unicode-text';
 import { MagpieEmptyIllustration } from './BrandMark';
 import { ModelSelect } from './ModelSelect';
@@ -28,6 +35,41 @@ interface ChatViewProps {
   generating: Record<string, boolean>;
   /** Live phase line for the thinking indicator ("Reading the page…"). */
   thinkingStatus?: Record<string, string>;
+  /** Live chain of thought from a reasoning model, per chat. Never persisted. */
+  reasoning?: Record<string, string>;
+  /** Suggested next questions for the last answer, per chat. Never persisted. */
+  followUps?: Record<string, string[]>;
+  /** Where answers may come from; 'auto' lets the router decide. */
+  sourceMode?: 'auto' | 'sources' | 'web' | 'general';
+  onSourceModeChange?: (m: 'auto' | 'sources' | 'web' | 'general') => void;
+  /** Ask the same question again, replacing this answer. */
+  onRegenerate?: (assistantMsgId: string) => void;
+  /** Replace an earlier question and re-run from it; later turns are discarded. */
+  onEditAndRerun?: (userMsgId: string, newText: string) => void;
+  /** Undo a send that's mid-generation: cancel, remove it from chat, and put
+   *  its text + image back in the input. */
+  onCancelAndEdit?: (userMsgId: string) => void;
+  /** Grade a learner's open quiz answer (LLM). Resolves to a verdict + feedback. */
+  onGradeAnswer?: (q: QuizQuestion, answer: string) => Promise<{ verdict: 'correct' | 'partial' | 'incorrect'; feedback: string }>;
+  /** Open a flashcard deck in the full-panel player. */
+  onOpenDeck?: (title: string, cards: import('../types').Flashcard[]) => void;
+  /** Run a slash command from an in-message action button (e.g. "Continue"). */
+  onRunCommand?: (command: string) => void;
+  /** Open the settings/config view — the recovery action for auth/config errors. */
+  onOpenSettings?: () => void;
+  /** Re-run the last question — the recovery action for a transient failure. */
+  onRetryLast?: () => void;
+  /** Pull a queued message back out of the queue and into the input. */
+  onUnqueue?: (msgId: string) => void;
+  /** The image attached to the next send (downscaled data URL), or null. */
+  pendingImage?: string | null;
+  /** User picked an image file to attach. */
+  onAttachImage?: (file: File) => void;
+  /** Remove the pending attachment. */
+  onClearImage?: () => void;
+  /** Whether the model may return images this turn. */
+  imageOutput?: boolean;
+  onImageOutputChange?: (v: boolean) => void;
   researching: Record<string, boolean>;
   researchLogs: Record<string, string[]>;
   documents: LocalDocument[];
@@ -77,6 +119,190 @@ interface PlanCardProps {
   onStart?: (msgId: string, plan: ResearchPlan) => void;
   onCancel?: (msgId: string) => void;
 }
+
+// ─────────────────────────────────────────────
+// Field log — the live research view
+// ─────────────────────────────────────────────
+// A deep run takes minutes and used to show three raw log lines
+// ("[WEB] Reading 3/8: https://…"). This reads the same log through
+// parseResearchActivity and shows where the run actually is: the four phases
+// with the active one lit, a source tally, the batch progress bar, and the
+// newest human line. The raw log is one click away for anyone who wants it.
+
+const PHASE_ICON: Record<string, LucideIcon> = {
+  WEB: Globe, ACADEMIC: BookOpen, NEWS: Newspaper, MCP: Plug,
+  SYNTHESIZING: PenLine, REFS: PenLine,
+  EVALUATING: ShieldCheck, FAITHFULNESS: ShieldCheck, FIGURES: ShieldCheck, AUDIT: ShieldCheck,
+  PLANNING: Sparkles,
+};
+
+const FieldLog: React.FC<{ log: string[]; onStop: () => void }> = ({ log, onStop }) => {
+  const [showRaw, setShowRaw] = useState(false);
+  const act = useMemo(() => parseResearchActivity(log), [log]);
+  const LabelIcon = PHASE_ICON[act.latestLabel] || Loader2;
+  const activeIdx = PHASE_ORDER.indexOf(act.phase as ResearchPhase);
+
+  // The raw log is oldest-first; the line you open it to see is the newest, at
+  // the bottom. Pin to the bottom on open and on every new line so the latest
+  // state shows without scrolling.
+  const rawRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (showRaw && rawRef.current) rawRef.current.scrollTop = rawRef.current.scrollHeight;
+  }, [showRaw, log.length]);
+
+  return (
+    <div className="w-full max-w-[95%] rounded-xl ink-panel shadow-card overflow-hidden animate-in fade-in motion-reduce:animate-none">
+      <div className="flex items-center gap-2 px-3.5 py-2 border-b border-white/10">
+        {/* The magpie flaps here while research runs — the "flying magpie while
+            researching". Inked light for the dark panel by the ink-panel rules. */}
+        <FlyingMagpie size={20} className="shrink-0" />
+        <span className="text-xs font-medium opacity-80 flex-1">Field log — chat stays open</span>
+        <button
+          type="button"
+          onClick={onStop}
+          className="text-[11px] font-medium opacity-70 border border-current rounded-md px-1.5 py-0.5 hover:opacity-100 hover:text-red-300 transition-opacity"
+          aria-label="Stop research"
+        >
+          Stop
+        </button>
+      </div>
+
+      <div className="px-3.5 py-3 space-y-3">
+        {/* Phase rail: the four stops, the reached ones lit. */}
+        <ol className="flex items-center gap-1" aria-label="Research progress">
+          {PHASE_ORDER.map((p, i) => {
+            const done = i < activeIdx;
+            const active = i === activeIdx;
+            return (
+              <React.Fragment key={p}>
+                {i > 0 && <span className={`h-px flex-1 ${i <= activeIdx ? 'bg-highlight/60' : 'bg-white/15'}`} aria-hidden="true" />}
+                <span
+                  className={`text-[10px] font-medium px-1.5 py-0.5 rounded-full whitespace-nowrap transition-colors ${
+                    active ? 'bg-highlight/20 text-highlight' :
+                    done ? 'text-white/70' : 'text-white/35'
+                  }`}
+                  aria-current={active ? 'step' : undefined}
+                >
+                  {PHASE_LABEL[p]}
+                </span>
+              </React.Fragment>
+            );
+          })}
+        </ol>
+
+        {/* Source tally: only once anything has been captured or missed. */}
+        {(act.captured > 0 || act.failed > 0) && (
+          <div className="flex items-center gap-3 text-[11px] font-mono">
+            <span className="flex items-center gap-1 text-emerald-300">
+              <CheckCircle2 size={11} aria-hidden="true" /> {act.captured} captured
+            </span>
+            {act.failed > 0 && (
+              <span className="flex items-center gap-1 opacity-45">
+                <XCircle size={11} aria-hidden="true" /> {act.failed} skipped
+              </span>
+            )}
+          </div>
+        )}
+
+        {/* The batch being read right now, as a bar. */}
+        {act.reading && act.reading.total > 0 && (
+          <div className="space-y-1">
+            <div className="flex justify-between text-[10px] font-mono opacity-60">
+              <span>Reading sources</span>
+              <span className="tabular-nums">{act.reading.done}/{act.reading.total}</span>
+            </div>
+            <div className="h-1 rounded-full bg-white/10 overflow-hidden">
+              <div
+                className="h-full bg-highlight transition-all duration-500"
+                style={{ width: `${Math.min(100, (act.reading.done / act.reading.total) * 100)}%` }}
+              />
+            </div>
+          </div>
+        )}
+
+        {/* The newest line, with an icon for its phase. */}
+        <div className="flex items-start gap-2" aria-live="polite">
+          <LabelIcon size={12} className={`mt-0.5 shrink-0 ${LabelIcon === Loader2 ? 'animate-spin motion-reduce:animate-none' : ''} text-highlight/80`} aria-hidden="true" />
+          <span className="text-[11px] leading-relaxed text-white/80 break-words">
+            {act.latest || 'Warming up…'}
+          </span>
+        </div>
+
+        {/* Raw log, folded away. */}
+        {log.length > 0 && (
+          <div className="border-t border-white/10 pt-2">
+            <button
+              type="button"
+              onClick={() => setShowRaw(v => !v)}
+              className="flex items-center gap-1 text-[10px] font-mono uppercase tracking-wider opacity-50 hover:opacity-90 transition-opacity"
+              aria-expanded={showRaw}
+            >
+              {showRaw ? <ChevronUp size={10} /> : <ChevronDown size={10} />}
+              {log.length} steps
+            </button>
+            {showRaw && (
+              <div ref={rawRef} className="mt-1.5 max-h-40 overflow-y-auto no-scrollbar space-y-0.5">
+                {log.map((line, i) => (
+                  <div key={i} className="text-[10px] font-mono leading-relaxed opacity-45 break-words">{line}</div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+};
+
+// ─────────────────────────────────────────────
+// A failed turn, with a way out
+// ─────────────────────────────────────────────
+// diagnoseError turns the raw error string into a named cause and one
+// recovery. A 401 offers "Fix the key" → Settings; a timeout offers "Retry".
+// The raw detail is folded away, present but not shouting.
+
+const ErrorRecovery: React.FC<{ raw: string; onSettings?: () => void; onRetry?: () => void }> = ({ raw, onSettings, onRetry }) => {
+  const [showDetail, setShowDetail] = useState(false);
+  const d = diagnoseError(raw);
+  const act =
+    d.action === 'settings' ? { run: onSettings, label: d.actionLabel } :
+    d.action === 'retry' ? { run: onRetry, label: d.actionLabel } :
+    { run: undefined, label: null };
+
+  return (
+    <div className="w-full rounded-lg border border-red-500/30 bg-red-500/5 px-3 py-2.5 space-y-2">
+      <div className="flex items-start gap-2">
+        <XCircle size={14} className="mt-0.5 shrink-0 text-red-600 dark:text-red-400" aria-hidden="true" />
+        <span className="text-xs text-foreground/90 leading-snug">{d.title}</span>
+      </div>
+      <div className="flex items-center gap-2 flex-wrap">
+        {act.run && act.label && (
+          <Button size="sm" className="h-7 text-xs rounded-md" onClick={act.run}>{act.label}</Button>
+        )}
+        {/* Retry is always offered as a secondary, since even a config error
+            can be transient once the config is fixed elsewhere. */}
+        {d.action !== 'retry' && onRetry && (
+          <Button size="sm" variant="ghost" className="h-7 text-xs rounded-md text-muted-foreground" onClick={onRetry}>Retry</Button>
+        )}
+        {d.detail && d.detail !== d.title && (
+          <button
+            type="button"
+            onClick={() => setShowDetail(v => !v)}
+            className="ml-auto text-[10px] font-mono uppercase tracking-wider text-muted-foreground/70 hover:text-muted-foreground"
+            aria-expanded={showDetail}
+          >
+            {showDetail ? 'Hide' : 'Details'}
+          </button>
+        )}
+      </div>
+      {showDetail && d.detail && (
+        <div className="text-[10px] font-mono text-muted-foreground/80 leading-relaxed break-words border-t border-red-500/20 pt-2">
+          {d.detail}
+        </div>
+      )}
+    </div>
+  );
+};
 
 const PlanCard: React.FC<PlanCardProps> = ({ msgId, plan, onStart, onCancel }) => {
   const isAcademic = plan.sourceMode === 'academic';
@@ -225,13 +451,16 @@ const COLLAPSE_WORD_THRESHOLD = 150;
 interface CollapsibleMessageProps {
   text: string;
   streaming?: boolean;
+  /** Render open by default (still collapsible) — used for /teach lessons, which
+   *  are meant to be read in full, not clamped behind a "show more". */
+  defaultExpanded?: boolean;
   children: React.ReactNode;
 }
 
-const CollapsibleMessage: React.FC<CollapsibleMessageProps> = ({ text, streaming, children }) => {
+const CollapsibleMessage: React.FC<CollapsibleMessageProps> = ({ text, streaming, defaultExpanded, children }) => {
   const wordCount = useMemo(() => text.split(/\s+/).filter(Boolean).length, [text]);
   const isLong = wordCount > COLLAPSE_WORD_THRESHOLD;
-  const [expanded, setExpanded] = useState(false);
+  const [expanded, setExpanded] = useState(!!defaultExpanded);
 
   if (!isLong || streaming) return <>{children}</>;
 
@@ -414,7 +643,7 @@ const MessageBody: React.FC<MessageBodyProps> = React.memo(({ text: rawText, com
     return (
       <div>
         {/* aria-live=off: the growing token stream must NOT be announced live. */}
-        <div aria-live="off" className={`whitespace-pre-wrap break-words font-sans ${compact ? 'text-xs' : 'text-sm'} text-foreground`}>
+        <div dir="auto" aria-live="off" className={`whitespace-pre-wrap break-words font-sans ${compact ? 'text-xs' : 'text-sm'} text-foreground`}>
           {rawText}
           <span className="inline-block w-2 h-4 ml-0.5 align-middle bg-primary/60 animate-pulse motion-reduce:animate-none" aria-hidden="true" />
         </div>
@@ -433,7 +662,7 @@ const MessageBody: React.FC<MessageBodyProps> = React.memo(({ text: rawText, com
     <div>
       {/* Announced once when the reply settles (populated by the effect above). */}
       <span className="sr-only" aria-live="polite">{announce}</span>
-      <div className={`prose prose-sm dark:prose-invert max-w-none leading-relaxed prose-p:text-foreground prose-li:text-foreground prose-headings:text-foreground prose-strong:text-foreground prose-strong:font-semibold prose-img:rounded-md prose-headings-display prose-a:text-primary prose-a:font-medium prose-code:text-foreground prose-pre:bg-muted/80 prose-pre:text-foreground prose-pre:rounded-md prose-pre:border prose-pre:border-border prose-p:my-2 prose-headings:mt-4 prose-headings:mb-1.5 prose-h2:text-[13px] prose-h3:text-xs prose-ul:my-2 prose-ol:my-2 prose-li:my-0.5 prose-ul:pl-4 prose-ol:pl-4 marker:text-muted-foreground prose-hr:my-3 prose-hr:border-border prose-table:my-2 prose-th:px-2 prose-th:py-1 prose-th:text-foreground prose-td:px-2 prose-td:py-1 prose-td:border-border prose-th:border-border first:prose-headings:mt-0 ${compact ? 'text-xs' : ''}`}>
+      <div dir="auto" className={`prose prose-sm dark:prose-invert max-w-none leading-relaxed prose-p:text-foreground prose-li:text-foreground prose-headings:text-foreground prose-strong:text-foreground prose-strong:font-semibold prose-img:rounded-md prose-headings-display prose-a:text-primary prose-a:font-medium prose-code:text-foreground prose-pre:bg-muted/80 prose-pre:text-foreground prose-pre:rounded-md prose-pre:border prose-pre:border-border prose-p:my-2 prose-headings:mt-4 prose-headings:mb-1.5 prose-h2:text-[13px] prose-h3:text-xs prose-ul:my-2 prose-ol:my-2 prose-li:my-0.5 prose-ul:pl-4 prose-ol:pl-4 marker:text-muted-foreground prose-hr:my-3 prose-hr:border-border prose-table:my-2 prose-th:px-2 prose-th:py-1 prose-th:text-foreground prose-td:px-2 prose-td:py-1 prose-td:border-border prose-th:border-border first:prose-headings:mt-0 ${compact ? 'text-xs' : ''}`}>
         <ReactMarkdown
           remarkPlugins={[remarkGfm, remarkMath]}
           rehypePlugins={[[rehypeKatex, { strict: false, throwOnError: false }]]}
@@ -546,8 +775,185 @@ const MessageBody: React.FC<MessageBodyProps> = React.memo(({ text: rawText, com
   prev.renderLive === next.renderLive);
 
 // ─────────────────────────────────────────────
+/**
+ * Inline editor for a user message.
+ *
+ * Editing an earlier question invalidates every answer that followed it, so the
+ * save is a two-step confirm naming the count — the same pattern the workspace
+ * delete uses. Deletion is permanent and chat history syncs to Drive, so this
+ * is not a place for a silent destructive default.
+ */
+const MessageEditor: React.FC<{
+  initial: string;
+  discards: number;
+  onCancel: () => void;
+  onSave: (text: string) => void;
+}> = ({ initial, discards, onCancel, onSave }) => {
+  const [text, setText] = useState(initial);
+  const [armed, setArmed] = useState(false);
+  const ref = useRef<HTMLTextAreaElement>(null);
+  useEffect(() => { ref.current?.focus(); ref.current?.select(); }, []);
+
+  const changed = text.trim() !== initial.trim() && !!text.trim();
+  // Nothing after this message → nothing to lose → no confirm step.
+  const needsConfirm = discards > 0;
+  const submit = () => {
+    if (!changed) { onCancel(); return; }
+    if (needsConfirm && !armed) { setArmed(true); return; }
+    onSave(text);
+  };
+
+  return (
+    <div className="w-full">
+      <textarea
+        ref={ref}
+        value={text}
+        onChange={e => { setText(e.target.value); setArmed(false); }}
+        dir="auto"
+        onKeyDown={e => {
+          if (isImeComposing(e)) return;  // IME candidate confirm
+          if (e.key === 'Escape') { e.preventDefault(); onCancel(); }
+          if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); submit(); }
+        }}
+        rows={Math.min(8, text.split('\n').length + 1)}
+        className="w-full resize-y rounded-md border border-primary/40 bg-background px-2 py-1.5 text-sm leading-relaxed focus:outline-none focus:ring-2 focus:ring-ring"
+        aria-label="Edit message"
+      />
+      <div className="flex items-center gap-2 mt-1.5">
+        <button
+          type="button"
+          onClick={submit}
+          disabled={!changed}
+          className={`text-[11px] font-medium px-2 py-1 rounded-md transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${
+            armed ? 'bg-destructive text-destructive-foreground' : 'bg-primary text-primary-foreground hover:bg-primary/90'
+          }`}
+        >
+          {armed ? `Discard ${discards} and re-run?` : 'Save & re-run'}
+        </button>
+        <button
+          type="button"
+          onClick={onCancel}
+          className="text-[11px] font-medium px-2 py-1 rounded-md text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
+        >
+          Cancel
+        </button>
+        {needsConfirm && !armed && (
+          <span className="text-[10px] text-muted-foreground">
+            replaces the {discards} message{discards === 1 ? '' : 's'} below
+          </span>
+        )}
+      </div>
+    </div>
+  );
+};
+
+/**
+ * Live "the model is working" indicator.
+ *
+ * Replaces a static `Thinking…` that sat there unchanged for the whole wait. On
+ * a reasoning model (DeepSeek-R1 and friends) that wait is 30-120s before the
+ * first answer token, which read as a hang — there was no way to tell a thinking
+ * model from a dead one.
+ *
+ * Three signals, in order of usefulness:
+ *   • the real phase, which the worker already reports ("Reading the page…",
+ *     "Understanding the question…", "Writing the answer…")
+ *   • elapsed seconds, so a long wait is visibly progressing
+ *   • the tail of the chain of thought, once one is streaming — expandable to
+ *     read the whole trace
+ */
+const ThinkingIndicator: React.FC<{ phase?: string; reasoning: string }> = ({ phase, reasoning }) => {
+  const [elapsed, setElapsed] = useState(0);
+  const [open, setOpen] = useState(false);
+  useEffect(() => {
+    const started = Date.now();
+    const t = setInterval(() => setElapsed(Math.floor((Date.now() - started) / 1000)), 1000);
+    return () => clearInterval(t);
+  }, []);
+
+  const tail = reasoning ? reasoningTail(reasoning) : '';
+  const label = phase || (reasoning ? 'Thinking it through…' : 'Thinking…');
+
+  return (
+    <div className="flex justify-start">
+      <div className="max-w-[85%] min-w-0 rounded-lg rounded-bl-sm border bg-card border-border text-card-foreground text-sm shadow-card overflow-hidden">
+        <div className="px-4 py-3">
+        <div className="flex items-center gap-2">
+          {/* The little magpie, flapping on the left while it thinks. */}
+          <FlyingMagpie size={22} className="-ml-0.5" />
+          {/* Only the phase is announced. The timer ticks every second and the
+              reasoning tail changes constantly — in a live region either would
+              make a screen reader chatter continuously. */}
+          <span className="text-xs text-muted-foreground font-medium" aria-live="polite">{label}</span>
+          {elapsed >= 3 && (
+            <span className="text-[10px] font-mono text-muted-foreground/70 tabular-nums" aria-hidden="true">
+              {elapsed < 60 ? `${elapsed}s` : `${Math.floor(elapsed / 60)}m ${elapsed % 60}s`}
+            </span>
+          )}
+        </div>
+
+        {tail && (
+          <div className="mt-2 pt-2 border-t border-border/60">
+            <button
+              type="button"
+              onClick={() => setOpen(o => !o)}
+              className="flex items-center gap-1 text-[10px] font-mono uppercase tracking-wider text-muted-foreground hover:text-foreground transition-colors"
+              aria-expanded={open}
+            >
+              {open ? <ChevronUp size={10} /> : <ChevronDown size={10} />}
+              Reasoning
+            </button>
+            {open ? (
+              <div className="mt-1.5 max-h-40 overflow-y-auto no-scrollbar text-[11px] leading-relaxed text-muted-foreground whitespace-pre-wrap break-words">
+                {reasoning}
+              </div>
+            ) : (
+              <div className="mt-1 text-[11px] leading-snug text-muted-foreground/80 line-clamp-2 break-words" aria-hidden="true">
+                {tail}
+              </div>
+            )}
+          </div>
+        )}
+        </div>
+      </div>
+    </div>
+  );
+};
+
 // Copy Message Button Component
 // ─────────────────────────────────────────────
+// Regenerate discards the current answer, so it confirms first (two-step arm,
+// like the workspace-delete and edit flows). Bordered chip to match Copy — the
+// old bare text button was easy to miss and easy to fat-finger.
+const RegenerateButton: React.FC<{ onConfirm: () => void; disabled?: boolean }> = ({ onConfirm, disabled }) => {
+  const [armed, setArmed] = useState(false);
+  // Auto-disarm so a stray first click doesn't leave it primed indefinitely.
+  useEffect(() => {
+    if (!armed) return;
+    const t = setTimeout(() => setArmed(false), 3500);
+    return () => clearTimeout(t);
+  }, [armed]);
+
+  return (
+    <button
+      type="button"
+      disabled={disabled}
+      onClick={() => { if (armed) { setArmed(false); onConfirm(); } else setArmed(true); }}
+      onBlur={() => setArmed(false)}
+      className={`inline-flex items-center gap-1 text-[10px] font-medium px-1.5 py-0.5 rounded border shadow-sm transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${
+        armed
+          ? 'bg-amber-500/15 border-amber-500/40 text-amber-700 dark:text-highlight'
+          : 'bg-muted/50 border-border/50 text-muted-foreground hover:text-foreground'
+      }`}
+      title={armed ? 'Click again to replace this answer' : 'Ask again and replace this answer'}
+      aria-label={armed ? 'Confirm regenerate — replaces this answer' : 'Regenerate answer'}
+    >
+      <RotateCcw size={10} />
+      <span>{armed ? 'Replace answer?' : 'Regenerate'}</span>
+    </button>
+  );
+};
+
 const CopyButton: React.FC<{ text: string }> = ({ text }) => {
   const [copied, setCopied] = useState(false);
 
@@ -631,9 +1037,11 @@ const ModelRefreshFooter: React.FC<{ onRefresh?: () => Promise<void> }> = ({ onR
 const AddContextButton: React.FC<{
   onUploadMarkdown: () => void;
   onUploadPdf: () => void;
-}> = ({ onUploadMarkdown, onUploadPdf }) => {
+  onAttachImage?: (file: File) => void;
+}> = ({ onUploadMarkdown, onUploadPdf, onAttachImage }) => {
   const [isOpen, setIsOpen] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
+  const imageInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     const handleOutsideClick = (e: MouseEvent) => {
@@ -694,8 +1102,169 @@ const AddContextButton: React.FC<{
               <div className="text-[10px] text-muted-foreground mt-0.5 leading-normal">Import structured notes, outlines, or text.</div>
             </div>
           </button>
+
+          {onAttachImage && (
+            <button
+              type="button"
+              onClick={() => { imageInputRef.current?.click(); }}
+              className="w-full text-left p-2 rounded-lg hover:bg-accent text-foreground flex items-start gap-3 transition-colors group"
+            >
+              <div className="h-8 w-8 rounded-lg bg-emerald-500/10 text-emerald-600 flex items-center justify-center shrink-0 group-hover:bg-emerald-500/20 transition-colors">
+                <ImageIcon size={16} />
+              </div>
+              <div className="min-w-0 flex-1">
+                <div className="text-xs font-semibold">Attach image</div>
+                <div className="text-[10px] text-muted-foreground mt-0.5 leading-normal">Send with your message. Needs a vision model.</div>
+              </div>
+            </button>
+          )}
         </div>
       )}
+
+      {onAttachImage && (
+        <input
+          ref={imageInputRef}
+          type="file"
+          accept="image/*"
+          className="hidden"
+          onChange={e => {
+            const file = e.target.files?.[0];
+            if (file) onAttachImage(file);
+            e.target.value = '';       // allow re-picking the same file
+            setIsOpen(false);
+          }}
+        />
+      )}
+    </div>
+  );
+};
+
+// ─────────────────────────────────────────────
+// Quiz card — interactive retrieval practice under a /teach lesson
+// ─────────────────────────────────────────────
+// MCQ is checked locally (instant, free); an open question sends the typed
+// answer to the LLM to grade, with a "Reveal answer" escape hatch. State is
+// local to the card (the quiz is never persisted, like the research plan).
+const QuizCard: React.FC<{
+  quiz: QuizQuestion[];
+  onGrade: (q: QuizQuestion, answer: string) => Promise<{ verdict: 'correct' | 'partial' | 'incorrect'; feedback: string }>;
+}> = ({ quiz, onGrade }) => {
+  const [state, setState] = useState<QuizQuestion[]>(() => quiz.map(q => ({ ...q })));
+  const patch = (i: number, upd: Partial<QuizQuestion>) =>
+    setState(prev => prev.map((q, j) => (j === i ? { ...q, ...upd } : q)));
+
+  const answered = state.filter(q => q.uiVerdict).length;
+
+  const submitMcq = (i: number) => {
+    const q = state[i];
+    const chosen = Number(q.uiAnswer);
+    if (!Number.isInteger(chosen)) return;
+    patch(i, { uiVerdict: chosen === q.answerIndex ? 'correct' : 'incorrect' });
+  };
+  const submitOpen = async (i: number) => {
+    const q = state[i];
+    if (!q.uiAnswer?.trim() || q.uiGrading) return;
+    patch(i, { uiGrading: true });
+    try {
+      const g = await onGrade(q, q.uiAnswer.trim());
+      patch(i, { uiGrading: false, uiVerdict: g.verdict, uiFeedback: g.feedback });
+    } catch {
+      patch(i, { uiGrading: false, uiFeedback: "Couldn't grade that — check your model connection.", uiVerdict: 'partial' });
+    }
+  };
+
+  const verdictTone = (v?: string) =>
+    v === 'correct' ? 'text-emerald-600 dark:text-emerald-400'
+      : v === 'incorrect' ? 'text-red-600 dark:text-red-400'
+        : 'text-amber-600 dark:text-amber-400';
+
+  return (
+    <div className="mt-3 rounded-xl border border-border bg-card/60 p-3">
+      <div className="flex items-center justify-between mb-2">
+        <span className="text-[11px] font-semibold text-foreground">Check yourself</span>
+        <span className="text-[10px] text-muted-foreground">{answered}/{state.length} answered</span>
+      </div>
+      <ol className="space-y-3">
+        {state.map((q, i) => {
+          const done = !!q.uiVerdict;
+          return (
+            <li key={i} className="text-sm">
+              <div className="font-medium text-foreground mb-1.5">{i + 1}. {q.prompt}</div>
+
+              {q.type === 'mcq' ? (
+                <div className="space-y-1">
+                  {(q.options || []).map((opt, oi) => {
+                    const chosen = Number(q.uiAnswer) === oi;
+                    const isCorrect = q.answerIndex === oi;
+                    const showState = done && (chosen || isCorrect);
+                    return (
+                      <label
+                        key={oi}
+                        className={`flex items-start gap-2 rounded-lg border px-2.5 py-1.5 cursor-pointer transition-colors ${
+                          showState && isCorrect ? 'border-emerald-500/50 bg-emerald-500/10'
+                            : showState && chosen ? 'border-red-500/50 bg-red-500/10'
+                              : chosen ? 'border-primary/50 bg-primary/5' : 'border-border hover:bg-accent/50'
+                        } ${done ? 'cursor-default' : ''}`}
+                      >
+                        <input
+                          type="radio" name={`q${i}`} className="mt-0.5" disabled={done}
+                          checked={chosen} onChange={() => patch(i, { uiAnswer: String(oi) })}
+                        />
+                        <span className="text-[13px] text-foreground flex-1">{opt}</span>
+                        {showState && isCorrect && <CheckCircle2 size={14} className="text-emerald-600 dark:text-emerald-400 shrink-0" />}
+                        {showState && chosen && !isCorrect && <XCircle size={14} className="text-red-600 dark:text-red-400 shrink-0" />}
+                      </label>
+                    );
+                  })}
+                  {!done ? (
+                    <button
+                      type="button" onClick={() => submitMcq(i)} disabled={q.uiAnswer == null}
+                      className="mt-1 text-[11px] font-medium px-2.5 py-1 rounded-full bg-primary text-primary-foreground disabled:opacity-40 disabled:cursor-not-allowed"
+                    >Check</button>
+                  ) : q.explanation ? (
+                    <p className="mt-1 text-[12px] text-muted-foreground">{q.explanation}</p>
+                  ) : null}
+                </div>
+              ) : (
+                <div className="space-y-1.5">
+                  <textarea
+                    value={q.uiAnswer || ''} disabled={done || q.uiGrading}
+                    onChange={e => patch(i, { uiAnswer: e.target.value })}
+                    placeholder="Type your answer…" rows={2}
+                    className="w-full rounded-lg border border-input bg-background px-2.5 py-1.5 text-[13px] focus:outline-none focus:ring-2 focus:ring-primary/20 disabled:opacity-70"
+                  />
+                  {!done && (
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button" onClick={() => submitOpen(i)} disabled={!q.uiAnswer?.trim() || q.uiGrading}
+                        className="text-[11px] font-medium px-2.5 py-1 rounded-full bg-primary text-primary-foreground disabled:opacity-40 disabled:cursor-not-allowed inline-flex items-center gap-1"
+                      >
+                        {q.uiGrading && <Loader2 size={11} className="animate-spin" />}
+                        {q.uiGrading ? 'Checking…' : 'Check answer'}
+                      </button>
+                      <button
+                        type="button" onClick={() => patch(i, { uiVerdict: 'revealed' })}
+                        className="text-[11px] font-medium px-2.5 py-1 rounded-full border border-border text-muted-foreground hover:text-foreground hover:bg-accent"
+                      >Reveal answer</button>
+                    </div>
+                  )}
+                  {done && (
+                    <div className="text-[12px]">
+                      <span className={`font-semibold capitalize ${verdictTone(q.uiVerdict)}`}>
+                        {q.uiVerdict === 'revealed' ? 'Answer' : q.uiVerdict}
+                      </span>
+                      {q.uiFeedback && <span className="text-muted-foreground"> — {q.uiFeedback}</span>}
+                      {(q.uiVerdict === 'revealed' || q.uiVerdict === 'incorrect') && q.modelAnswer && (
+                        <p className="mt-1 text-muted-foreground"><span className="font-medium text-foreground">Model answer:</span> {q.modelAnswer}</p>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
+            </li>
+          );
+        })}
+      </ol>
     </div>
   );
 };
@@ -715,6 +1284,24 @@ export const ChatView: React.FC<ChatViewProps> = ({
   activeProjectId,
   generating,
   thinkingStatus = {},
+  reasoning,
+  followUps,
+  sourceMode = 'auto',
+  onSourceModeChange,
+  onRegenerate,
+  onEditAndRerun,
+  onCancelAndEdit,
+  onGradeAnswer,
+  onOpenDeck,
+  onRunCommand,
+  onOpenSettings,
+  onRetryLast,
+  onUnqueue,
+  pendingImage,
+  onAttachImage,
+  onClearImage,
+  imageOutput,
+  onImageOutputChange,
   researching,
   researchLogs,
   documents,
@@ -741,6 +1328,13 @@ export const ChatView: React.FC<ChatViewProps> = ({
 }) => {
   const msgEnd = useRef<HTMLDivElement>(null);
   const scrollBox = useRef<HTMLDivElement>(null);
+  /** Which user message is open in the inline editor (one at a time). */
+  const [editingId, setEditingId] = useState<string | null>(null);
+  // A chat image opened full-size in the panel lightbox, or null.
+  const [zoomImage, setZoomImage] = useState<string | null>(null);
+  // Re-running while a turn is in flight would race two streams into the same
+  // chat, so both controls are inert until the current one settles.
+  const busy = !!generating[activeChatId];
   // Two-step clear confirmation
   const [confirmClear, setConfirmClear] = useState(false);
   const { t } = useTranslation();
@@ -829,47 +1423,43 @@ export const ChatView: React.FC<ChatViewProps> = ({
   // messages, not pinned to the very bottom. Render it just before the first
   // queued message; if none, it stays at the end.
   const firstQueuedIdx = researching[activeProjectId] ? messages.findIndex(m => m.queued) : -1;
+
+  // The user message whose answer is currently generating — the last non-queued
+  // user message. Its "Cancel & edit" button stops that generation and reopens
+  // the message for editing (you can't edit while a reply is streaming).
+  let lastUserIdx = -1;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i].role === 'user' && !messages[i].queued) { lastUserIdx = i; break; }
+  }
   const fieldLog = researching[activeProjectId] ? (
     <div className="flex justify-start" key="field-log">
-      {/* The field log: night-ledger ink panel — the one dark surface in
-          the app, reserved for the agent working through the stacks. */}
-      <div className="w-full max-w-[95%] rounded-xl ink-panel shadow-card overflow-hidden animate-in fade-in motion-reduce:animate-none">
-        <div className="flex items-center gap-2 px-3.5 py-2 border-b border-white/10">
-          <Loader2 size={12} className="animate-spin motion-reduce:animate-none text-highlight shrink-0" aria-hidden="true" />
-          <span className="text-xs font-medium opacity-80 flex-1">
-            Field log — chat stays open
-          </span>
-          <span className="text-[10px] font-mono opacity-50 tabular-nums">
-            {(researchLogs[activeProjectId] || []).length} steps
-          </span>
-          <button
-            type="button"
-            onClick={cancelTask}
-            className="text-[11px] font-medium opacity-70 border border-current rounded-md px-1.5 py-0.5 hover:opacity-100 hover:text-red-300 transition-opacity"
-            aria-label="Stop research"
-          >
-            Stop
-          </button>
-        </div>
-        <div className="px-3.5 py-2.5 space-y-1" aria-live="polite">
-          {(researchLogs[activeProjectId] || []).slice(-3).map((line, i, arr) => (
-            <div
-              key={`${line}-${i}`}
-              className={`text-[10px] font-mono truncate leading-relaxed ${i === arr.length - 1 ? 'text-highlight' : 'opacity-45'}`}
-            >
-              {line}
-            </div>
-          ))}
-          {(researchLogs[activeProjectId] || []).length === 0 && (
-            <div className="text-[10px] font-mono opacity-60">Warming up…</div>
-          )}
-        </div>
-      </div>
+      <FieldLog log={researchLogs[activeProjectId] || []} onStop={cancelTask} />
     </div>
   ) : null;
 
   return (
     <div className="flex-1 flex flex-col h-full bg-background overflow-hidden relative">
+      {/* Image lightbox — full-size in the panel. A data: URL can't be opened
+          as a new tab (Chrome blocks it), so images are viewed here. */}
+      {zoomImage && (
+        <div
+          className="fixed inset-0 z-[200] flex items-center justify-center bg-black/80 p-4 cursor-zoom-out animate-in fade-in"
+          onClick={() => setZoomImage(null)}
+          role="dialog"
+          aria-modal="true"
+          aria-label="Image preview"
+        >
+          <img src={zoomImage} alt="Enlarged" className="max-h-full max-w-full object-contain rounded-lg shadow-2xl" />
+          <button
+            type="button"
+            onClick={() => setZoomImage(null)}
+            className="absolute top-3 right-3 rounded-full bg-white/15 hover:bg-white/25 text-white p-1.5"
+            aria-label="Close"
+          >
+            <XCircle size={18} />
+          </button>
+        </div>
+      )}
       {/* Context bar */}
       <div className="flex items-center justify-between gap-2 px-4 py-2 border-b border-border bg-card shrink-0">
         <div className="flex items-center gap-2 min-w-0 text-xs text-muted-foreground font-medium">
@@ -1023,9 +1613,20 @@ export const ChatView: React.FC<ChatViewProps> = ({
             </div>
 
             {m.queued && (
-              <span className="mb-1 inline-flex items-center gap-1 rounded-full bg-highlight/15 text-amber-700 dark:text-highlight px-2 py-0.5 text-[10px] font-medium">
+              <span className="mb-1 inline-flex items-center gap-1 rounded-full bg-highlight/15 text-amber-700 dark:text-highlight pl-2 pr-1 py-0.5 text-[10px] font-medium">
                 <span className="w-1.5 h-1.5 rounded-full bg-current animate-pulse motion-reduce:animate-none" aria-hidden="true" />
                 Queued — runs after research
+                {onUnqueue && (
+                  <button
+                    type="button"
+                    onClick={() => onUnqueue(m.id)}
+                    className="ml-0.5 rounded-full p-0.5 hover:bg-amber-700/15 dark:hover:bg-highlight/20"
+                    aria-label="Remove from queue and return to input"
+                    title="Take it back — returns the text to the input"
+                  >
+                    <XCircle size={12} />
+                  </button>
+                )}
               </span>
             )}
 
@@ -1041,10 +1642,19 @@ export const ChatView: React.FC<ChatViewProps> = ({
               {/* One malformed message (broken markdown/KaTeX) must not white-
                   screen the whole panel — quarantine it per message. */}
               <ErrorBoundary compact label="message">
-                {m.role === 'assistant' || m.role === 'system' ? (
-                  <CollapsibleMessage text={m.text} streaming={m.streaming}>
+                {m.role === 'system' && m.error ? (
+                  <ErrorRecovery raw={m.error} onSettings={onOpenSettings} onRetry={onRetryLast} />
+                ) : m.role === 'assistant' || m.role === 'system' ? (
+                  <CollapsibleMessage text={m.text} streaming={m.streaming} defaultExpanded={!!(m.quiz?.length || m.actions?.length)}>
                     <MessageBody text={m.text} compact={m.role === 'system'} streaming={m.streaming} renderLive={m.renderLive} resolveCitations={resolveCitations} onOpenDocument={onOpenDocument} onOpenExternalLink={onOpenExternalLink} />
                   </CollapsibleMessage>
+                ) : editingId === m.id ? (
+                  <MessageEditor
+                    initial={m.text}
+                    discards={messages.length - mi - 1}
+                    onCancel={() => setEditingId(null)}
+                    onSave={(text) => { setEditingId(null); onEditAndRerun?.(m.id, text); }}
+                  />
                 ) : (
                   <CollapsibleMessage text={m.text}>
                     {/* Render the user's own message as Markdown too, so typed
@@ -1053,12 +1663,114 @@ export const ChatView: React.FC<ChatViewProps> = ({
                   </CollapsibleMessage>
                 )}
               </ErrorBoundary>
+
+              {/* Images on this turn — the user's attachment or ones the model
+                  generated — INSIDE the bubble so they read as part of the same
+                  message, not a detached thumbnail. Click opens a lightbox in
+                  the panel (a data: URL cannot be navigated to as a new tab —
+                  Chrome blocks it, which is the "opens a broken page" bug). */}
+              {m.images && m.images.length > 0 && (
+                <div className={`flex flex-wrap gap-2 ${m.text?.trim() ? 'mt-2' : ''}`}>
+                  {m.images.map((src, i) => (
+                    <button
+                      key={i}
+                      type="button"
+                      onClick={() => setZoomImage(src)}
+                      className="block rounded-lg overflow-hidden border border-border/60 hover:border-primary/50 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                      aria-label={m.role === 'user' ? 'Attached image — click to enlarge' : 'Generated image — click to enlarge'}
+                    >
+                      <img
+                        src={src}
+                        alt={m.role === 'user' ? 'Attached image' : 'Generated image'}
+                        className="max-h-56 max-w-full object-contain"
+                      />
+                    </button>
+                  ))}
+                </div>
+              )}
+
+              {/* Interactive quiz under a /teach lesson. */}
+              {m.role === 'assistant' && m.quiz && m.quiz.length > 0 && onGradeAnswer && (
+                <QuizCard quiz={m.quiz} onGrade={onGradeAnswer} />
+              )}
+
+              {/* Open a flashcard deck in the full-panel player. */}
+              {m.role === 'assistant' && m.deck && m.deck.length > 0 && onOpenDeck && (
+                <button
+                  type="button"
+                  onClick={() => onOpenDeck(m.deckTitle || 'Study deck', m.deck!)}
+                  className="mt-2 inline-flex items-center gap-2 rounded-xl border border-primary/30 bg-primary/5 px-3 py-2 text-sm font-medium text-foreground hover:bg-primary/10 transition-colors"
+                >
+                  <BookOpen size={15} className="text-primary" />
+                  Study deck · {m.deck.length} cards
+                </button>
+              )}
+
+              {/* Command action buttons (e.g. /teach "Continue → next lesson"). */}
+              {m.role === 'assistant' && m.actions && m.actions.length > 0 && onRunCommand && (
+                <div className="mt-2 flex flex-wrap gap-2">
+                  {m.actions.map((a, ai) => (
+                    <button
+                      key={ai}
+                      type="button"
+                      onClick={() => onRunCommand(a.command)}
+                      disabled={busy}
+                      className={`inline-flex items-center gap-1.5 text-xs font-medium px-3 py-1.5 rounded-full transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${
+                        ai === 0
+                          ? 'bg-primary text-primary-foreground hover:bg-primary/90'
+                          : 'border border-border text-muted-foreground hover:text-foreground hover:bg-accent'
+                      }`}
+                    >
+                      {a.label}
+                    </button>
+                  ))}
+                </div>
+              )}
             </div>
 
-            {/* Action row for assistant messages */}
+            {/* Action row for the user's own messages */}
+            {m.role === 'user' && !m.queued && editingId !== m.id && onEditAndRerun && (
+              // While the answer to THIS message is generating, "Edit" is
+              // blocked — offer "Cancel & edit" instead: stop the reply and
+              // reopen the message. Kept visible (not hover-only) so it's
+              // reachable mid-generation without hunting for it.
+              busy && mi === lastUserIdx && onCancelAndEdit ? (
+                <div className="flex items-center gap-2 px-1 mt-0.5">
+                  <button
+                    type="button"
+                    onClick={() => onCancelAndEdit(m.id)}
+                    className="flex items-center gap-1 text-[10px] font-medium text-muted-foreground hover:text-foreground transition-colors"
+                    title="Undo: stop the reply, remove this message, and put its text back in the input"
+                  >
+                    <StopCircle size={10} />
+                    <span>Cancel &amp; edit</span>
+                  </button>
+                </div>
+              ) : (
+                <div className="flex items-center gap-2 px-1 mt-0.5 opacity-0 hover:opacity-100 focus-within:opacity-100 transition-opacity">
+                  <button
+                    type="button"
+                    onClick={() => setEditingId(m.id)}
+                    disabled={busy}
+                    className="flex items-center gap-1 text-[10px] font-medium text-muted-foreground hover:text-foreground disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                    title="Edit this message and ask again"
+                  >
+                    <Pencil size={10} />
+                    <span>Edit</span>
+                  </button>
+                </div>
+              )
+            )}
+
+            {/* Action row for assistant messages. Kept faintly visible rather
+                than fully hidden — the old opacity-0 meant Copy and Regenerate
+                only existed once you happened to hover the message. */}
             {m.role === 'assistant' && !m.streaming && (
-              <div className="flex items-center gap-2 px-1 mt-0.5 opacity-0 hover:opacity-100 focus-within:opacity-100 transition-opacity">
+              <div className="flex items-center gap-2 px-1 mt-1 opacity-70 hover:opacity-100 focus-within:opacity-100 transition-opacity">
                 <CopyButton text={m.text} />
+                {onRegenerate && (
+                  <RegenerateButton onConfirm={() => onRegenerate(m.id)} disabled={busy} />
+                )}
               </div>
             )}
           </div>
@@ -1068,17 +1780,27 @@ export const ChatView: React.FC<ChatViewProps> = ({
         {/* No message was queued during the run → field log stays at the end. */}
         {firstQueuedIdx === -1 && fieldLog}
         {generating[activeChatId] && !researching[activeProjectId] && (messages[messages.length - 1]?.role !== 'assistant' || !messages[messages.length - 1]?.text) && (
-          <div className="flex justify-start">
-            <div className="max-w-[85%] rounded-lg rounded-bl-sm border bg-card border-border text-card-foreground px-4 py-3 text-sm flex items-center gap-2 shadow-card">
-              <div className="flex space-x-1" aria-hidden="true">
-                <div className="w-1.5 h-1.5 rounded-full bg-primary animate-pulse motion-reduce:animate-none" style={{ animationDelay: '0ms' }} />
-                <div className="w-1.5 h-1.5 rounded-full bg-primary animate-pulse motion-reduce:animate-none" style={{ animationDelay: '150ms' }} />
-                <div className="w-1.5 h-1.5 rounded-full bg-primary animate-pulse motion-reduce:animate-none" style={{ animationDelay: '300ms' }} />
-              </div>
-              <span className="text-xs text-muted-foreground font-medium" aria-live="polite">
-                {thinkingStatus[activeChatId] || 'Thinking…'}
-              </span>
-            </div>
+          <ThinkingIndicator
+            phase={thinkingStatus[activeChatId]}
+            reasoning={reasoning?.[activeChatId] || ''}
+          />
+        )}
+        {/* Suggested next questions. Rendered OUTSIDE the message list on
+            purpose: they belong to the conversation's current state, not to a
+            saved turn, and must never be mistaken for part of the reply. */}
+        {!generating[activeChatId] && (followUps?.[activeChatId]?.length ?? 0) > 0 && (
+          <div className="flex flex-wrap gap-1.5 pt-1" aria-label="Suggested follow-up questions">
+            {followUps![activeChatId].map((q, i) => (
+              <button
+                key={i}
+                type="button"
+                dir="auto"
+                onClick={() => { setInput(q); requestAnimationFrame(() => send()); }}
+                className="text-left text-[11px] leading-snug px-2.5 py-1.5 rounded-full border border-border bg-card hover:bg-accent hover:border-primary/40 text-muted-foreground hover:text-foreground transition-colors max-w-full"
+              >
+                {q}
+              </button>
+            ))}
           </div>
         )}
         <div ref={msgEnd} />
@@ -1105,6 +1827,77 @@ export const ChatView: React.FC<ChatViewProps> = ({
             <span className="text-[10px] text-muted-foreground font-mono">
               {documents.filter(d => d.enabled !== false).length} active source(s)
             </span>
+          </div>
+        )}
+
+        {/* Where the answer may come from. Its OWN row above the input pill:
+            placed inside it, this became a flex sibling of the paperclip and
+            the textarea and squeezed the field into a two-line placeholder.
+            The router already decides this well; the control exists so the
+            decision is visible and can be overruled, which is what a silent
+            router earns. */}
+        {(onSourceModeChange || onImageOutputChange) && (
+          <div className="flex items-center gap-0.5 px-1 pb-1" role="radiogroup" aria-label="Answer source">
+            {onSourceModeChange && ([
+              ['auto', 'Auto', 'Let Magpie decide'],
+              ['sources', 'Sources', 'Only my saved sources'],
+              ['web', 'Web', 'Search the web'],
+              ['general', 'General', "The model's own knowledge"],
+            ] as const).map(([mode, label, title]) => (
+              <button
+                key={mode}
+                type="button"
+                role="radio"
+                aria-checked={sourceMode === mode}
+                title={title}
+                onClick={() => onSourceModeChange(mode)}
+                className={`text-[10px] font-medium px-2 py-0.5 rounded-full transition-colors ${
+                  sourceMode === mode
+                    ? 'bg-primary/10 text-primary'
+                    : 'text-muted-foreground hover:text-foreground hover:bg-accent'
+                }`}
+              >
+                {label}
+              </button>
+            ))}
+            {/* Image output: off by default. Only when on does the turn ask the
+                provider for images (a param some providers reject), so normal
+                chat is never at risk. */}
+            {onImageOutputChange && (
+              <button
+                type="button"
+                role="switch"
+                aria-checked={!!imageOutput}
+                aria-label="Generate images in the reply"
+                title={imageOutput
+                  ? 'On: the model may reply with generated images (needs an image-capable model). Click to turn off.'
+                  : 'Off: replies are text only. Click to let the model generate images (needs an image-capable model).'}
+                onClick={() => onImageOutputChange(!imageOutput)}
+                className={`ml-auto flex items-center gap-1 text-[10px] font-medium px-2 py-0.5 rounded-full transition-colors ${
+                  imageOutput ? 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-400' : 'text-muted-foreground hover:text-foreground hover:bg-accent'
+                }`}
+              >
+                <ImageIcon size={11} /> {imageOutput ? 'Image reply: on' : 'Image reply'}
+              </button>
+            )}
+          </div>
+        )}
+
+        {/* Pending attachment: a thumbnail chip above the pill, removable. */}
+        {pendingImage && (
+          <div className="px-1 pb-1.5">
+            <div className="inline-flex items-center gap-2 rounded-lg border border-border bg-card p-1 pr-2 shadow-sm">
+              <img src={pendingImage} alt="Attachment preview" className="h-9 w-9 rounded object-cover" />
+              <span className="text-[10px] text-muted-foreground">Image attached</span>
+              <button
+                type="button"
+                onClick={() => onClearImage?.()}
+                aria-label="Remove attachment"
+                className="rounded p-0.5 text-muted-foreground hover:bg-accent hover:text-foreground"
+              >
+                <XCircle size={13} />
+              </button>
+            </div>
           </div>
         )}
 
@@ -1152,6 +1945,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
           <AddContextButton
             onUploadMarkdown={onUploadMarkdown!}
             onUploadPdf={onUploadPdf!}
+            onAttachImage={onAttachImage}
           />
 
           <textarea
@@ -1170,7 +1964,19 @@ export const ChatView: React.FC<ChatViewProps> = ({
               el.style.height = 'auto';
               el.style.height = `${Math.min(el.scrollHeight, 160)}px`;
             }}
+            // Right-to-left scripts (Arabic, Hebrew, Persian, Urdu) need the
+            // browser to pick direction from the first strong character. Without
+            // dir="auto" the caret, punctuation and text alignment are all wrong.
+            dir="auto"
             onKeyDown={e => {
+              // IME GUARD — must come before every Enter branch below.
+              //
+              // With a Chinese/Japanese/Korean input method, Enter CONFIRMS the
+              // candidate you are choosing. Handled as "send", it ships a
+              // half-composed message and destroys the composition. `keyCode
+              // 229` is the legacy signal some browsers still emit instead of
+              // setting isComposing.
+              if (isImeComposing(e)) return;
               // Slash palette keyboard navigation
               if (input.startsWith('/') && !input.includes(' ')) {
                 const matches = paletteEntries(input, customCommands);
@@ -1189,42 +1995,40 @@ export const ChatView: React.FC<ChatViewProps> = ({
                   if (e.key === 'Escape') { setInput(''); setPaletteIdx(0); return; }
                 }
               }
-              if (e.key === 'Enter' && e.shiftKey) {
-                // Markdown list auto-continue: Shift+Enter inside a "- "/"* "/"1. "
-                // line starts the next item; an empty item ends the list. Otherwise
-                // fall through to a normal newline.
+              // Cmd/Ctrl+Enter always sends — the escape hatch for sending a
+              // message that ends in a list without first breaking out of it.
+              if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+                e.preventDefault();
+                send();
                 const el = e.currentTarget;
+                requestAnimationFrame(() => { el.style.height = 'auto'; });
+                return;
+              }
+              // Apply list continuation to a list line. Shared by both Enter
+              // and Shift+Enter so they behave identically inside a list.
+              const applyListContinue = (el: HTMLTextAreaElement): boolean => {
                 const pos = el.selectionStart ?? input.length;
-                const lineStart = input.lastIndexOf('\n', pos - 1) + 1;
-                const line = input.slice(lineStart, pos);
-                const m = line.match(/^(\s*)([-*+]|\d+\.)\s+(.*)$/);
-                if (m) {
-                  e.preventDefault();
-                  const [, indent, marker, content] = m;
-                  let next: string;
-                  if (content.trim() === '') {
-                    // Empty item → end the list (clear the marker, plain newline).
-                    next = input.slice(0, lineStart) + input.slice(pos);
-                    setInput(next);
-                    requestAnimationFrame(() => { el.selectionStart = el.selectionEnd = lineStart; });
-                  } else {
-                    const marker2 = /^\d+\.$/.test(marker) ? `${parseInt(marker, 10) + 1}.` : marker;
-                    const insert = `\n${indent}${marker2} `;
-                    next = input.slice(0, pos) + insert + input.slice(pos);
-                    setInput(next);
-                    const caret = pos + insert.length;
-                    requestAnimationFrame(() => {
-                      el.selectionStart = el.selectionEnd = caret;
-                      el.style.height = 'auto';
-                      el.style.height = `${Math.min(el.scrollHeight, 160)}px`;
-                    });
-                  }
-                  return;
-                }
+                const r = continueList(input, pos);
+                if (!r) return false;
+                setInput(r.value);
+                requestAnimationFrame(() => {
+                  el.selectionStart = el.selectionEnd = r.caret;
+                  el.style.height = 'auto';
+                  el.style.height = `${Math.min(el.scrollHeight, 160)}px`;
+                });
+                return true;
+              };
+              if (e.key === 'Enter' && e.shiftKey) {
+                // Shift+Enter: continue the list if in one, else a plain newline.
+                if (applyListContinue(e.currentTarget)) e.preventDefault();
                 // not a list line → default newline behavior
+                return;
               }
               if (e.key === 'Enter' && !e.shiftKey) {
                 e.preventDefault();
+                // Enter is the default: inside a list it continues the list;
+                // otherwise it sends. (Cmd/Ctrl+Enter above forces a send.)
+                if (applyListContinue(e.currentTarget)) return;
                 // While a reply streams, send() no-ops — typing stays possible
                 // (the textarea is never disabled, so focus is never ejected).
                 send();

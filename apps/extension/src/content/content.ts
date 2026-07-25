@@ -1,6 +1,9 @@
 import { Readability } from '@mozilla/readability';
 import TurndownService from 'turndown';
 import { extractMailboxList } from './mailbox';
+import { salvageSpecs, readJsonLdBlocks } from '../lib/spec-salvage';
+import { assessCoverage, demoteRunawayHeadings, sanitizeCaptureDom } from '../lib/extraction-quality';
+import { funnyCaptureTitle, titleIsUnusable } from '../lib/funny-title';
 
 // ─────────────────────────────────────────────
 // Enhanced Content Script — AI Research Assistant
@@ -410,8 +413,10 @@ function extractTitleFromMarkdown(markdown: string, fallback: string): string {
   const headingMatch = markdown.match(/^#{1,2}\s+(.+)$/m);
   if (headingMatch) {
     const extracted = headingMatch[1].trim();
-    // Only use it if it's reasonably long and not a generic section name
-    if (extracted.length > 5 && !/^(introduction|overview|table of contents|summary|abstract)$/i.test(extracted)) {
+    // Reasonably long, not a generic section name, and NOT a runaway heading
+    // (a paragraph a site wrapped in a heading tag) — those make giant titles.
+    if (extracted.length > 5 && extracted.length <= 120
+        && !/^(introduction|overview|table of contents|summary|abstract)$/i.test(extracted)) {
       return extracted;
     }
   }
@@ -597,10 +602,19 @@ async function scrapePage(): Promise<{
 
   // ── STANDARD PAGE EXTRACTION ──
   const documentClone = document.cloneNode(true) as Document;
-  
+
+  // Read JSON-LD BEFORE the scripts are stripped below — on listing sites it is
+  // the site's own structured description of the thing being sold, which beats
+  // any guess at its layout.
+  const jsonLdBlocks = readJsonLdBlocks(documentClone);
+
   // Remove all scripts and styles from the clone to avoid CSP warnings when Readability/Turndown does innerHTML
   const elementsToRemove = documentClone.querySelectorAll('script, noscript, style, link[rel="stylesheet"]');
   elementsToRemove.forEach(el => el.parentNode?.removeChild(el));
+
+  // Strip chat-UI noise (screen-reader-only labels; role="heading" on the user's
+  // query bubble) BEFORE Readability so it captures as prose, not a heading.
+  sanitizeCaptureDom(documentClone);
 
   const reader = new Readability(documentClone, {
     keepClasses: true,
@@ -620,6 +634,29 @@ async function scrapePage(): Promise<{
 
   // Clean up excessive newlines
   markdown = markdown.replace(/\n{4,}/g, '\n\n\n').trim();
+  // A paragraph a site wrapped in a heading tag arrives as one giant `#` line;
+  // demote it back to prose so the capture doesn't read as a wall of headers.
+  markdown = demoteRunawayHeadings(markdown);
+
+  // Did we actually get the page, or a sliver of it? Readability is a scoring
+  // algorithm and some layout will always score wrong; the guarantee worth
+  // having is that a bad extraction is DETECTED rather than shipped looking
+  // fine. When we kept almost nothing of a substantial page, prefer the full
+  // body text: noisier, but present. A ratio is a fact about the numbers, so
+  // this keeps working on sites nobody has tested.
+  const pageText = (document.body?.innerText || '').trim();
+  const coverage = assessCoverage(markdown, pageText);
+  if (!coverage.ok && !coverage.blocked && pageText.length > markdown.length) {
+    const fullMd = turndownService.turndown(document.body.innerHTML).replace(/\n{4,}/g, '\n\n\n').trim();
+    if (fullMd.length > markdown.length) markdown = fullMd;
+  }
+
+  // Readability scores by PROSE density, so a specification grid — dozens of
+  // two-word cells, no sentences — scores near zero and is dropped. Nothing
+  // signals the loss: `article.content` is non-empty and reads fine, while the
+  // year, mileage and engine size the reader actually wanted are gone. Append
+  // what it missed. (Same reasoning as the link salvage just below.)
+  markdown += salvageSpecs(documentClone, jsonLdBlocks, { existingMarkdown: markdown });
 
   // Documentation hubs / TOC pages are mostly links — and Readability often
   // strips nav-style link lists, leaving bare titles with no hrefs. Chat's
@@ -713,10 +750,24 @@ async function scrapePage(): Promise<{
     }
   } catch { /* extraction is best-effort — never break page capture over it */ }
 
+  // Demote runaway headings ONE LAST TIME, after every fallback and append.
+  // The coverage fallback above re-runs turndown on the full body and can
+  // reintroduce a paragraph-as-heading the line-632 pass already removed; this
+  // final pass runs before title extraction so a runaway heading can't become a
+  // giant title either.
+  markdown = demoteRunawayHeadings(markdown);
+
   // If the title looks like a generic site name (e.g. "Google Gemini"),
   // try to extract a real content title from the first markdown heading.
   if (isGenericTitle(title)) {
     title = extractTitleFromMarkdown(markdown, title);
+  }
+
+  // Still nothing real to call it — generic app name, empty, or a runaway
+  // heading that slipped through? Give it a short, on-theme fun name instead of
+  // a wall of text or "Untitled". Seeded by URL so re-captures keep the name.
+  if (isGenericTitle(title) || titleIsUnusable(title)) {
+    title = funnyCaptureTitle(url);
   }
 
   const wordCount = markdown.split(/\s+/).filter(w => w.length > 0).length;

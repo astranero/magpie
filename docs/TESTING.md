@@ -81,5 +81,31 @@ see by construction.
 - Memory-budget E2E (`e2e/memory-budget.spec.ts`): seeds a heavy corpus
   into the real IndexedDB and asserts the global LIST_DOCUMENTS payload
   ships frontmatter-only (the sidepanel-OOM regression guard).
+- Chat controls E2E (`e2e/chat-controls.spec.ts`): regenerate replaces the
+  answer rather than appending, and editing a message discards the turns
+  that followed it in **storage**, not just React state (a reload reads the
+  saved history back). Its own spec file on purpose — Playwright gives each
+  file a fresh persistent context, and these assertions count messages in a
+  chat, so sharing a profile means counting whatever another spec left
+  behind. The mock serialises every completion (`[gen N]`) because a
+  regenerated answer is otherwise textually identical to the one it
+  replaced, and no assertion could tell "replaced" from "did nothing".
 - Not covered yet (known): PDF/image import via UI, page-context, MCP
-  against a live server.
+  against a live server, IME composition (cannot be simulated in
+  Playwright — `lib/ime.ts` is unit-tested and the wiring verified by
+  reading), and the panel's own appearance (no React testing library).
+- `debug-page-detection`'s perf assertion is now OPT-IN. Run it with
+  `PERF=1 npx vitest run`; the default suite skips it. Vitest executes
+  files in parallel workers, so the detector competes for CPU with
+  whatever else is running, and three successive attempts at a
+  load-tolerant statistic all still failed on a clean tree — an absolute
+  15 ms budget (measured 15-17 ms with nothing changed), a best-of-two
+  ratio (2.1x alone, 4.6x under load), and a median of fifteen pairs
+  (failed one run in three). A test that is red on an unmodified
+  checkout trains you to skim past red, so it is gated rather than
+  tuned again. Its comment records the measured curve.
+- Still load-sensitive: `e2e/link-preview` budgets 20 s for a capture
+  whose own comment notes the Jina path takes ~20 s. It fails
+  intermittently on a busy machine without anything being wrong. Re-run
+  before believing it — and before suspecting your own change, which is
+  the trap it sets.

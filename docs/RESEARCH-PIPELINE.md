@@ -69,6 +69,12 @@ language + English) to maximize discovery across sources.
    then a capstone adds the executive overview, a mandatory
    "Contradictions & Open Questions" section, and the Verdict. Degrades to
    the single merge over stage briefs when the outline/sections fail.
+   **Partial-report salvage**: synthesis has its own budget
+   (`SYNTH_WALL_BUDGET_MS`, 18 min) on top of the 35-min gather budget and the
+   60-min run watchdog; when it (or a Stop/watchdog abort) fires, synthesis
+   *breaks rather than throws*, ships the finished sections under a
+   `> ⚠ **Incomplete report**` banner, and skips the capstone — an hour of
+   work is delivered, not discarded.
    Evidence within each call is balanced across source types (round-robin
    by agent label) with origin tags in headings. Streamed live to the panel
    (`DEEP_RESEARCH_DELTA`); the persisted chat message is the source of
@@ -137,7 +143,9 @@ score" — each layer has its own job:
    recomputed deterministically from the rubric) and triggers up to two
    revision passes; the audit is an internal quality signal only — hidden
    from the user-facing report (a one-line summary is logged to progress
-   when the judge is unhappy).
+   when the judge is unhappy). The evaluator is **skipped when the run was
+   aborted/timed out** — a salvaged partial report is delivered as-is, not
+   audited or revised.
 
 Every source that survives the gate becomes a `SourceRecord` with a quality
 **tier**: `high` (authority domain, arXiv/DOI, or ≥10 citations) or
@@ -158,5 +166,8 @@ worker alive through long LLM calls **and** timestamps liveness. On worker
 start, auto-resume runs only if: job `active`, age < 12 h, and < 12 prior
 resume attempts (then it fails loudly into the chat). Cancel/complete clear
 the job. (The fresh-heartbeat skip was deliberately removed — an active job
-always means resume.)
+always means resume.) A **run-level watchdog** (`RESEARCH_MAX_WALL_MS`, 60 min;
+also a no-progress stall guard) aborts a wedged run — but abort during synthesis
+now **salvages** the finished sections into a partial report (see Synthesis)
+rather than failing empty.
 See `MV3-PERSISTENT-AGENT-STATE.md` for the war story.

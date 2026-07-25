@@ -9,8 +9,10 @@ import { CustomSkill, sanitizeCustomSkill } from '../../lib/commands';
 import { McpServerConfig, McpConnection, getMcpServers, saveMcpServers, isAllowedMcpUrl } from '../../lib/mcp-client';
 import { SearchApiKeys, getSearchApiKeys, saveSearchApiKeys } from '../../lib/search-providers';
 import { getCrashLog, clearCrashLog, formatCrashLog } from '../../lib/crash-log';
+import { timeAgo } from '../../lib/format';
 import { COPILOT_PENDING_KEY, type CopilotPendingAuth } from '../../lib/copilot-auth';
 import { THEMES, THEME_LABELS, THEME_STORAGE_KEY, THEME_CHANGED_EVENT, readThemePref, type ThemePref } from '../../lib/theme';
+import { REPORT_LENGTH_SPECS } from '../../lib/research-limits';
 
 // ── Appearance ────────────────────────────────────────────────────────────
 /**
@@ -71,6 +73,7 @@ function ThemeSwatch({ theme }: { theme: ThemePref }) {
     light:   ['hsl(210 33% 98%)', 'hsl(200 85% 34%)', 'hsl(262 65% 56%)'],
     dark:    ['hsl(228 24% 8%)',  'hsl(197 75% 58%)', 'hsl(262 70% 68%)'],
     village: ['hsl(38 42% 95%)',  'hsl(145 26% 34%)', 'hsl(345 48% 62%)'],
+    ghibli:  ['hsl(196 52% 95%)', 'hsl(203 58% 39%)', 'hsl(43 82% 55%)'],
   };
   return (
     <span className="inline-flex" aria-hidden="true">
@@ -219,7 +222,7 @@ function CopilotSSOSection({ enterpriseGitHubUrl, setEnterpriseGitHubUrl, saveSe
         <div className="flex items-center gap-2">
           <span className="w-2 h-2 rounded-full bg-green-500" />
           <span className="text-xs font-medium text-foreground">Connected to GitHub Copilot</span>
-          {enterpriseGitHubUrl && <span className="text-[10px] text-muted-foreground">({new URL(enterpriseGitHubUrl).hostname})</span>}
+          {enterpriseGitHubUrl && (() => { let h = ''; try { h = new URL(enterpriseGitHubUrl).hostname; } catch { h = enterpriseGitHubUrl; } return <span className="text-[10px] text-muted-foreground">({h})</span>; })()}
         </div>
 
         {/* Copilot model picker — clearly labeled so it isn't mistaken for the
@@ -350,6 +353,7 @@ interface SettingsViewProps {
   syncResearchSources: boolean;
   setSyncResearchSources: (val: boolean) => void;
   forceResync: () => void;
+  reconcileFromDrive: () => void;
   routeChatThroughCli: string;
   setRouteChatThroughCli: (val: string) => void;
   cliCommandTemplate: string;
@@ -363,10 +367,83 @@ interface SettingsViewProps {
   saveWorkspaceRules: (rules: string) => void | Promise<void>;
 }
 
+// ─────────────────────────────────────────────
+// Drive sync status
+// ─────────────────────────────────────────────
+// The Drive block had controls (connect, folder, Force Resync) but no state:
+// nothing said how much was synced, how much was waiting, or when the last
+// sync actually happened. A "Uploading 227/449" toast scrolls past and then
+// the user is guessing. This queries SYNC_STATUS and refreshes whenever a
+// SYNC_PROGRESS broadcast arrives, so the panel tracks a run live and settles
+// on the final counts when it ends.
+
+interface SyncSnapshot { synced: number; pending: number; total: number; lastSyncAt: string | null }
+
+const SyncStatusPanel: React.FC = () => {
+  const [snap, setSnap] = useState<SyncSnapshot | null>(null);
+
+  useEffect(() => {
+    let alive = true;
+    const load = () => {
+      try {
+        chrome.runtime.sendMessage({ action: 'SYNC_STATUS' }, (r: any) => {
+          if (chrome.runtime.lastError) return;      // worker asleep — ignore
+          if (alive && r?.success !== false) setSnap(r as SyncSnapshot);
+        });
+      } catch { /* no runtime — test/preview */ }
+    };
+    load();
+
+    // A progress broadcast means counts are moving; re-query, debounced so a
+    // fast burst of "Uploading i/N" lines does not fan out into N queries.
+    let t: ReturnType<typeof setTimeout> | null = null;
+    const onMsg = (m: any) => {
+      if (m?.action !== 'SYNC_PROGRESS') return;
+      if (t) clearTimeout(t);
+      t = setTimeout(load, 400);
+    };
+    try { chrome.runtime.onMessage.addListener(onMsg); } catch { /* ignore */ }
+    return () => {
+      alive = false;
+      if (t) clearTimeout(t);
+      try { chrome.runtime.onMessage.removeListener(onMsg); } catch { /* ignore */ }
+    };
+  }, []);
+
+  if (!snap) return null;
+  const { synced, pending, lastSyncAt } = snap;
+  const allUp = pending === 0;
+
+  return (
+    <div className="rounded-lg border border-border bg-muted/20 px-3 py-2.5 space-y-2">
+      <div className="flex items-center justify-between">
+        <span className="text-[11px] font-medium text-muted-foreground">Sync status</span>
+        <span className={`inline-flex items-center gap-1 text-[10px] font-medium ${allUp ? 'text-emerald-600 dark:text-emerald-400' : 'text-amber-700 dark:text-highlight'}`}>
+          <span className={`w-1.5 h-1.5 rounded-full ${allUp ? 'bg-emerald-500' : 'bg-amber-500 animate-pulse motion-reduce:animate-none'}`} aria-hidden="true" />
+          {allUp ? 'Up to date' : `${pending} pending`}
+        </span>
+      </div>
+      <div className="grid grid-cols-2 gap-2 text-center">
+        <div className="rounded-md bg-background/60 py-1.5">
+          <div className="text-sm font-bold font-mono tabular-nums">{synced}</div>
+          <div className="text-[9px] uppercase tracking-wider text-muted-foreground">Synced</div>
+        </div>
+        <div className="rounded-md bg-background/60 py-1.5">
+          <div className={`text-sm font-bold font-mono tabular-nums ${pending > 0 ? 'text-amber-700 dark:text-highlight' : ''}`}>{pending}</div>
+          <div className="text-[9px] uppercase tracking-wider text-muted-foreground">Pending</div>
+        </div>
+      </div>
+      <div className="text-[10px] text-muted-foreground text-center">
+        {lastSyncAt ? `Last synced ${timeAgo(lastSyncAt)}` : 'Not synced yet'}
+      </div>
+    </div>
+  );
+};
+
 export const SettingsView: React.FC<SettingsViewProps> = ({
   customUrl, setCustomUrl, customKey, setCustomKey, customModel, visionModel, setVisionModel, classificationModel, setClassificationModel, customModels, copilotModels, byokModels, activateProviderModel, fetchCustomModels,
   docCount, globalDocCount, onCleanupOrphans, authed, profile, login, logout, folderName, setFolderName, exportWorkspace,
-  autoLinkCaptures, setAutoLinkCaptures, saveSettings, syncResearchSources, setSyncResearchSources, forceResync,
+  autoLinkCaptures, setAutoLinkCaptures, saveSettings, syncResearchSources, setSyncResearchSources, forceResync, reconcileFromDrive,
   routeChatThroughCli, setRouteChatThroughCli, cliCommandTemplate, setCliCommandTemplate,
   localMcpCompanionUrl, enterpriseGitHubUrl, setEnterpriseGitHubUrl,
   workspaceName, workspaceRules, saveWorkspaceRules
@@ -424,12 +501,24 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   // Research settings are self-contained: read/write chrome.storage directly.
   const [researchDepth, setResearchDepth] = useState<'standard' | 'deep' | 'exhaustive'>('standard');
   const [reportLength, setReportLength] = useState<'concise' | 'standard' | 'comprehensive'>('standard');
+  // Asked from the worker rather than read locally: the point is to compare the
+  // two, which only works if each reports its OWN build.
+  const [workerBuild, setWorkerBuild] = useState('');
+  useEffect(() => {
+    try {
+      chrome.runtime.sendMessage({ action: 'GET_BUILD_INFO' }, (r: any) => {
+        if (chrome.runtime.lastError) { setWorkerBuild('unavailable'); return; }
+        setWorkerBuild(r?.build || 'unknown');
+      });
+    } catch { setWorkerBuild('unavailable'); }
+  }, []);
   const [sourceQuality, setSourceQuality] = useState<'all' | 'high'>('all');
   const [academicDepth, setAcademicDepth] = useState<'abstract' | 'full'>('full');
   const [contextTokens, setContextTokens] = useState('32768');
   const [s2ApiKey, setS2ApiKey] = useState('');
   // Chat web-search fallback — default ON; only an explicit false disables it.
   const [webFallback, setWebFallback] = useState(true);
+  const [webDataAgent, setWebDataAgent] = useState(false);
   const [jinaEnabled, setJinaEnabled] = useState(true);
   // How chat gathers extra detail from the open page (repo files / links).
   const [pageCtxStrategy, setPageCtxStrategy] = useState<'semantic' | 'router' | 'agentic'>('semantic');
@@ -439,7 +528,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   const tzGuess = (() => { try { return (Intl.DateTimeFormat().resolvedOptions().timeZone || '').split('/').pop()?.replace(/_/g, ' ') || ''; } catch { return ''; } })();
   useEffect(() => {
     if (typeof chrome === 'undefined' || !chrome.storage) return;
-    chrome.storage.local.get(['researchDepth', 'reportLength', 'contextTokens', 's2ApiKey', 'sourceQuality', 'academicDepth', 'chatWebFallback', 'jinaReaderEnabled', 'pageContextStrategy', 'userLocation', 'inferenceDevice']).then(r => {
+    chrome.storage.local.get(['researchDepth', 'reportLength', 'contextTokens', 's2ApiKey', 'sourceQuality', 'academicDepth', 'chatWebFallback', 'webDataAgentEnabled', 'jinaReaderEnabled', 'pageContextStrategy', 'userLocation', 'inferenceDevice']).then(r => {
       if (r.inferenceDevice === 'webgpu') setInferenceDevice('webgpu');
       if (r.researchDepth === 'deep' || r.researchDepth === 'exhaustive') setResearchDepth(r.researchDepth);
       if (r.reportLength === 'concise' || r.reportLength === 'comprehensive') setReportLength(r.reportLength);
@@ -448,6 +537,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
       if (r.contextTokens) setContextTokens(String(r.contextTokens));
       if (r.s2ApiKey) setS2ApiKey(r.s2ApiKey);
       setWebFallback(r.chatWebFallback !== false);
+      setWebDataAgent(r.webDataAgentEnabled === true);
       setJinaEnabled(r.jinaReaderEnabled !== false);
       if (r.pageContextStrategy === 'router' || r.pageContextStrategy === 'agentic') setPageCtxStrategy(r.pageContextStrategy);
       if (typeof r.userLocation === 'string') setUserLocation(r.userLocation);
@@ -585,35 +675,12 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
 
   return (
     <div className="flex-1 overflow-y-auto no-scrollbar">
-      {/* ── Workspace instructions ── */}
-      <Section id="workspace-rules" title="Workspace Instructions" subtitle={`Persistent context for "${workspaceName.length > 48 ? workspaceName.slice(0, 45) + '…' : workspaceName}" — added to every prompt.`}>
-          <textarea
-            value={rulesDraft}
-            onChange={e => setRulesDraft(e.target.value)}
-            onBlur={() => { if (rulesDraft !== workspaceRules) saveWorkspaceRules(rulesDraft); }}
-            placeholder={"Tell Magpie your baseline rules (e.g. stack, formatting preferences, coding rules)."}
-            rows={4}
-            className="w-full rounded-lg border border-border bg-background px-3 py-2 text-xs leading-relaxed resize-y focus:outline-none focus:ring-2 focus:ring-ring"
-          />
-          <p className="text-[10px] text-muted-foreground leading-normal">
-            Applies only to this workspace. Saved automatically.
-          </p>
-      </Section>
-
-      {/* ── GitHub Copilot SSO ── */}
-      <Section id="copilot" title="GitHub Copilot" subtitle="Sign in with your enterprise GitHub account. Set your enterprise URL below if using GHES." defaultOpen={true}>
-        <CopilotSSOSection
-          enterpriseGitHubUrl={enterpriseGitHubUrl}
-          setEnterpriseGitHubUrl={setEnterpriseGitHubUrl}
-          saveSettings={saveSettings}
-          customModel={customModel}
-          copilotModels={copilotModels}
-          activateProviderModel={activateProviderModel}
-        />
-      </Section>
-
-      {/* ── Custom Provider ── */}
-      <Section id="provider" title="AI Provider Configuration" subtitle="Configure your AI backend (or use Copilot above).">
+      {/* ── Connect a model ── */}
+      <div className="px-4 pt-4 pb-1">
+        <h2 className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">Connect a model</h2>
+        <p className="text-[10px] text-muted-foreground/80 mt-0.5 leading-snug">Needed once, before anything else works.</p>
+      </div>
+      <Section id="provider" title="AI Provider Configuration" subtitle="Configure your AI backend (or use Copilot below).">
           {/* Which backend will actually receive the next request — computed
               from the SAME settings the client reads, so it can't lie. Answers
               "am I really on enterprise Copilot or on OpenRouter?" at a glance. */}
@@ -821,76 +888,21 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
             <p className="text-[10px] text-muted-foreground font-mono">Used for reading images & scanned PDFs (uses text model if blank).</p>
           </div>
       </Section>
-
-      {/* ── Appearance ── */}
-      <Section id="appearance" title="Appearance" subtitle="Pick a palette. Village is a warm light theme.">
-        <AppearanceSection />
+      <Section id="copilot" title="GitHub Copilot" subtitle="Sign in with your enterprise GitHub account. Set your enterprise URL below if using GHES." defaultOpen={true}>
+        <CopilotSSOSection
+          enterpriseGitHubUrl={enterpriseGitHubUrl}
+          setEnterpriseGitHubUrl={setEnterpriseGitHubUrl}
+          saveSettings={saveSettings}
+          customModel={customModel}
+          copilotModels={copilotModels}
+          activateProviderModel={activateProviderModel}
+        />
       </Section>
-
-      {/* ── Capture Behavior ── */}
-      <Section id="capture" title="Capture" subtitle="Configure page clipping settings.">
-        <div className="flex items-center justify-between gap-3">
-          <div className="min-w-0">
-            <span className="text-xs font-medium">Auto-add to active workspace</span>
-            <p className="text-[10px] text-muted-foreground font-mono mt-0.5 leading-normal">
-              Link new captures to the active workspace automatically.
-            </p>
-          </div>
-          <button
-            type="button"
-            role="switch"
-            aria-checked={autoLinkCaptures}
-            onClick={() => setAutoLinkCaptures(!autoLinkCaptures)}
-            className={`shrink-0 relative inline-flex h-5 w-9 items-center rounded-full transition-colors duration-200 focus:outline-none ${
-              autoLinkCaptures ? 'bg-primary' : 'bg-border'
-            }`}
-            title="Toggle auto-add captures"
-          >
-            <span
-              className={`pointer-events-none block h-4 w-4 rounded-full bg-background shadow-sm transition-transform duration-200 ${
-                autoLinkCaptures ? 'translate-x-[18px]' : 'translate-x-0.5'
-              }`}
-            />
-          </button>
-        </div>
-      </Section>
-
-      {/* ── Keyboard Shortcuts ── */}
-      <Section id="shortcuts" title="Keyboard Shortcuts" subtitle="Quick access keyboard triggers.">
-        <div className="space-y-4">
-          <div className="flex items-center justify-between gap-3">
-            <div className="min-w-0 flex-1">
-              <span className="text-xs font-semibold text-foreground">Toggle Side Panel</span>
-              <p className="text-[10px] text-muted-foreground font-mono mt-0.5 leading-normal">
-                Press <kbd className="px-1.5 py-0.5 rounded bg-muted border border-border text-[9px] font-sans font-bold shadow-sm">Alt + M</kbd> (Mac: <kbd className="px-1.5 py-0.5 rounded bg-muted border border-border text-[9px] font-sans font-bold shadow-sm">Option + M</kbd>).
-              </p>
-            </div>
-            <Button
-              variant="outline"
-              size="sm"
-              className="h-8 text-xs shrink-0 rounded-lg border-primary/20 hover:border-primary/40 hover:bg-primary/5 text-primary font-medium"
-              onClick={() => {
-                if (typeof chrome !== 'undefined' && chrome.tabs) {
-                  chrome.tabs.create({ url: 'chrome://extensions/shortcuts' });
-                }
-              }}
-            >
-              Configure
-            </Button>
-          </div>
-
-          <div className="flex items-center justify-between gap-3 pt-3 border-t border-border/40">
-            <div className="min-w-0 flex-1">
-              <span className="text-xs font-semibold text-foreground">Capture Page Instantly</span>
-              <p className="text-[10px] text-muted-foreground font-mono mt-0.5 leading-normal">
-                Press <kbd className="px-1.5 py-0.5 rounded bg-muted border border-border text-[9px] font-sans font-bold shadow-sm">Alt + C</kbd> (Mac: <kbd className="px-1.5 py-0.5 rounded bg-muted border border-border text-[9px] font-sans font-bold shadow-sm">Option + C</kbd>) on any page to clip it to your workspace with a toast notification.
-              </p>
-            </div>
-          </div>
-        </div>
-      </Section>
-
-      {/* ── Answering behavior ── */}
+      {/* ── How answers are made ── */}
+      <div className="px-4 pt-4 pb-1">
+        <h2 className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">How answers are made</h2>
+        <p className="text-[10px] text-muted-foreground/80 mt-0.5 leading-snug">Where answers come from and how deeply they are researched.</p>
+      </div>
       <Section id="answering" title="Answering" subtitle="Configure response generation sources.">
         <div className="flex items-center justify-between gap-3">
           <div className="min-w-0">
@@ -912,6 +924,31 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
             <span
               className={`pointer-events-none block h-4 w-4 rounded-full bg-background shadow-sm transition-transform duration-200 ${
                 webFallback ? 'translate-x-[18px]' : 'translate-x-0.5'
+              }`}
+            />
+          </button>
+        </div>
+
+        <div className="flex items-center justify-between gap-3">
+          <div className="min-w-0">
+            <span className="text-xs font-medium">Web-data agent (<code>/data</code>)</span>
+            <p className="text-[10px] text-muted-foreground font-mono mt-0.5 leading-normal">
+              Let <code>/data</code> discover a site's public APIs (from the page's own network calls) and fetch + analyze them. Credential-free — public data only. Off by default.
+            </p>
+          </div>
+          <button
+            type="button"
+            role="switch"
+            aria-checked={webDataAgent}
+            onClick={() => { const next = !webDataAgent; setWebDataAgent(next); saveResearchSetting({ webDataAgentEnabled: next }); }}
+            className={`shrink-0 relative inline-flex h-5 w-9 items-center rounded-full transition-colors duration-200 focus:outline-none ${
+              webDataAgent ? 'bg-primary' : 'bg-border'
+            }`}
+            title="Toggle the web-data agent"
+          >
+            <span
+              className={`pointer-events-none block h-4 w-4 rounded-full bg-background shadow-sm transition-transform duration-200 ${
+                webDataAgent ? 'translate-x-[18px]' : 'translate-x-0.5'
               }`}
             />
           </button>
@@ -1018,8 +1055,6 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           </p>
         </div>
       </Section>
-
-      {/* ── Research ── */}
       <Section id="research" title="Research" subtitle="Configure deep research parameters.">
         <div className="space-y-1.5">
           <label className="text-xs font-medium">Research depth</label>
@@ -1044,9 +1079,14 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
               <SelectValue />
             </SelectTrigger>
             <SelectContent className="border border-border rounded-lg shadow-card">
-              <SelectItem value="concise" className="font-mono text-xs">Concise — ~900-1500 words</SelectItem>
-              <SelectItem value="standard" className="font-mono text-xs">Standard — ~1800-3000 words</SelectItem>
-              <SelectItem value="comprehensive" className="font-mono text-xs">Comprehensive — ~2800-4500 words</SelectItem>
+              {/* Word counts come from REPORT_LENGTH_SPECS, not hardcoded here —
+                  typed by hand they silently become wrong the moment the specs
+                  are retuned, and the user is told a number the model never saw. */}
+              {(['concise', 'standard', 'comprehensive'] as const).map(k => (
+                <SelectItem key={k} value={k} className="font-mono text-xs">
+                  {k.charAt(0).toUpperCase() + k.slice(1)} — ~{REPORT_LENGTH_SPECS[k].total} words
+                </SelectItem>
+              ))}
             </SelectContent>
           </Select>
           <p className="text-[10px] text-muted-foreground font-mono leading-normal">
@@ -1110,54 +1150,6 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           />
         </div>
       </Section>
-
-      {/* ── Custom Commands ── */}
-      <Section id="skills" title="Custom Commands" subtitle="Register custom slash prompts." defaultOpen={false}>
-        {customSkills.length > 0 && (
-          <div className="space-y-2">
-            {customSkills.map(sk => (
-              <div key={sk.cmd} className="flex items-start gap-2 rounded-md border border-border bg-background p-2">
-                <div className="flex-1 min-w-0">
-                  <div className="text-xs font-bold font-mono text-primary">{sk.cmd}</div>
-                  <div className="text-[10px] text-muted-foreground font-mono truncate">{sk.desc}</div>
-                </div>
-                <button
-                  type="button"
-                  className="shrink-0 text-[11px] font-medium text-muted-foreground hover:text-destructive"
-                  onClick={() => persistSkills(customSkills.filter(x => x.cmd !== sk.cmd))}
-                >
-                  Remove
-                </button>
-              </div>
-            ))}
-          </div>
-        )}
-        <div className="space-y-1.5">
-          <label className="text-xs font-medium">Trigger</label>
-          <Input value={newCmd} onChange={e => setNewCmd(e.target.value)} placeholder="/competitors" className="rounded-lg text-xs" />
-        </div>
-        <div className="space-y-1.5">
-          <label className="text-xs font-medium">Description</label>
-          <Input value={newDesc} onChange={e => setNewDesc(e.target.value)} placeholder="Research the competitive landscape" className="rounded-lg text-xs" />
-        </div>
-        <div className="space-y-1.5">
-          <label className="text-xs font-medium">Prompt</label>
-          <textarea
-            value={newPrompt}
-            onChange={e => setNewPrompt(e.target.value)}
-            placeholder="You are a competitive analyst. For the topic, identify competitors..."
-            rows={3}
-            className="w-full rounded-lg border-input bg-background px-3 py-2 text-xs font-mono placeholder:text-muted-foreground focus:outline-none focus:border-primary"
-          />
-        </div>
-        {skillError && <p className="text-[10px] text-destructive font-mono">{skillError}</p>}
-        <Button variant="secondary" size="sm" onClick={addSkill} className="rounded-lg font-medium text-xs">Add command</Button>
-        <p className="text-[10px] text-muted-foreground font-mono leading-normal">
-          Commands execute prompt directives over workspace library context.
-        </p>
-      </Section>
-
-      {/* ── Research APIs ── */}
       <Section id="research-apis" title="Research APIs" subtitle="API search keys for agent retrieval." defaultOpen={false}>
         {([
           ['tavily', 'Tavily', 'tvly-…'],
@@ -1185,8 +1177,10 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           Preferred over keyless DuckDuckGo scraping. Keys stay local.
         </p>
       </Section>
-
-      {/* ── MCP Servers ── */}
+      {/* MCP servers are retrieval SOURCES, like the research APIs above —
+          not storage. They were filed under "Your library", whose own
+          subtitle says "where documents live and how they sync", which is
+          not what an MCP endpoint is. */}
       <Section id="mcp" title="MCP Servers" subtitle="Model Context Protocol HTTP servers." defaultOpen={false}>
         {mcpServers.map(server => (
           <div key={server.id} className="rounded-md border border-border bg-background p-2 space-y-1.5">
@@ -1309,8 +1303,99 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           Supports HTTP endpoints only. Keys stay local.
         </p>
       </Section>
-
-      {/* ── Storage ── */}
+      <Section id="skills" title="Custom Commands" subtitle="Register custom slash prompts." defaultOpen={false}>
+        {customSkills.length > 0 && (
+          <div className="space-y-2">
+            {customSkills.map(sk => (
+              <div key={sk.cmd} className="flex items-start gap-2 rounded-md border border-border bg-background p-2">
+                <div className="flex-1 min-w-0">
+                  <div className="text-xs font-bold font-mono text-primary">{sk.cmd}</div>
+                  <div className="text-[10px] text-muted-foreground font-mono truncate">{sk.desc}</div>
+                </div>
+                <button
+                  type="button"
+                  className="shrink-0 text-[11px] font-medium text-muted-foreground hover:text-destructive"
+                  onClick={() => persistSkills(customSkills.filter(x => x.cmd !== sk.cmd))}
+                >
+                  Remove
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+        <div className="space-y-1.5">
+          <label className="text-xs font-medium">Trigger</label>
+          <Input value={newCmd} onChange={e => setNewCmd(e.target.value)} placeholder="/competitors" className="rounded-lg text-xs" />
+        </div>
+        <div className="space-y-1.5">
+          <label className="text-xs font-medium">Description</label>
+          <Input value={newDesc} onChange={e => setNewDesc(e.target.value)} placeholder="Research the competitive landscape" className="rounded-lg text-xs" />
+        </div>
+        <div className="space-y-1.5">
+          <label className="text-xs font-medium">Prompt</label>
+          <textarea
+            value={newPrompt}
+            onChange={e => setNewPrompt(e.target.value)}
+            placeholder="You are a competitive analyst. For the topic, identify competitors..."
+            rows={3}
+            className="w-full rounded-lg border-input bg-background px-3 py-2 text-xs font-mono placeholder:text-muted-foreground focus:outline-none focus:border-primary"
+          />
+        </div>
+        {skillError && <p className="text-[10px] text-destructive font-mono">{skillError}</p>}
+        <Button variant="secondary" size="sm" onClick={addSkill} className="rounded-lg font-medium text-xs">Add command</Button>
+        <p className="text-[10px] text-muted-foreground font-mono leading-normal">
+          Commands execute prompt directives over workspace library context.
+        </p>
+      </Section>
+      {/* ── This workspace ── */}
+      <div className="px-4 pt-4 pb-1">
+        <h2 className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">This workspace</h2>
+        <p className="text-[10px] text-muted-foreground/80 mt-0.5 leading-snug">Applies only to the workspace you have open.</p>
+      </div>
+      <Section id="workspace-rules" title="Workspace Instructions" subtitle={`Persistent context for "${workspaceName.length > 48 ? workspaceName.slice(0, 45) + '…' : workspaceName}" — added to every prompt.`}>
+          <textarea
+            value={rulesDraft}
+            onChange={e => setRulesDraft(e.target.value)}
+            onBlur={() => { if (rulesDraft !== workspaceRules) saveWorkspaceRules(rulesDraft); }}
+            placeholder={"Tell Magpie your baseline rules (e.g. stack, formatting preferences, coding rules)."}
+            rows={4}
+            className="w-full rounded-lg border border-border bg-background px-3 py-2 text-xs leading-relaxed resize-y focus:outline-none focus:ring-2 focus:ring-ring"
+          />
+          <p className="text-[10px] text-muted-foreground leading-normal">
+            Applies only to this workspace. Saved automatically.
+          </p>
+      </Section>
+      <Section id="capture" title="Capture" subtitle="Configure page clipping settings.">
+        <div className="flex items-center justify-between gap-3">
+          <div className="min-w-0">
+            <span className="text-xs font-medium">Auto-add to active workspace</span>
+            <p className="text-[10px] text-muted-foreground font-mono mt-0.5 leading-normal">
+              Link new captures to the active workspace automatically.
+            </p>
+          </div>
+          <button
+            type="button"
+            role="switch"
+            aria-checked={autoLinkCaptures}
+            onClick={() => setAutoLinkCaptures(!autoLinkCaptures)}
+            className={`shrink-0 relative inline-flex h-5 w-9 items-center rounded-full transition-colors duration-200 focus:outline-none ${
+              autoLinkCaptures ? 'bg-primary' : 'bg-border'
+            }`}
+            title="Toggle auto-add captures"
+          >
+            <span
+              className={`pointer-events-none block h-4 w-4 rounded-full bg-background shadow-sm transition-transform duration-200 ${
+                autoLinkCaptures ? 'translate-x-[18px]' : 'translate-x-0.5'
+              }`}
+            />
+          </button>
+        </div>
+      </Section>
+      {/* ── Your library ── */}
+      <div className="px-4 pt-4 pb-1">
+        <h2 className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">Your library</h2>
+        <p className="text-[10px] text-muted-foreground/80 mt-0.5 leading-snug">Where documents live and how they sync.</p>
+      </div>
       <Section id="storage" title="Storage" subtitle="Local library & cross-device sync.">
           <div className="flex items-center justify-between gap-3">
             <div className="min-w-0">
@@ -1435,6 +1520,8 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                 </button>
               </div>
 
+              <SyncStatusPanel />
+
               <Button
                 variant="outline"
                 size="sm"
@@ -1443,10 +1530,76 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
               >
                 Force Resync All
               </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                className="w-full rounded-lg font-medium text-xs mt-1"
+                onClick={reconcileFromDrive}
+              >
+                Restore all from Drive
+              </Button>
+              <p className="text-[10px] text-muted-foreground mt-1 leading-normal">
+                Pulls every workspace back from Drive — recreating any that exist
+                only in the cloud. Use this after a reinstall to get your library back.
+              </p>
             </div>
           )}
       </Section>
+      {/* ── The app itself ── */}
+      <div className="px-4 pt-4 pb-1">
+        <h2 className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">The app itself</h2>
+      </div>
+      <Section id="appearance" title="Appearance" subtitle="Pick a palette. Village and Ghibli are illustrated light themes.">
+        <AppearanceSection />
+      </Section>
+      <Section id="shortcuts" title="Keyboard Shortcuts" subtitle="Quick access keyboard triggers.">
+        <div className="space-y-4">
+          <div className="flex items-center justify-between gap-3">
+            <div className="min-w-0 flex-1">
+              <span className="text-xs font-semibold text-foreground">Toggle Side Panel</span>
+              <p className="text-[10px] text-muted-foreground font-mono mt-0.5 leading-normal">
+                Press <kbd className="px-1.5 py-0.5 rounded bg-muted border border-border text-[9px] font-sans font-bold shadow-sm">Alt + M</kbd> (Mac: <kbd className="px-1.5 py-0.5 rounded bg-muted border border-border text-[9px] font-sans font-bold shadow-sm">Option + M</kbd>).
+              </p>
+            </div>
+            <Button
+              variant="outline"
+              size="sm"
+              className="h-8 text-xs shrink-0 rounded-lg border-primary/20 hover:border-primary/40 hover:bg-primary/5 text-primary font-medium"
+              onClick={() => {
+                if (typeof chrome !== 'undefined' && chrome.tabs) {
+                  chrome.tabs.create({ url: 'chrome://extensions/shortcuts' });
+                }
+              }}
+            >
+              Configure
+            </Button>
+          </div>
 
+          <div className="flex items-center justify-between gap-3 pt-3 border-t border-border/40">
+            <div className="min-w-0 flex-1">
+              <span className="text-xs font-semibold text-foreground">Capture Page Instantly</span>
+              <p className="text-[10px] text-muted-foreground font-mono mt-0.5 leading-normal">
+                Press <kbd className="px-1.5 py-0.5 rounded bg-muted border border-border text-[9px] font-sans font-bold shadow-sm">Alt + C</kbd> (Mac: <kbd className="px-1.5 py-0.5 rounded bg-muted border border-border text-[9px] font-sans font-bold shadow-sm">Option + C</kbd>) on any page to clip it to your workspace with a toast notification.
+              </p>
+            </div>
+          </div>
+        </div>
+      </Section>
+      <Section id="about" title="About" subtitle="Which build is actually running." defaultOpen={false}>
+        <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-[11px] font-mono">
+          <dt className="text-muted-foreground">Version</dt>
+          <dd>{chrome.runtime?.getManifest?.().version || '—'}</dd>
+          <dt className="text-muted-foreground">Panel build</dt>
+          <dd>{__BUILD_STAMP__}</dd>
+          <dt className="text-muted-foreground">Worker build</dt>
+          <dd>{workerBuild || 'asking…'}</dd>
+        </dl>
+        <p className="text-[10px] text-muted-foreground leading-normal">
+          The panel and the service worker are loaded separately. Reopening the panel
+          picks up panel changes; worker changes need a reload on chrome://extensions.
+          If these two stamps disagree, that is what happened.
+        </p>
+      </Section>
     </div>
   );
 };

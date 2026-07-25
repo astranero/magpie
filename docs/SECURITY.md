@@ -70,19 +70,85 @@ contacts `openrouter.ai` with a key read from env or the gitignored
    (`DATA_TRAILER` in `deep-researcher.ts`) after the source excerpts,
    re-asserting that the preceding text is untrusted data and instructing
    the model to ignore any instructions embedded in it.
-2. **LLM output → side panel.** Rendered via react-markdown (no
+
+   The same class of flow now also runs through **`/teach` and `/flashcard`**
+   (`background/teach.ts`): scraped page context and the workspace's own
+   research (`researchSourceText`) are fed into lesson / quiz / flashcard
+   prompts via `chatWithCustom`. These calls do **not** currently append the
+   `DATA_TRAILER` sandwich trailer — the blast radius is lower (the output is
+   lesson/card text, never a tool action or a live link, and citations still
+   resolve only to real chunks), but whether to extend the sandwich defense to
+   these surfaces is an open hardening decision, not a settled mitigation.
+2. **Fetching a PDF with the user's session (`EXTRACT_PDF`).** When a
+   background fetch of a PDF comes back empty — the usual cause is a host that
+   gates downloads and answers with a verification page — the content script
+   re-fetches the same URL from inside the page, so the request carries the
+   user's cookies.
+
+   The privilege boundary this crosses is worth stating plainly: the extension
+   is asking the page to fetch on its behalf, using credentials the extension
+   itself never sees. It is scoped to (a) a URL the extension already resolved
+   as a PDF, (b) the tab the user has open, (c) an explicit capture the user
+   initiated. It grants no access the user does not already have — if they
+   cannot open the PDF in that tab, neither can this — and it defeats no check;
+   the site's verification has already been satisfied by the user's own session.
+
+   It is NOT a general "fetch anything as the user" channel, and it must not
+   become one. Anything broader (arbitrary URLs, background-initiated,
+   cross-origin) would be a genuine escalation and belongs in this document
+   before it is written.
+
+2a. **Web-data agent (`/data`) — arbitrary URL fetch, but CREDENTIAL-FREE.**
+   The `/data` mode lets the model construct and fetch API/URL requests in a loop
+   (`agenticDataGather` → `http_get`/`fetch_page` → `fetchJson`/`scrapeUrl`,
+   `lib/fetch-guard.ts`). This is the "broader" channel item 2 warned about — so
+   it is deliberately built on the opposite side of that boundary:
+   - **No credentials, ever.** `http_get`'s `fetchJson` uses `credentials: 'omit'`;
+     no cookies or session ride along, even same-origin. `fetch_page` (used when a
+     site returns a `403`/block page to a direct API call) routes through the Jina
+     reader, which fetches the page server-side from Jina's own infrastructure —
+     so it too carries none of the user's session. Public data only. There is
+     nothing of the user's logged-in accounts to exfiltrate, which is what
+     neutralises the SSRF risk from a page-steered URL (page content is
+     attacker-influenceable and could try to steer a fetch). Note the reader is a
+     third party that sees the fetched URL — the same Jina trade-off already
+     flagged for research scraping.
+   - **URL policy.** `isAllowedFetchUrl` mirrors `isAllowedMcpUrl`: `https://` to
+     any host, `http://` only to loopback; static assets and known tracking hosts
+     rejected.
+   - **Caps.** A per-turn fetch cap (`DATA_MAX_FETCHES`), a per-host min-delay
+     rate limit (politeness / avoid bans), and per-call + total body-size caps.
+   - **Opt-in.** OFF by default (`webDataAgentEnabled`); the user turns it on in
+     Settings.
+   - **Endpoint discovery is URL-only + read-only.** The MAIN-world network
+     observer (`content/net-observer.ts`) records only `{method, url}` of the
+     page's own requests — never request/response bodies or headers — and the
+     service worker redacts token-like query values (`redactObservedUrl`) before
+     the model sees an endpoint. A complementary page-source scan
+     (`discoverPageEndpoints`) only reads the current DOM's outerHTML for api-ish
+     URLs. Neither reads credentials or storage.
+   - **Intent-driven, not tab-bound.** The loop is instructed to ignore the open
+     tab when it is not the answer's source and to discover the right sites via
+     web search; a keyless web-search floor runs when the model emits no tool
+     calls. None of this changes the fetch policy above — every fetch still passes
+     `isAllowedFetchUrl` and is credential-free.
+   The line vs `EXTRACT_PDF` (item 2): that one is credentialed but scoped to an
+   open-tab PDF; this one is arbitrary-URL but credential-free. Neither is a
+   credentialed-arbitrary-URL channel — that combination remains forbidden.
+
+3. **LLM output → side panel.** Rendered via react-markdown (no
    `dangerouslySetInnerHTML`); `urlTransform` restricts URLs to
    markdown-safe schemes plus `data:image/`. Citation chips only resolve
    against the local chunk store.
-3. **MCP servers.** Registering + enabling a server is the permission grant:
+4. **MCP servers.** Registering + enabling a server is the permission grant:
    research will POST the topic to that URL and index what comes back as a
    source. The URL is constrained: `isAllowedMcpUrl` (`lib/mcp-client.ts`)
    permits `https://` to any host but `http://` only to loopback
    (`localhost`/`127.0.0.1`/`[::1]`) — a non-conforming URL is rejected at
    save and connect time.
-4. **Imported files.** Local `.md`/PDF/images are parsed on-device
+5. **Imported files.** Local `.md`/PDF/images are parsed on-device
    (pdf.js with `isEvalSupported: false`; images inlined as data URLs).
-5. **Companion server (optional, `companion-mcp.js`).** If the user runs it,
+6. **Companion server (optional, `companion-mcp.js`).** If the user runs it,
    it exposes an `execute_command` tool on `localhost:3920` that runs arbitrary
    shell commands (the CLI-LLM route depends on this). It is gated by a shared
    token (v1.2+): the extension generates one (Settings → AI Provider
@@ -99,10 +165,13 @@ contacts `openrouter.ai` with a key read from env or the gitignored
 - `<all_urls>` host permission + content script: capture must work on any
   page the user is reading. Capture is user-initiated (toolbar/context menu).
 - `unlimitedStorage`: exempts the library from quota eviction.
-- `identity` is **optional** and only requested for Drive sync. The OAuth
-  grant (`manifest.json` `oauth2.scopes`) is `drive.file` (files Magpie
-  itself created — not the whole Drive) plus `userinfo.email` +
-  `userinfo.profile`, used solely to show which Google account is connected.
+- `identity` is **optional** and only requested for Drive sync — via a runtime
+  `chrome.permissions.request(['identity'])` from the user's click on "Sign in
+  with Google" (a reinstall resets the optional grant, so it must be re-requested
+  from a user gesture, not assumed). The OAuth grant (`manifest.json`
+  `oauth2.scopes`) is `drive.file` (files Magpie itself created — not the whole
+  Drive) plus `userinfo.email` + `userinfo.profile`, used solely to show which
+  Google account is connected.
 
 ## ⚖ Open decisions (tracked, not settled here)
 

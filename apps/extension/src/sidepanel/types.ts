@@ -46,6 +46,51 @@ export interface ChatMessage {
   /** A user message waiting in the queue behind an active research run —
    *  shown with a "Queued" badge until the run finishes and it executes. */
   queued?: boolean;
+  /** Marks a system message as a failed turn: the raw error string. The view
+   *  runs it through diagnoseError to show a recovery block instead of a bare
+   *  line. Set both from the live ERROR event and, on load, from the "⚠️ "-
+   *  prefixed system message the worker persists so the failure survives the
+   *  history reconcile. */
+  error?: string;
+  /** Images on this turn as data URLs: the user's attachment or images the
+   *  model generated. Rendered as thumbnails under the bubble. */
+  images?: string[];
+  /** Interactive quiz for a /teach lesson — rendered as a card under the text.
+   *  UI state only (per-question answers/verdicts live here). */
+  quiz?: QuizQuestion[];
+  /** A /flashcard deck — the message shows an "Open deck" button that launches
+   *  the full-panel player. */
+  deck?: Flashcard[];
+  /** Title for the deck (shown in the player header + open button). */
+  deckTitle?: string;
+  /** Command buttons under a message, e.g. "Continue → next lesson" (/teach). */
+  actions?: { label: string; command: string }[];
+}
+
+/** One flashcard: a recall cue and its answer. */
+export interface Flashcard {
+  front: string;
+  back: string;
+  hint?: string;
+}
+
+/**
+ * One interactive quiz question under a lesson. `mcq` is checked locally; `open`
+ * is graded by the LLM. The `ui*` fields are per-question local state, mutated
+ * as the learner answers — the quiz is never persisted, like ResearchPlan.
+ */
+export interface QuizQuestion {
+  type: 'mcq' | 'open';
+  prompt: string;
+  options?: string[];
+  answerIndex?: number;
+  modelAnswer?: string;
+  explanation?: string;
+  /** Local state ↓ */
+  uiAnswer?: string;                 // open: typed text / mcq: selected option index as string
+  uiVerdict?: 'correct' | 'partial' | 'incorrect' | 'revealed';
+  uiFeedback?: string;               // grader's one-liner (open)
+  uiGrading?: boolean;               // open: awaiting the grade call
 }
 
 /**
@@ -86,4 +131,4 @@ export interface TabInfo {
   favIconUrl?: string;
 }
 
-export type View = 'lore' | 'chat' | 'settings' | 'document';
+export type View = 'lore' | 'chat' | 'settings' | 'document' | 'flashcards';

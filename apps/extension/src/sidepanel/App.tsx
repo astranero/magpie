@@ -21,19 +21,52 @@ const sanitizeSegment = (name: string): string =>
     .trim()
     .slice(0, 100);
 import { FileText } from 'lucide-react';
-import { LocalDocument, Project, Chat, ChatMessage, ResearchPlan, ResolvedCitation, TabInfo, View } from './types';
+import { LocalDocument, Project, Chat, ChatMessage, ResearchPlan, ResolvedCitation, TabInfo, View, Flashcard } from './types';
 import { LinkPreview, LinkPreviewState } from './components/LinkPreview';
 import { Header } from './components/layout/Header';
 import { Navbar } from './components/layout/Navbar';
 import { Button } from '@/components/ui/button';
+import { DriveImportDialog, DriveFile } from '@/sidepanel/components/DriveImportDialog';
 
 // Lazy-load view components — they're heavy (markdown renderer, KaTeX, icons)
 // and only one view is visible at a time. Code-splitting shaves ~600 KB from
 // the initial sidepanel bundle.
-const LoreView = lazy(() => import('./components/LoreView').then(m => ({ default: m.LoreView })));
-const ChatView = lazy(() => import('./components/ChatView').then(m => ({ default: m.ChatView })));
-const SettingsView = lazy(() => import('./components/SettingsView').then(m => ({ default: m.SettingsView })));
-const DocumentView = lazy(() => import('./components/DocumentView').then(m => ({ default: m.DocumentView })));
+//
+// A panel left open across a rebuild references chunk hashes that no longer
+// exist, so the next lazy import throws "Failed to fetch dynamically imported
+// module: …SettingsView-<oldhash>.js" and the view hard-crashes. That is the
+// recurring stale-chunk error. `reloadableImport` self-heals it: on a
+// dynamic-import failure it reloads the panel ONCE (a sessionStorage guard
+// prevents a reload loop if the failure is something other than a stale chunk),
+// which fetches the current index that references the current hashes.
+const CHUNK_RELOAD_KEY = 'magpie-chunk-reload';
+function reloadableImport<T>(factory: () => Promise<T>): Promise<T> {
+  return factory().then((mod) => {
+    // A clean import means the guard did its job (or was never needed): clear
+    // it so a LATER stale build can heal too — one reload per stale build, not
+    // one per session.
+    try { sessionStorage.removeItem(CHUNK_RELOAD_KEY); } catch { /* ignore */ }
+    return mod;
+  }).catch((err) => {
+    let already = false;
+    try { already = sessionStorage.getItem(CHUNK_RELOAD_KEY) === '1'; } catch { /* private mode */ }
+    if (!already && typeof location !== 'undefined') {
+      try { sessionStorage.setItem(CHUNK_RELOAD_KEY, '1'); } catch { /* ignore */ }
+      location.reload();
+      // Never resolve — the reload replaces this document before React renders.
+      return new Promise<T>(() => {});
+    }
+    // Second failure without a successful load in between → genuinely broken,
+    // not a stale chunk. Let the ErrorBoundary show it instead of looping.
+    throw err;
+  });
+}
+
+const LoreView = lazy(() => reloadableImport(() => import('./components/LoreView').then(m => ({ default: m.LoreView }))));
+const ChatView = lazy(() => reloadableImport(() => import('./components/ChatView').then(m => ({ default: m.ChatView }))));
+const SettingsView = lazy(() => reloadableImport(() => import('./components/SettingsView').then(m => ({ default: m.SettingsView }))));
+const DocumentView = lazy(() => reloadableImport(() => import('./components/DocumentView').then(m => ({ default: m.DocumentView }))));
+const DeckView = lazy(() => reloadableImport(() => import('./components/DeckView').then(m => ({ default: m.DeckView }))));
 
 import { findPromptCommand, buildHelpText, loadCustomSkills, SlashCommand } from '../lib/commands';
 import { contentHasTag } from '../lib/frontmatter';
@@ -78,6 +111,41 @@ function byokHostLabel(url: string): string {
 
 function sameStrings(a: string[], b: string[]): boolean {
   return a.length === b.length && a.every((value, index) => value === b[index]);
+}
+
+/**
+ * Downscale an image file to a JPEG data URL, longest edge capped.
+ *
+ * Vision models are billed by image tokens and the result is stored in an
+ * IndexedDB row, so a 12-megapixel phone photo is downscaled before either.
+ * 1024px is enough to read a screenshot; the constant is the one knob to raise
+ * if fine text matters more than size. Falls back to the original data URL if
+ * the canvas path fails (e.g. a format the browser won't decode).
+ */
+const MAX_IMAGE_EDGE = 1024;
+function downscaleImage(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error('Could not read the image file.'));
+    reader.onload = () => {
+      const dataUrl = String(reader.result || '');
+      const img = new Image();
+      img.onerror = () => resolve(dataUrl);   // undecodable → send as-is, let the model decide
+      img.onload = () => {
+        const scale = Math.min(1, MAX_IMAGE_EDGE / Math.max(img.width, img.height));
+        if (scale >= 1) { resolve(dataUrl); return; }   // already small enough
+        const canvas = document.createElement('canvas');
+        canvas.width = Math.round(img.width * scale);
+        canvas.height = Math.round(img.height * scale);
+        const ctx = canvas.getContext('2d');
+        if (!ctx) { resolve(dataUrl); return; }
+        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+        resolve(canvas.toDataURL('image/jpeg', 0.8));
+      };
+      img.src = dataUrl;
+    };
+    reader.readAsDataURL(file);
+  });
 }
 
 export default function App() {
@@ -198,7 +266,7 @@ const [enterpriseGitHubUrl, setEnterpriseGitHubUrl] = useState('');
   // Chat questions queued behind an active research run (per chat), drained in
   // order when the run finishes. A ref so the once-registered DONE listener
   // always calls the freshest drain closure.
-  const queuedRef = useRef<Record<string, Array<{ id: string; text: string; forcePageContext: boolean; projectId: string }>>>({});
+  const queuedRef = useRef<Record<string, Array<{ id: string; text: string; forcePageContext: boolean; projectId: string; imageDataUrl?: string; allowImageOutput?: boolean }>>>({});
   const drainQueueRef = useRef<(projectId: string) => void>(() => {});
 
 
@@ -338,6 +406,11 @@ loadChatHistory(activeChatId).then(() => {
   // Drive
   const [authed, setAuthed] = useState(false);
   const [syncing, setSyncing] = useState(false);
+  // What the sync/import is doing right now. These loop over every document
+  // and used to run in complete silence, which reads as nothing happening.
+  const [syncStatus, setSyncStatus] = useState('');
+  // Non-null while the Drive import picker is open; holds what Drive listed.
+  const [driveFiles, setDriveFiles] = useState<DriveFile[] | null>(null);
   const [profile, setProfile] = useState<{ name: string; email: string; picture: string } | null>(null);
 
   // Chat
@@ -348,6 +421,27 @@ loadChatHistory(activeChatId).then(() => {
   const [generating, setGenerating] = useState<Record<string, boolean>>({});
   // Live phase line for the thinking indicator ("Reading the page…")
   const [thinkingStatus, setThinkingStatus] = useState<Record<string, string>>({});
+  // Reasoning-model chain of thought for the CURRENT turn, per chat. Ephemeral
+  // by design: never saved, cleared when the next turn starts. It exists so a
+  // model that thinks for a minute before its first answer token shows signs
+  // of life instead of a frozen 'Thinking…'.
+  const [reasoning, setReasoning] = useState<Record<string, string>>({});
+  // Suggested next questions for the last answer, per chat. Ephemeral like
+  // reasoning: never saved, cleared when the next turn starts.
+  const [followUps, setFollowUps] = useState<Record<string, string[]>>({});
+  // Where answers may come from. 'auto' is the router deciding, as before.
+  const [sourceMode, setSourceMode] = useState<'auto' | 'sources' | 'web' | 'general'>('auto');
+  // An image attached to the NEXT send (data URL, already downscaled), and
+  // whether the user opted into image output. Read via refs in `send` for the
+  // same stale-closure reason inputRef exists.
+  const [pendingImage, setPendingImage] = useState<string | null>(null);
+  const pendingImageRef = useRef<string | null>(null);
+  // Active flashcard deck for the full-panel player (view === 'flashcards').
+  const [activeDeck, setActiveDeck] = useState<{ title: string; cards: Flashcard[] } | null>(null);
+  useEffect(() => { pendingImageRef.current = pendingImage; }, [pendingImage]);
+  const [imageOutput, setImageOutput] = useState(false);
+  const imageOutputRef = useRef(false);
+  useEffect(() => { imageOutputRef.current = imageOutput; }, [imageOutput]);
   const [researching, setResearching] = useState<Record<string, boolean>>({});
   const [researchLogs, setResearchLogs] = useState<Record<string, string[]>>({});
   const msgEnd = useRef<HTMLDivElement>(null);
@@ -610,6 +704,20 @@ loadChatHistory(activeChatId).then(() => {
         let aId = mirrorStreamRef.current[m.chatId];
         if (!aId) { aId = uid(); mirrorStreamRef.current[m.chatId] = aId; setGenerating(prev => ({ ...prev, [m.chatId]: true })); }
         appendMirrorDelta(m.chatId, aId, (m.text as string) || '');
+        return;
+      }
+      if (m.action === 'SYNC_PROGRESS') {
+        setSyncStatus((m.text as string) || '');
+        return;
+      }
+      if (m.action === 'CHAT_FOLLOWUPS') {
+        if (streamingChatsRef.current.has(m.chatId)) return;
+        setFollowUps(prev => ({ ...prev, [m.chatId]: (m.items as string[]) || [] }));
+        return;
+      }
+      if (m.action === 'CHAT_REASONING') {
+        if (streamingChatsRef.current.has(m.chatId)) return; // our own port already delivered it
+        setReasoning(prev => ({ ...prev, [m.chatId]: (prev[m.chatId] || '') + ((m.text as string) || '') }));
         return;
       }
       if (m.action === 'CHAT_RESET') {
@@ -1061,6 +1169,9 @@ loadChatHistory(activeChatId).then(() => {
       const newId = res.id as string;
       await loadProjects();
       setActiveProjectId(newId);
+      // Create this workspace's Drive subfolder eagerly so Magpie/<name>/ shows
+      // up right away (no-op if Drive isn't connected). Fire-and-forget.
+      msg('ENSURE_PROJECT_SUBFOLDER', { projectId: newId }).catch(() => {});
     }
   };
 
@@ -1163,8 +1274,16 @@ loadChatHistory(activeChatId).then(() => {
         // onboarding card. (A synthetic "welcome" system message used to live
         // here, but it lingered above real messages after the first send —
         // optimistic sends append onto whatever's already in the array.)
+        // The worker persists a failed turn as a system message prefixed with
+        // "⚠️ " (so the CHAT_STATE reconcile doesn't wipe it — see the comment
+        // at its saveChatMessage). Re-tag those on load so the recovery block
+        // renders from history too, not just in the brief window before the
+        // reconcile replaced the in-memory error-marked message.
         const hist = (res.messages as any[]).length > 0
-          ? (res.messages as ChatMessage[])
+          ? (res.messages as ChatMessage[]).map(m =>
+              m.role === 'system' && typeof m.text === 'string' && m.text.startsWith('⚠️ ') && !m.error
+                ? { ...m, error: m.text.slice(2).trim() }
+                : m)
           : [];
         return { ...prev, [chatId]: [...hist, ...pendingPlans] };
       });
@@ -1198,6 +1317,8 @@ loadChatHistory(activeChatId).then(() => {
           if (r.visionModel) setVisionModel(r.visionModel);
           setAutoLinkCaptures(r.autoLinkCaptures !== false); // default ON
           setIncludePageContext(r.includePageContext !== false); // default ON
+          if (r.chatSourceMode) setSourceMode(r.chatSourceMode as any);
+          if (typeof r.chatImageOutput === 'boolean') setImageOutput(r.chatImageOutput);
           setSyncResearchSources(r.syncResearchSources === true); // default OFF
           if (typeof r.routeChatThroughCli === 'boolean') {
             setRouteChatThroughCli(r.routeChatThroughCli ? 'enabled' : 'disabled');
@@ -1422,13 +1543,26 @@ loadChatHistory(activeChatId).then(() => {
   };
 
   const login = async () => {
+    // `identity` is an OPTIONAL permission (not granted on install, and reset by
+    // a full reinstall). Request it from this user gesture BEFORE the worker
+    // touches chrome.identity — otherwise the worker sees chrome.identity ===
+    // undefined and rejects with "Google sign-in is not available." The side
+    // panel is an extension page, so permissions.request works within the click.
+    try {
+      const has = await chrome.permissions.contains({ permissions: ['identity'] });
+      if (!has) {
+        const granted = await chrome.permissions.request({ permissions: ['identity'] });
+        if (!granted) { showToast('error', 'Google sign-in needs the “identity” permission — it wasn’t granted.'); return; }
+      }
+    } catch { /* older Chrome without runtime optional perms: fall through and let the worker try */ }
     const res = await msg('GET_OAUTH_TOKEN_INTERACTIVE');
     if (res.success && res.token) {
       setAuthed(true);
       loadProfile(res.token as string);
-      // "Login and it just works": pull the user's Drive folder in, then push
-      // anything local that isn't there yet — no separate Sync click needed.
-      importFromDrive().then(() => syncToDrive()).catch(() => {});
+      // "Login and it just works": pull EVERY workspace back from Drive
+      // (recreating any that exist only in remote), then push anything local
+      // that isn't there yet — no separate Sync click needed.
+      reconcileFromDrive().then(() => syncToDrive()).catch(() => {});
     } else {
       const err = String(res.error || '');
       // A missing/placeholder oauth2.client_id surfaces as "bad client id" /
@@ -1448,48 +1582,148 @@ loadChatHistory(activeChatId).then(() => {
 
   const syncToDrive = async () => {
     setSyncing(true);
-    const res = await msg('SYNC_TO_DRIVE', { interactive: true });
-    setSyncing(false);
-    if (res.success) {
-      showToast('success', `✓ Synced ${res.synced}/${res.total} documents to Drive`);
-      loadDocuments(activeProjectId);
-    } else {
-      showToast('error', (res.error as string) || 'Sync failed — sign in to Google in Settings');
+    setSyncStatus('Uploading to Drive…');
+    try {
+      const res = await msg('SYNC_TO_DRIVE', { interactive: true });
+      if (res.success) {
+        const n = Number(res.synced) || 0;
+        showToast(n > 0 ? 'success' : 'info',
+          n > 0 ? `✓ Synced ${n}/${res.total} documents to Drive`
+                : 'Nothing to sync — every document is already up to date in Drive.');
+        loadDocuments(activeProjectId);
+      } else {
+        showToast('error', (res.error as string) || 'Sync failed — sign in to Google in Settings');
+      }
+    } catch (e: any) {
+      showToast('error', e?.message || 'Sync failed');
+    } finally {
+      setSyncing(false);
+      setSyncStatus('');
     }
   };
 
   const forceResync = async () => {
     setSyncing(true);
-    // Clear cached folder ID so ensureFolder re-checks/creates the folder
-    // (fixes the case where the cached ID points at a trashed/deleted folder)
-    if (typeof chrome !== 'undefined' && chrome.storage) {
-      await chrome.storage.local.remove('driveFolderId');
-    }
-    const resetRes = await msg('RESET_SYNC_STATUS');
-    if (!resetRes.success) {
+    try {
+      // Clear cached folder ID so ensureFolder re-checks/creates the folder
+      // (fixes the case where the cached ID points at a trashed/deleted folder)
+      if (typeof chrome !== 'undefined' && chrome.storage) {
+        await chrome.storage.local.remove('driveFolderId');
+      }
+      const resetRes = await msg('RESET_SYNC_STATUS');
+      if (!resetRes.success) {
+        showToast('error', (resetRes.error as string) || 'Reset failed');
+        return;
+      }
+      // resetCount is what makes "force" meaningful: it is how many documents
+      // were marked unsynced and will therefore be re-uploaded. Reporting it up
+      // front is the difference between "nothing happened" and "re-uploading 55".
+      const queued = Number(resetRes.resetCount) || 0;
+      setSyncStatus(queued > 0 ? `Re-uploading ${queued} document${queued === 1 ? '' : 's'}…` : 'Checking Drive…');
+      const res = await msg('SYNC_TO_DRIVE', { interactive: true });
+      if (res.success) {
+        const n = Number(res.synced) || 0;
+        // "✓ Resynced 0/0" read as success while looking like nothing happened.
+        showToast(n > 0 ? 'success' : 'info',
+          n > 0 ? `✓ Resynced ${n}/${res.total} documents to Drive`
+                : 'Nothing to sync — every document is already up to date in Drive.');
+        loadDocuments(activeProjectId);
+      } else {
+        showToast('error', (res.error as string) || 'Sync failed');
+      }
+    } catch (e: any) {
+      showToast('error', e?.message || 'Resync failed');
+    } finally {
       setSyncing(false);
-      showToast('error', (resetRes.error as string) || 'Reset failed');
-      return;
-    }
-    const res = await msg('SYNC_TO_DRIVE', { interactive: true });
-    setSyncing(false);
-    if (res.success) {
-      showToast('success', `✓ Resynced ${res.synced}/${res.total} documents to Drive`);
-      loadDocuments(activeProjectId);
-    } else {
-      showToast('error', (res.error as string) || 'Sync failed');
+      setSyncStatus('');
     }
   };
 
+  /**
+   * Step 1 of import: read the Drive folder and show the picker.
+   *
+   * This used to import everything the listing returned, with no way to choose
+   * — and the listing was capped at one page, so on a large folder it looked
+   * like it imported at random.
+   */
   const importFromDrive = async () => {
-    setSyncing(true);
-    const res = await msg('IMPORT_FROM_DRIVE');
-    setSyncing(false);
-    if (res.success) {
-      showToast('success', `✓ Imported ${res.imported} documents from Drive`);
-      loadDocuments(activeProjectId);
-    } else {
-      showToast('error', (res.error as string) || 'Import failed');
+    // The handler requires a projectId (imported docs are linked to a
+    // workspace). This call sent NO payload at all, so every import failed with
+    // "projectId is required for importing" — the id was in scope the whole
+    // time, two lines below in loadDocuments.
+    if (!activeProjectId) { showToast('error', 'Select a workspace first — imported documents are linked to one.'); return; }
+    setImporting(true);
+    setSyncStatus('Reading your Drive folder…');
+    try {
+      const res = await msg('LIST_DRIVE_FILES', { projectId: activeProjectId });
+      if (!res.success) {
+        showToast('error', (res.error as string) || 'Could not read Drive — sign in to Google in Settings');
+        return;
+      }
+      const files = ((res.files as DriveFile[]) || []).filter(f => /\.md$/i.test(f.name || ''));
+      if (files.length === 0) {
+        showToast('info', 'No Markdown files found in this workspace’s Drive folder.');
+        return;
+      }
+      setDriveFiles(files);
+    } catch (e: any) {
+      showToast('error', e?.message || 'Could not read Drive.');
+    } finally {
+      // ALWAYS release — a throw here used to freeze the Lore status and lock Sync.
+      setImporting(false);
+      setSyncStatus('');
+    }
+  };
+
+  // Full two-way pull: rebuild every workspace from its Drive subfolder,
+  // creating any workspace that exists only in Drive. This is the "sync it all
+  // back" path — used on login and from the Settings "Restore all from Drive".
+  const reconcileFromDrive = async () => {
+    setImporting(true);
+    setSyncStatus('Restoring from Drive…');
+    try {
+      const res = await msg('RECONCILE_FROM_DRIVE', { interactive: true });
+      if (res.success) {
+        const n = Number(res.imported) || 0;
+        const p = Number(res.projectsCreated) || 0;
+        showToast(n > 0 ? 'success' : 'info',
+          n > 0
+            ? `✓ Restored ${n} document${n === 1 ? '' : 's'} from Drive${p ? ` into ${p} workspace${p === 1 ? '' : 's'}` : ''}`
+            : 'Drive is already in sync with your local library.');
+        if (activeProjectId) loadDocuments(activeProjectId);
+      } else {
+        showToast('error', (res.error as string) || 'Could not restore from Drive.');
+      }
+    } catch (e: any) {
+      showToast('error', e?.message || 'Could not restore from Drive.');
+    } finally {
+      setImporting(false);
+      setSyncStatus('');
+    }
+  };
+
+  /** Step 2: import exactly what was ticked. */
+  const runDriveImport = async (fileIds: string[]) => {
+    setDriveFiles(null);
+    if (!activeProjectId) return;
+    setImporting(true);
+    setSyncStatus(`Importing 0/${fileIds.length} from Drive…`);
+    try {
+      const res = await msg('IMPORT_FROM_DRIVE', { projectId: activeProjectId, fileIds });
+      if (res.success) {
+        const n = Number(res.imported) || 0;
+        showToast(n > 0 ? 'success' : 'info',
+          n > 0 ? `✓ Imported ${n} document${n === 1 ? '' : 's'} from Drive`
+                : 'Nothing new to import — Drive matches your library.');
+        if (n > 0) loadDocuments(activeProjectId);
+      } else {
+        showToast('error', (res.error as string) || 'Import failed');
+      }
+    } catch (e: any) {
+      showToast('error', e?.message || 'Import failed');
+    } finally {
+      setImporting(false);
+      setSyncStatus('');
     }
   };
 
@@ -1534,6 +1768,9 @@ loadChatHistory(activeChatId).then(() => {
       [currentChatId]: [...(prev[currentChatId] || []), commandMsg]
     }));
     setGenerating(prev => ({ ...prev, [currentChatId]: true }));
+    // Previous turn's chain of thought belongs to the previous answer.
+    setReasoning(prev => (prev[currentChatId] ? { ...prev, [currentChatId]: '' } : prev));
+    setFollowUps(prev => (prev[currentChatId]?.length ? { ...prev, [currentChatId]: [] } : prev));
     streamingChatsRef.current.add(currentChatId);
 
     const port = chrome.runtime.connect({ name: 'chat-stream' });
@@ -1558,6 +1795,10 @@ loadChatHistory(activeChatId).then(() => {
     port.onMessage.addListener((m: any) => {
       if (m.type === 'STATUS') {
         setThinkingStatus(prev => ({ ...prev, [currentChatId]: m.text || '' }));
+      } else if (m.type === 'FOLLOWUPS') {
+        setFollowUps(prev => ({ ...prev, [currentChatId]: (m.items as string[]) || [] }));
+      } else if (m.type === 'REASONING') {
+        setReasoning(prev => ({ ...prev, [currentChatId]: (prev[currentChatId] || '') + (m.text || '') }));
       } else if (m.type === 'DELTA') {
         setThinkingStatus(prev => prev[currentChatId] ? { ...prev, [currentChatId]: '' } : prev);
         pushDelta(currentChatId, assistantId, m.text);
@@ -1720,32 +1961,92 @@ loadChatHistory(activeChatId).then(() => {
 
     // /create-skill [focus] — distill the workspace's research into a
     // reusable custom slash command (saved to Settings → Custom Commands)
+    // /flashcard — build a study deck from the workspace's research and open the
+    // full-panel player. The message keeps the deck so it can be reopened later.
+    if (text.toLowerCase() === '/flashcard' || text.toLowerCase().startsWith('/flashcard ')) {
+      const topic = text.slice('/flashcard'.length).trim();
+      setInput('');
+      const currentChatId = activeChatId;
+      const ts = new Date().toISOString();
+      setMessages(prev => ({
+        ...prev,
+        [currentChatId]: [...(prev[currentChatId] || []), { id: uid(), role: 'user', text }]
+      }));
+      void persistMsg(currentChatId, { role: 'user', text }, ts);
+      setGenerating(prev => ({ ...prev, [currentChatId]: true }));
+      const res = await msg('FLASHCARDS', { projectId: activeProjectId, chatId: currentChatId, topic, includePageContext });
+      setGenerating(prev => ({ ...prev, [currentChatId]: false }));
+      const deckCards = res.cards as Flashcard[] | undefined;
+      if (res.success !== false && Array.isArray(deckCards) && deckCards.length) {
+        const deckTitle = String(res.title || 'Study deck');
+        const dtext = `**${deckTitle}** — ${deckCards.length} cards, built from this workspace's research and saved to Lore. Tap **Study deck** to play; reopen it any time.`;
+        setMessages(prev => ({
+          ...prev,
+          [currentChatId]: [...(prev[currentChatId] || []), {
+            id: uid(), role: 'assistant' as const, text: dtext, deck: deckCards, deckTitle,
+          }]
+        }));
+        void persistMsg(currentChatId, { role: 'assistant', text: dtext, deck: deckCards, deckTitle }, new Date(Date.now() + 1).toISOString());
+        setActiveDeck({ title: deckTitle, cards: deckCards });
+        setView('flashcards');
+        if (res.docId) loadDocuments(activeProjectId);
+      } else {
+        const etext = `Couldn't build a deck: ${res.error || 'unknown error'}`;
+        setMessages(prev => ({
+          ...prev,
+          [currentChatId]: [...(prev[currentChatId] || []), { id: uid(), role: 'assistant', text: etext }]
+        }));
+        void persistMsg(currentChatId, { role: 'assistant', text: etext }, new Date(Date.now() + 1).toISOString());
+      }
+      return;
+    }
+
     // /teach — mission on first use, then a saved lesson each time. The lesson
     // is saved to Lore AND previewed in chat so the learner reads it immediately.
     if (text.toLowerCase() === '/teach' || text.toLowerCase().startsWith('/teach ')) {
       const topic = text.slice('/teach'.length).trim();
       setInput('');
       const currentChatId = activeChatId;
+      const ts = new Date().toISOString();
       setMessages(prev => ({
         ...prev,
         [currentChatId]: [...(prev[currentChatId] || []), { id: uid(), role: 'user', text }]
       }));
+      void persistMsg(currentChatId, { role: 'user', text }, ts);
       setGenerating(prev => ({ ...prev, [currentChatId]: true }));
       const res = await msg('TEACH', { projectId: activeProjectId, chatId: currentChatId, topic, includePageContext });
       setGenerating(prev => ({ ...prev, [currentChatId]: false }));
       let body: string;
-      if (res.success !== false && res.title) {
+      let quiz: any;
+      let actions: { label: string; command: string }[] | undefined;
+      if (res.reset) {
+        body = `**Course reset.** Cleared the mission${res.deleted ? ` and removed ${res.deleted} lesson/plan doc(s)` : ''}. Run \`/teach\` again and I'll build a fresh course from this workspace's research.`;
+        actions = [{ label: 'Start course', command: '/teach' }];
+      } else if (res.courseComplete) {
+        body = String(res.body || 'Course complete.');
+        actions = [{ label: '↻ Restart course', command: '/teach reset' }];
+      } else if (res.success !== false && res.title) {
         const header = res.missionCreated
-          ? `**Course started.** I've set this workspace's mission to:\n\n> ${res.mission}\n\nIf that's not quite your goal, say so — every lesson is built from it.\n\n---\n\n`
+          ? `**Course started.** I've set this workspace's mission to:\n\n> ${res.mission}\n\nNot your goal? Tap **Reset course** to rebuild it from your research.\n\n---\n\n`
           : '';
-        body = `${header}## Lesson ${res.lessonNumber}: ${res.title}\n\n${res.body}\n\n---\n*Lesson also saved to Lore — use \`/teach\` again when you're ready for the next one.*`;
+        // First time a syllabus is built from the research: show the course plan.
+        const plan = Array.isArray(res.syllabus) && res.syllabus.length
+          ? `**Course plan** (built from this workspace's research):\n\n${res.syllabus.map((s: any) => `${s.n}. **${s.title}** — ${s.covers || s.goal}`).join('\n')}\n\n---\n\n`
+          : '';
+        body = `${header}${plan}## Lesson ${res.lessonNumber}: ${res.title}\n\n${res.body}\n\n---\n*Saved to Lore. Use the buttons below to continue or start over.*`;
+        quiz = Array.isArray(res.quiz) && res.quiz.length ? res.quiz : undefined;
+        actions = [
+          { label: 'Continue → next lesson', command: '/teach' },
+          { label: 'Reset course', command: '/teach reset' },
+        ];
       } else {
         body = `Couldn't build the lesson: ${res.error || 'unknown error'}`;
       }
       setMessages(prev => ({
         ...prev,
-        [currentChatId]: [...(prev[currentChatId] || []), { id: uid(), role: 'assistant', text: body }]
+        [currentChatId]: [...(prev[currentChatId] || []), { id: uid(), role: 'assistant', text: body, ...(quiz ? { quiz } : {}), ...(actions ? { actions } : {}) }]
       }));
+      void persistMsg(currentChatId, { role: 'assistant', text: body, quiz, actions }, new Date(Date.now() + 1).toISOString());
       if (res.success !== false && res.title) loadDocuments(activeProjectId);
       return;
     }
@@ -1825,6 +2126,13 @@ loadChatHistory(activeChatId).then(() => {
     const currentProjectId = activeProjectId;
     setInput('');
 
+    // Consume the pending image + image-output preference for THIS send (queued
+    // or not) so an attachment isn't dropped when the send is deferred behind a
+    // research run.
+    const imageDataUrl = pendingImageRef.current || undefined;
+    const allowImageOutput = imageOutputRef.current;
+    if (imageDataUrl) setPendingImage(null);
+
     // Real queue: while research runs on this project, a chat question waits
     // behind it instead of racing it. Show the message now with a "Queued"
     // badge; drainQueue runs it (and any others, in order) once research ends.
@@ -1835,15 +2143,79 @@ loadChatHistory(activeChatId).then(() => {
         [currentChatId]: [...(prev[currentChatId] || []), {
           id: queuedId, role: 'user' as const,
           text: forcePageContext ? `[📄 Current Page] ${messageText}` : messageText,
-          queued: true
+          queued: true,
+          ...(imageDataUrl ? { images: [imageDataUrl] } : {}),
         }]
       }));
-      (queuedRef.current[currentChatId] ||= []).push({ id: queuedId, text: messageText, forcePageContext, projectId: currentProjectId });
+      (queuedRef.current[currentChatId] ||= []).push({ id: queuedId, text: messageText, forcePageContext, projectId: currentProjectId, imageDataUrl, allowImageOutput });
       return;
     }
 
     maybeAutoNameProject(messageText).catch(() => {});
-    await runChatStream(currentChatId, currentProjectId, messageText, forcePageContext);
+    await runChatStream(currentChatId, currentProjectId, messageText, forcePageContext, undefined, { imageDataUrl, allowImageOutput });
+  };
+
+  /**
+   * Re-run a turn after discarding the transcript from `fromId` onward.
+   *
+   * Regenerate and edit-and-re-run are the same operation: truncate, then ask
+   * again. Deliberately reuses runChatStream rather than adding a second
+   * streaming path — the service worker re-saves the user turn and the new
+   * answer exactly as it does for a freshly typed message.
+   */
+  const rerunFrom = async (fromId: string, questionText: string) => {
+    if (!activeChatId || !activeProjectId || generating[activeChatId]) return;
+    const chatId = activeChatId;
+    const projectId = activeProjectId;
+
+    const res = await msg('TRUNCATE_CHAT_FROM', { chatId, messageId: fromId });
+    if (res?.found === false) {
+      // The transcript on screen and the stored one disagree — re-running now
+      // would append to history the user thinks they just discarded.
+      showToast('error', 'That message is no longer in the saved history — reopen the chat and try again.');
+      return;
+    }
+
+    setMessages(prev => {
+      const list = prev[chatId] || [];
+      const idx = list.findIndex(m => m.id === fromId);
+      return idx === -1 ? prev : { ...prev, [chatId]: list.slice(0, idx) };
+    });
+
+    await runChatStream(chatId, projectId, questionText, false);
+  };
+
+  /** Ask the same question again, discarding only this answer. */
+  const regenerateAnswer = async (assistantId: string) => {
+    const list = messages[activeChatId] || [];
+    const idx = list.findIndex(m => m.id === assistantId);
+    if (idx === -1) return;
+    // Walk back to the question this answer belongs to; the turn is re-sent
+    // from there so the worker sees the same shape as the original run.
+    let q = idx - 1;
+    while (q >= 0 && list[q].role !== 'user') q--;
+    if (q < 0) { showToast('error', 'No question found to regenerate from.'); return; }
+    await rerunFrom(list[q].id, list[q].text);
+  };
+
+  /** Replace an earlier question and re-run from it. Everything after is lost. */
+  const editAndRerun = async (userMsgId: string, newText: string) => {
+    const text = newText.trim();
+    if (!text) return;
+    await rerunFrom(userMsgId, text);
+  };
+
+  /**
+   * Retry the last question — the recovery action on a failed turn. Finds the
+   * most recent user message and re-runs from it, which drops the failure
+   * marker along with everything after it.
+   */
+  const retryLast = async () => {
+    const list = messages[activeChatId] || [];
+    for (let i = list.length - 1; i >= 0; i--) {
+      if (list[i].role === 'user') { await rerunFrom(list[i].id, list[i].text); return; }
+    }
+    showToast('error', 'Nothing to retry yet.');
   };
 
   /**
@@ -1854,9 +2226,12 @@ loadChatHistory(activeChatId).then(() => {
    */
   const runChatStream = (
     currentChatId: string, currentProjectId: string, messageText: string,
-    forcePageContext: boolean, existingUserMsgId?: string
+    forcePageContext: boolean, existingUserMsgId?: string,
+    opts?: { imageDataUrl?: string; allowImageOutput?: boolean }
   ): Promise<void> => new Promise<void>((resolve) => {
     const assistantId = uid();
+    const imageDataUrl = opts?.imageDataUrl;
+    const allowImageOutput = opts?.allowImageOutput;
 
     if (existingUserMsgId) {
       setMessages(prev => {
@@ -1872,11 +2247,15 @@ loadChatHistory(activeChatId).then(() => {
         ...prev,
         [currentChatId]: [...(prev[currentChatId] || []), {
           id: uid(), role: 'user' as const,
-          text: forcePageContext ? `[📄 Current Page] ${messageText}` : messageText
+          text: forcePageContext ? `[📄 Current Page] ${messageText}` : messageText,
+          ...(imageDataUrl ? { images: [imageDataUrl] } : {}),
         }]
       }));
     }
     setGenerating(prev => ({ ...prev, [currentChatId]: true }));
+    // Previous turn's chain of thought belongs to the previous answer.
+    setReasoning(prev => (prev[currentChatId] ? { ...prev, [currentChatId]: '' } : prev));
+    setFollowUps(prev => (prev[currentChatId]?.length ? { ...prev, [currentChatId]: [] } : prev));
     streamingChatsRef.current.add(currentChatId);
 
     if (typeof chrome === 'undefined' || !chrome.runtime?.connect) {
@@ -1909,20 +2288,40 @@ loadChatHistory(activeChatId).then(() => {
       } else if (m?.type === 'RESET') {
         // Worker is replacing the answer (refusal → web-sourced answer).
         resetStreamingMessage(currentChatId, assistantId);
+      } else if (m?.type === 'FOLLOWUPS') {
+        setFollowUps(prev => ({ ...prev, [currentChatId]: (m.items as string[]) || [] }));
+      } else if (m?.type === 'REASONING') {
+        setReasoning(prev => ({ ...prev, [currentChatId]: (prev[currentChatId] || '') + (m.text || '') }));
       } else if (m?.type === 'DELTA') {
         setThinkingStatus(prev => prev[currentChatId] ? { ...prev, [currentChatId]: '' } : prev);
         pushDelta(currentChatId, assistantId, m.text);
       } else if (m?.type === 'DONE') {
+        // Generated images arrive whole at the end (non-streaming path) —
+        // attach them to the finalized assistant message so the local panel
+        // shows them without waiting for a history reload.
+        const imgs = Array.isArray(m.images) ? (m.images as string[]) : [];
+        if (imgs.length) {
+          setMessages(prev => {
+            const list = prev[currentChatId] || [];
+            const idx = list.findIndex(x => x.id === assistantId);
+            if (idx === -1) return prev;
+            const copy = [...list];
+            copy[idx] = { ...copy[idx], images: imgs };
+            return { ...prev, [currentChatId]: copy };
+          });
+        }
         finalizeStreamingMessage(currentChatId, assistantId);
         finish();
         port.disconnect();
       } else if (m?.type === 'ERROR') {
         finalizeStreamingMessage(currentChatId, assistantId);
+        const rawErr = (m.error as string) || 'Error — check Settings.';
         setMessages(prev => ({
           ...prev,
           [currentChatId]: [...(prev[currentChatId] || []), {
-            id: uid(), role: 'system' as const,
-            text: (m.error as string) || 'Error — check Settings.'
+            // `error` carries the raw string; ChatView runs it through
+            // diagnoseError to show a recovery block with the right button.
+            id: uid(), role: 'system' as const, text: rawErr, error: rawErr,
           }]
         }));
         finish();
@@ -1937,7 +2336,10 @@ loadChatHistory(activeChatId).then(() => {
       prompt: messageText,
       chatId: currentChatId,
       projectId: currentProjectId,
-      includePageContext: includePageContext || forcePageContext
+      includePageContext: includePageContext || forcePageContext,
+      sourceMode,
+      ...(imageDataUrl ? { imageDataUrl } : {}),
+      ...(allowImageOutput ? { allowImageOutput: true } : {}),
     });
   });
 
@@ -1951,12 +2353,88 @@ loadChatHistory(activeChatId).then(() => {
       for (const it of mine) {
         // Sequential — each waits for the prior stream to finish (and the
         // offscreen mutex keeps embeds from colliding regardless).
-        await runChatStream(chatId, projectId, it.text, it.forcePageContext, it.id).catch(() => {});
+        await runChatStream(chatId, projectId, it.text, it.forcePageContext, it.id,
+          { imageDataUrl: it.imageDataUrl, allowImageOutput: it.allowImageOutput }).catch(() => {});
       }
     }
   };
   // Latest drainQueue for the once-registered DONE listener to call.
   drainQueueRef.current = drainQueue;
+
+  /**
+   * Pull a still-queued message back out — remove it from the queue and the
+   * transcript, and drop its text back into the input so the user can edit or
+   * discard it. The only escape from a queue that otherwise runs on its own
+   * when research finishes.
+   */
+  const unqueueMessage = (msgId: string) => {
+    const chatId = activeChatId;
+    const item = (queuedRef.current[chatId] || []).find(it => it.id === msgId);
+    queuedRef.current[chatId] = (queuedRef.current[chatId] || []).filter(it => it.id !== msgId);
+    setMessages(prev => ({
+      ...prev,
+      [chatId]: (prev[chatId] || []).filter(m => m.id !== msgId),
+    }));
+    if (item) {
+      setInput(item.text);
+      if (item.imageDataUrl) setPendingImage(item.imageDataUrl);
+    }
+  };
+
+  // Run a slash command as if the user typed it — for in-message action buttons
+  // ("Continue → next lesson", "Reset course"). send() reads inputRef.current.
+  const runCommand = (cmd: string) => {
+    if (generating[activeChatId]) return;
+    inputRef.current = cmd;
+    setInput(cmd);
+    void send();
+  };
+
+  // Persist a client-built message (/teach lesson, /flashcard deck) so it survives
+  // a chat switch or reload — these bypass the streaming path that normally saves.
+  const persistMsg = (chatId: string, m: Partial<ChatMessage> & { role: 'user' | 'assistant' | 'system'; text: string }, ts?: string) =>
+    msg('SAVE_CHAT_MESSAGE', {
+      message: {
+        chatId, role: m.role, text: m.text, timestamp: ts || new Date().toISOString(),
+        ...(m.quiz ? { quiz: m.quiz } : {}),
+        ...(m.deck ? { deck: m.deck } : {}),
+        ...(m.deckTitle ? { deckTitle: m.deckTitle } : {}),
+        ...(m.actions ? { actions: m.actions } : {}),
+      },
+    }).catch(() => {});
+
+  /**
+   * "Cancel & edit" on the message being answered: an UNDO of the send. Stop the
+   * in-flight reply, remove the user message (and its partial answer) from both
+   * the transcript and saved history, and drop its text + image back into the
+   * input — as if it was never sent. Distinct from Edit&re-run, which keeps the
+   * message and re-asks; this takes it back.
+   */
+  const cancelAndEdit = async (msgId: string) => {
+    const chatId = activeChatId;
+    if (!chatId) return;
+    const list = messages[chatId] || [];
+    const target = list.find(m => m.id === msgId);
+    if (!target) return;
+
+    // Stop the worker first so it can't persist a trailing message after the
+    // truncate below (cancelTask awaits the CANCEL_TASK ack).
+    await cancelTask();
+
+    // Remove the message + everything after it from saved history, then mirror
+    // that in the transcript on screen.
+    await msg('TRUNCATE_CHAT_FROM', { chatId, messageId: msgId });
+    setMessages(prev => {
+      const l = prev[chatId] || [];
+      const idx = l.findIndex(m => m.id === msgId);
+      return idx === -1 ? prev : { ...prev, [chatId]: l.slice(0, idx) };
+    });
+
+    // Restore it to the composer (strip the page-context prefix a forced-context
+    // turn is stored with) so the user can edit or discard it.
+    setInput(target.text.replace(/^\[📄 Current Page\]\s*/, ''));
+    if (target.images?.[0]) setPendingImage(target.images[0]);
+  };
 
   const clearChat = async () => {
     if (!activeChatId) return;
@@ -2216,6 +2694,7 @@ loadChatHistory(activeChatId).then(() => {
               globalDocuments={globalDocuments}
               authed={authed}
               syncing={syncing}
+              syncStatus={syncStatus}
               toggleDoc={toggleDoc}
               downloadDoc={downloadDoc}
               deleteDoc={deleteDoc}
@@ -2257,9 +2736,19 @@ loadChatHistory(activeChatId).then(() => {
             </Suspense>
           )}
 
+          {view === 'flashcards' && activeDeck && (
+            <Suspense fallback={null}>
+              <DeckView
+                title={activeDeck.title}
+                cards={activeDeck.cards}
+                onBack={() => setView('chat')}
+              />
+            </Suspense>
+          )}
+
           <div className={`flex-1 min-h-0 flex-col overflow-hidden ${view === 'chat' ? 'flex' : 'hidden'}`}>
             <Suspense fallback={<div className="p-4 text-xs text-muted-foreground">Loading…</div>}>
-            <ChatView 
+            <ChatView
               messages={messages[activeChatId] || []}
               input={input}
               setInput={setInput}
@@ -2270,6 +2759,36 @@ loadChatHistory(activeChatId).then(() => {
               activeProjectId={activeProjectId}
               generating={generating}
               thinkingStatus={thinkingStatus}
+              reasoning={reasoning}
+              followUps={followUps}
+              sourceMode={sourceMode}
+              onSourceModeChange={(m) => {
+                setSourceMode(m);
+                try { chrome.storage.local.set({ chatSourceMode: m }); } catch { /* private mode */ }
+              }}
+              onRegenerate={regenerateAnswer}
+              onEditAndRerun={editAndRerun}
+              onCancelAndEdit={cancelAndEdit}
+              onGradeAnswer={async (q, answer) => {
+                const r = await msg('GRADE_ANSWER', { prompt: q.prompt, modelAnswer: q.modelAnswer || '', userAnswer: answer });
+                return { verdict: (r?.verdict as any) || 'partial', feedback: String(r?.feedback || '') };
+              }}
+              onOpenDeck={(title, cards) => { setActiveDeck({ title, cards }); setView('flashcards'); }}
+              onRunCommand={runCommand}
+              onOpenSettings={() => setView('settings')}
+              onRetryLast={retryLast}
+              onUnqueue={unqueueMessage}
+              pendingImage={pendingImage}
+              onAttachImage={async (file) => {
+                try { setPendingImage(await downscaleImage(file)); }
+                catch { showToast('error', 'Could not read that image.'); }
+              }}
+              onClearImage={() => setPendingImage(null)}
+              imageOutput={imageOutput}
+              onImageOutputChange={(v) => {
+                setImageOutput(v);
+                try { chrome.storage.local.set({ chatImageOutput: v }); } catch { /* private mode */ }
+              }}
               researching={researching}
               isActive={view === 'chat'}
               llmEndpointLocal={/^https?:\/\/(localhost|127\.0\.0\.1|0\.0\.0\.0|\[?::1\]?)(:|\/|$)/i.test(customUrl.trim())}
@@ -2414,6 +2933,7 @@ onOpenDocument={(docId, anchorId) => openDocById(docId, anchorId, 'chat')}
                 }
               }}
               forceResync={forceResync}
+              reconcileFromDrive={reconcileFromDrive}
               routeChatThroughCli={routeChatThroughCli}
               setRouteChatThroughCli={(v) => {
                 setRouteChatThroughCli(v);
@@ -2455,6 +2975,15 @@ onOpenDocument={(docId, anchorId) => openDocById(docId, anchorId, 'chat')}
           )}
         </div>
       </main>
+
+      {/* ── Pick what to import from Drive ── */}
+      {driveFiles && (
+        <DriveImportDialog
+          files={driveFiles}
+          onCancel={() => setDriveFiles(null)}
+          onImport={runDriveImport}
+        />
+      )}
 
       {/* ── Link preview overlay — follow links without leaving the panel ── */}
       {linkPreview && (

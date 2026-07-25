@@ -1,5 +1,6 @@
 import { saveDocument, linkDocumentToProject, listDocuments, getChunkByAnchor } from '../lib/db';
 import { verifyFaithfulness } from '../lib/faithfulness';
+import { checkFigures } from '../lib/figure-check';
 import { sendToOffscreen } from '../lib/offscreen-client';
 import { chunkDocument, makeDocShortId } from '../lib/chunker';
 import { buildFrontmatter } from '../lib/frontmatter';
@@ -8,6 +9,7 @@ import { getJob, updateJob, getPage, savePage, listPages } from '../lib/research
 import { pdfUrlToBody, recreateOffscreen } from '../lib/pdf-parser';
 import { splitReportSections, joinReportSections, sectionMatchesFlag, revisionKeptCitations, countCitations } from '../lib/report-sections';
 import { checkContentQuality, extractDoi } from '../lib/quality-gate';
+import { splitCapstone, trimTruncatedTail, stripUnresolvableAnchors, dropDuplicateTables, stripStubCodeBlocks, flagBrokenFormula } from '../lib/report-repair';
 import { isAcademicQuery } from '../lib/query-intent';
 import { getResearchLimits, getResearchDepth, getSynthesisCharBudget, getSourceQuality, getAcademicDepth, RESEARCH_LIMITS, ResearchLimits, SourceQuality, AcademicDepth } from '../lib/research-limits';
 import { getReportLengthSpec } from '../lib/research-limits';
@@ -17,6 +19,7 @@ import { getMcpServers, McpConnection, isSearchLikeTool, argsForQuery } from '..
 import { searchWithProviders, jinaWebSearch, getSearchApiKeys, SearchHit } from '../lib/search-providers';
 import { searchFreeAPIs } from '../lib/free-apis';
 import { rankPapers, webDomainAuthority } from '../lib/paper-rank';
+import { openAlexWorkToPaper, parsePubMedArticles, parsePubMedIds } from '../lib/academic-sources';
 import { semaphore } from '../lib/semaphore';
 import { crumb } from '../lib/crash-log';
 import {
@@ -40,6 +43,16 @@ const indexingSem = semaphore(1);
  */
 const GATHER_WALL_BUDGET_MS = 35 * 60 * 1000;
 
+/**
+ * Wall-clock budget for the SECTIONED SYNTHESIS loop, measured from its own
+ * start. Gathering has a budget; section-writing did not, so a run with slow
+ * per-section calls wrote sections until the 60-min run watchdog aborted the
+ * whole job — throwing away every finished section. When this budget (or an
+ * abort/Stop) is hit, we stop starting new sections and ship what's written,
+ * flagged incomplete. A partial report beats an hour of work vanishing.
+ */
+const SYNTH_WALL_BUDGET_MS = 18 * 60 * 1000;
+
 // (The old 60k doc-level embed cap was removed: per-chunk embed truncation +
 // batched embedding already bound ONNX memory, and the cap silently left long
 // papers with zero chunks past 60k — a retrieval hole.)
@@ -55,7 +68,7 @@ let activeSourceMode: ResearchSourceMode = 'auto';
 /**
  * Where a run is allowed to gather from. 'auto' is the classic mix (web +
  * academic + news + MCP); 'academic' (/academic) is a papers-only corpus —
- * Semantic Scholar / CrossRef / arXiv / HuggingFace, nothing else.
+ * Semantic Scholar / OpenAlex / PubMed / CrossRef / arXiv / HuggingFace, nothing else.
  */
 export type ResearchSourceMode = 'auto' | 'academic';
 
@@ -148,11 +161,36 @@ const REPORT_VOICE =
   `- Concrete subjects and verbs: "Streaming cuts perceived latency 40% [a]" beats "It can be observed that streaming may improve latency".\n` +
   `- Vary sentence length; kill filler transitions; every sentence must carry information a reader would pay for.\n` +
   `- State numbers, names, and mechanisms — not vague plurals ("several studies", "various approaches") when the sources name them.\n` +
-  `TECHNICAL FORMATTING — code must survive rendering:\n` +
+  `HONESTY — a claim's form must match its evidence:\n` +
+  `- A number or rating is DATA only if a source measured it. Give the figure with its [anchor]. Your own qualitative call ("low reliability", "high risk") must READ as a judgment — never a benchmarked-looking score or an F1/accuracy/percentage the sources did not report. Do not invent precision.\n` +
+  `- State each thesis and each named concept ONCE, where it lands hardest. Do not restate the same claim in near-identical words across sections.\n` +
+  `- Open the report with one concrete, specific case — a named incident, example, or result — then build the abstractions back to it. Never open with a generic framing paragraph.\n` +
+  `TECHNICAL FORMATTING — code and math must survive rendering:\n` +
   `- Every identifier, command, flag, config key, or API name gets inline backticks: \`vi.mock\`, \`proxy_buffering off\`.\n` +
   `- Any code longer than a fragment goes in a fenced block with a language tag. Never write code as prose.\n` +
+  `- Include a code block ONLY when it is (a) the exact thing under discussion a reader can paste and check — a real API call, config, or error message from a source — or (b) a complete, runnable illustration of a mechanism. NEVER a stub or a comment that gestures at logic ("# DFS traversal logic here", "// implementation omitted"). If a source (especially a paper) shows real code or pseudocode worth including, reproduce it in full; if you would only be sketching, write prose instead.\n` +
+  `- For a formula, PREFER plain words ("flag a cycle when its frequency exceeds the mean by more than k standard deviations"). If you use math notation, every symbol must be present and defined — never ship an equation with a missing variable. A half-written formula is worse than a sentence.\n` +
   `- NEVER put code inside a markdown table cell — pipes and backticks corrupt the table and it renders as an unreadable pipe-soup. To compare code variants, write consecutive fenced blocks, each preceded by a one-line bold label ("**Incorrect:**", "**Correct:**").\n` +
   `- Tables are for short scalar values only: names, numbers, one-phrase verdicts. If a cell needs a sentence or a snippet, the content belongs in prose or a fenced block, not a table.\n`;
+
+// The report belongs to the person who asked, in the language they asked in.
+//
+// Only QUERY generation carried a language rule; every reader-facing call —
+// directives, briefs, sections, capstone, revisions — carried none. So a
+// Finnish question produced English directives in the plan card, English
+// briefs, and an English report. The sources are overwhelmingly English, and
+// with nothing pushing the other way the model simply followed them.
+//
+// Keyed off the TOPIC's own language rather than a locale setting or a script
+// guess: the topic is the user's own words, so it works for any language the
+// model can write — Finnish, Kurdish (Sorani and Kurmanji), Arabic, CJK,
+// Cyrillic — with no list to maintain and nothing to detect.
+export const RESEARCH_LANGUAGE_RULE =
+  `\nLANGUAGE — non-negotiable:\n` +
+  `- Write EVERYTHING you output in the SAME LANGUAGE as the research topic. If the topic is Finnish, every heading, sentence and bullet is Finnish; if it is Kurdish, Arabic, Japanese or any other language you can write, the same applies.\n` +
+  `- The source material is usually in another language (most often English). TRANSLATE its findings into the topic's language. Never switch your output to the sources' language because that is what you were reading.\n` +
+  `- Keep verbatim, untranslated: [anchor_id] citations, URLs, code and identifiers, file paths, and proper nouns (people, products, libraries, standards). Where a technical term has no settled translation, use the original and gloss it once in the topic's language.\n` +
+  `- Do not add a translation, a note about which language you used, or an apology about the sources' language.\n`;
 
 // Sandwich defense (prompt-injection hardening + adherence): scraped web text
 // is untrusted DATA that sits between the system prompt and this trailer.
@@ -378,7 +416,7 @@ const BLOCKED_DOMAINS = /duckduckgo\.com|youtube\.com|google\.com|pinterest\.com
 /**
  * High-quality domains get prioritized in results ordering.
  */
-const HIGH_QUALITY_DOMAINS = /arxiv\.org|nature\.com|science\.org|acm\.org|ieee\.org|springer\.com|wiley\.com|nih\.gov|gov\.\w+|edu$|\.ac\.|nytimes\.com|wired\.com|arstechnica\.com|hbr\.org|mckinsey\.com|mit\.edu|stanford\.edu|anthropic\.com|openai\.com|deepmind\.com|blog\.google|huggingface\.co|docs\./;
+const HIGH_QUALITY_DOMAINS = /arxiv\.org|nature\.com|science\.org|acm\.org|ieee\.org|springer\.com|wiley\.com|nih\.gov|gov\.\w+|edu$|\.ac\.|nytimes\.com|wired\.com|arstechnica\.com|hbr\.org|mckinsey\.com|mit\.edu|stanford\.edu|anthropic\.com|openai\.com|deepmind\.com|blog\.google|huggingface\.co|openalex\.org|pubmed\.ncbi\.nlm\.nih\.gov|github\.com|readthedocs\.io|docs\./;
 
 /**
  * Search the web without opening tabs, via DuckDuckGo's static HTML endpoint.
@@ -766,6 +804,8 @@ export async function generateSearchQueries(topic: string, llmChatFn: (sys: stri
 
 Avoid queries that would return social media, forums, or content farms. Include "site:" operators when targeting specific authoritative domains would be beneficial.
 
+If the topic is TECHNICAL (a software library, tool, framework, API, protocol, language, or engineering practice), spend 2-3 of the queries reaching the primary sources for it: the project's own documentation and the code itself. Use targeted operators like \`site:github.com <tool>\`, \`<tool> site:readthedocs.io\`, \`<tool> "official docs"\`, or the project's own docs domain. These are the sources a practitioner trusts over a blog write-up.
+
 LANGUAGE: if the topic is not in English, write MOST queries in the topic's own language (local sources are the best sources), but keep 1-2 queries in English for the English-dominant academic literature. Never translate the topic away from the user's language entirely.
 
 Return ONLY a JSON array of strings, nothing else. Example: ["query 1", "query 2"]`;
@@ -795,7 +835,7 @@ STEP 1 (think, do not output): identify 3-5 DISTINCT expert perspectives whose c
 
 STEP 2 (output): derive 5-7 research directives such that EVERY perspective's core concern is covered by at least one directive, and AT LEAST ONE directive explicitly targets disagreements, failure modes, or evidence against the mainstream view.
 Each directive is ONE sentence that starts with an action verb (Analyze / Investigate / Compare / Evaluate / Survey / Trace / Synthesize), names WHAT to examine, and ends with a purpose clause ("… to determine/extract/identify …"). Directives must be concrete enough to search on — name the specific systems, methods, or populations involved.
-Return ONLY a JSON array of directive strings, nothing else.`;
+Return ONLY a JSON array of directive strings, nothing else.\n${RESEARCH_LANGUAGE_RULE}`;
   const res = await llmChatFn(sysPrompt, topic);
   try {
     const start = res.indexOf('[');
@@ -928,14 +968,77 @@ export function isRetractedTitle(title?: string): boolean {
 }
 
 /** Dedupe records: same document (docId) or same URL = same source. */
+// Mirror/aggregator hosts that re-host a paper under their own URL. On these we
+// trust a bare arXiv id in the path; on arbitrary hosts we do NOT, or a random
+// "2024.12345" in a slug would wrongly merge two unrelated pages.
+const PAPER_MIRRORS = /scribd\.com|researchgate\.net|semanticscholar\.org|scholar\.google|\.core\.ac\.uk/i;
+
+/**
+ * The identity of the DOCUMENT a URL points at, so the four faces of one paper
+ * — arxiv.org/abs, /pdf, /html, a scribd re-upload — collapse to a single
+ * source instead of inflating the bibliography.
+ *
+ * Order matters: a globally-unique paper id (arXiv, DOI) wins over the URL, so
+ * different URLs of the same paper share a key. Everything else falls back to a
+ * PATH-PRESERVING normalized URL, so two genuinely different pages on one
+ * domain stay distinct. Pure — unit-tested.
+ */
+export function canonicalSourceKey(url: string): string {
+  const u = (url || '').trim();
+  if (!u) return '';
+
+  // arXiv id from an arXiv/HuggingFace URL (abs/pdf/html, any version).
+  let arx = u.match(/arxiv\.org\/(?:abs|pdf|html)\/(\d{4}\.\d{4,5})/i)?.[1]
+        ?? u.match(/huggingface\.co\/papers\/(\d{4}\.\d{4,5})/i)?.[1]
+        ?? null;
+  // On a known mirror only, trust a bare id in the path.
+  if (!arx && PAPER_MIRRORS.test(u)) arx = u.match(/(\d{4}\.\d{4,5})(?:v\d+)?/)?.[1] ?? null;
+  if (arx) return `arxiv:${arx}`;
+
+  const doi = extractDoi(u);
+  if (doi) return `doi:${doi.toLowerCase()}`;
+
+  // Normalized URL fallback: drop scheme, leading www, a .html/.pdf suffix, a
+  // trailing slash, and the query/fragment — but keep the path.
+  try {
+    const p = new URL(u.includes('://') ? u : `https://${u}`);
+    const host = p.host.replace(/^www\./i, '').toLowerCase();
+    const path = p.pathname.replace(/\/+$/, '').replace(/\.(html?|pdf)$/i, '');
+    return `${host}${path}`.toLowerCase();
+  } catch {
+    return u.toLowerCase();
+  }
+}
+
+/**
+ * Collapse records that point at the same document. Two records merge when they
+ * share a docId OR a canonical URL key — so the SAME saved doc scraped under two
+ * URLs collapses (docId match), AND the SAME paper scraped as two different docs
+ * under abs/pdf/html/mirror collapses (canonical-key match). One paper, one row,
+ * however many faces it arrived under. On a merge the higher-tier record wins
+ * (arxiv.org over a scribd mirror); first-seen position is kept.
+ */
 export function dedupeSourceRecords(records: SourceRecord[]): SourceRecord[] {
-  const seen = new Set<string>();
+  const keyToIdx = new Map<string, number>();   // "doc:<id>" | "canon:<key>" → index in out
   const out: SourceRecord[] = [];
   for (const r of records) {
-    const key = r.docId || r.url;
-    if (!key || seen.has(key)) continue;
-    seen.add(key);
-    out.push(r);
+    const docKey = r.docId ? `doc:${r.docId}` : '';
+    const canon = canonicalSourceKey(r.url);
+    const canonKey = canon ? `canon:${canon}` : '';
+    if (!docKey && !canonKey) continue;   // nothing to identify it by
+
+    let idx = docKey && keyToIdx.has(docKey) ? keyToIdx.get(docKey)!
+            : canonKey && keyToIdx.has(canonKey) ? keyToIdx.get(canonKey)!
+            : -1;
+    if (idx === -1) {
+      idx = out.length;
+      out.push(r);
+    } else if (r.tier === 'high' && out[idx].tier !== 'high') {
+      out[idx] = r;   // same document, better source for it
+    }
+    // Register BOTH keys at this index so a later record matching either merges.
+    if (docKey) keyToIdx.set(docKey, idx);
+    if (canonKey) keyToIdx.set(canonKey, idx);
   }
   return out;
 }
@@ -996,6 +1099,11 @@ export function linkifyReportCitations(
   }
   for (const short of collided) byShort.delete(short);
   const numByShort = new Map<string, number>();
+  // Collapse citations of the SAME paper scraped as two docs (arxiv abs + pdf →
+  // two docIds → two short ids) onto one number, so it is [7] everywhere and
+  // appears once in Sources — the "cited 4 times as 4 sources" defect. Keyed by
+  // canonical document identity; url-less records (canon '') never collapse.
+  const numByCanon = new Map<string, number>();
   const cited: SourceRecord[] = [];
   const re = /\[(([a-z]\w{1,8})\.s\d+\.p\d+(?:\.\d+)?)\]/gi;
   const text = synthesis.replace(re, (full, anchor: string, short: string) => {
@@ -1003,9 +1111,17 @@ export function linkifyReportCitations(
     if (!rec) return full; // unknown anchor — leave untouched rather than drop it
     let n = numByShort.get(short);
     if (n === undefined) {
-      n = cited.length + 1;
-      numByShort.set(short, n);
-      cited.push(rec);
+      const canon = canonicalSourceKey(rec.url);
+      const shared = canon ? numByCanon.get(canon) : undefined;
+      if (shared !== undefined) {
+        n = shared;                    // same paper, already numbered — reuse it
+        numByShort.set(short, n);
+      } else {
+        n = cited.length + 1;
+        numByShort.set(short, n);
+        if (canon) numByCanon.set(canon, n);
+        cited.push(rec);
+      }
     }
     // Keep the CHUNK anchor, as a #cite link both renderers turn into a
     // chunk-jump chip. The old form, [[n](webUrl)], threw the anchor away —
@@ -1032,10 +1148,20 @@ export function linkifyReportCitations(
 // handled via CLOUDFLARE_GATED → DOI → open-access PDF, which recovers full text.)
 const DEAD_READER_HOSTS = /\/\/([^/]*\.)?linkedin\.com\/|\/\/static\.licdn\.com\/|\/\/([^/]*\.)?aimodels\.fyi\/|\/\/([^/]*\.)?researchgate\.net\/(figure|profile)\//i;
 
+/** A URL that resolves to a PDF, whatever path it is served under. */
+export function looksLikePdfUrl(url: string): boolean {
+  return /\.pdf($|[?#])/i.test(url) || /\/pdf\/|\/pdfdirect\//i.test(url);
+}
+
 export function isJunkUrl(url: string): boolean {
   if (!/^https?:\/\//i.test(url)) return true;
   if (/\.(dtd|xsd|css|js|ico|woff2?|ttf|svg|png|jpe?g|gif|webp)(\?|$)/i.test(url)) return true;
   if (/\/\/(www\.)?(w3\.org|schema\.org|purl\.org|xmlns\.com|ogp\.me)\//i.test(url)) return true;
+  // A PDF is parseable content no matter what path serves it, so it outranks
+  // the dead-host list. ResearchGate publishes full-text PDFs under
+  // /profile/<name>/publication/<id>/links/<hash>.pdf — the /profile/ rule was
+  // written for HTML profile pages and silently discarded the papers too.
+  if (looksLikePdfUrl(url)) return false;
   if (DEAD_READER_HOSTS.test(url)) return true;
   return false;
 }
@@ -1385,6 +1511,64 @@ async function searchHuggingFacePapers(query: string, signal?: AbortSignal): Pro
   }).filter((p: AcademicPaper) => p.abstract);
 }
 
+/**
+ * OpenAlex works search — 250M+ works across every field, free, no key. The
+ * broadest discovery source; abstracts arrive as an inverted index that
+ * academic-sources reconstructs. Sorted by citations so the strongest come
+ * first within the cap.
+ */
+async function searchOpenAlex(query: string, rows: number, signal?: AbortSignal): Promise<AcademicPaper[]> {
+  if (rows <= 0) return [];
+  const url = `https://api.openalex.org/works?search=${encodeURIComponent(query)}`
+    + `&filter=has_abstract:true&sort=cited_by_count:desc&per-page=${Math.min(rows, 25)}`
+    + `&select=id,doi,display_name,publication_year,cited_by_count,abstract_inverted_index,authorships,primary_location,host_venue`;
+  const res = await fetch(url, { signal: apiSignal(signal), headers: { 'Accept': 'application/json' } });
+  if (!res.ok) throw new Error(`OpenAlex ${res.status}`);
+  const data = await res.json();
+  const works: any[] = Array.isArray(data?.results) ? data.results : [];
+  const out: AcademicPaper[] = [];
+  for (const w of works) {
+    const p = openAlexWorkToPaper(w);
+    if (!p) continue;
+    out.push({
+      title: p.title, abstract: p.abstract, year: p.year, authors: p.authors,
+      venue: p.venue, doi: p.doi, citations: p.citations,
+      url: p.doi ? `https://doi.org/${p.doi}` : (typeof w.id === 'string' ? w.id : ''),
+    });
+  }
+  return out;
+}
+
+/**
+ * PubMed (NCBI E-utilities) — the authoritative biomedical index, free, keyless
+ * (3 req/s). Two calls: esearch for PMIDs, efetch for the abstracts. Returns []
+ * for a non-biomedical query, which is exactly what we want — it costs one cheap
+ * esearch that finds nothing and never pollutes a non-medical run.
+ */
+async function searchPubMed(query: string, rows: number, signal?: AbortSignal): Promise<AcademicPaper[]> {
+  if (rows <= 0) return [];
+  const base = 'https://eutils.ncbi.nlm.nih.gov/entrez/eutils';
+  const esearch = await fetch(
+    `${base}/esearch.fcgi?db=pubmed&retmode=json&sort=relevance&retmax=${Math.min(rows, 20)}&term=${encodeURIComponent(query)}`,
+    { signal: apiSignal(signal) },
+  );
+  if (!esearch.ok) throw new Error(`PubMed esearch ${esearch.status}`);
+  const ids = parsePubMedIds(await esearch.json());
+  if (ids.length === 0) return [];
+
+  const efetch = await fetch(
+    `${base}/efetch.fcgi?db=pubmed&retmode=xml&id=${ids.join(',')}`,
+    { signal: apiSignal(signal) },
+  );
+  if (!efetch.ok) throw new Error(`PubMed efetch ${efetch.status}`);
+  const xml = await efetch.text();
+  return parsePubMedArticles(xml).map(p => ({
+    title: p.title, abstract: p.abstract, year: p.year, authors: p.authors,
+    venue: p.venue, doi: p.doi, citations: undefined,
+    url: p.doi ? `https://doi.org/${p.doi}` : (p.pmid ? `https://pubmed.ncbi.nlm.nih.gov/${p.pmid}/` : ''),
+  }));
+}
+
 // ── arXiv full-text fetching ──
 
 /**
@@ -1536,6 +1720,28 @@ async function runAcademicAgent(
         onProgress(`[ACADEMIC] CrossRef unavailable (${e.message}) — continuing`);
       }
     }
+
+    // OpenAlex — broadest coverage, always on with a small budget even in quick
+    // mode; deeper modes get the fuller CrossRef budget.
+    if (signal?.aborted) throwIfAborted(signal);
+    onProgress(`[ACADEMIC] Searching OpenAlex${qLabel}`);
+    try {
+      papers.push(...await searchOpenAlex(q, Math.max(activeLimits.crossrefRows, 6), signal));
+    } catch (e: any) {
+      onProgress(`[ACADEMIC] OpenAlex unavailable (${e.message}) — continuing`);
+    }
+
+    // PubMed — biomedical only, and naturally returns nothing for other topics,
+    // so it is safe to always try; costs one cheap esearch on a miss.
+    if (signal?.aborted) throwIfAborted(signal);
+    onProgress(`[ACADEMIC] Searching PubMed${qLabel}`);
+    try {
+      const pm = await searchPubMed(q, Math.max(activeLimits.crossrefRows, 8), signal);
+      if (pm.length) onProgress(`[ACADEMIC] PubMed: ${pm.length} biomedical result(s)`);
+      papers.push(...pm);
+    } catch (e: any) {
+      onProgress(`[ACADEMIC] PubMed unavailable (${e.message}) — continuing`);
+    }
   }
 
   const sources: SourceRecord[] = [...cachedSources];
@@ -1572,7 +1778,11 @@ async function runAcademicAgent(
   if (activeQuality === 'high') {
     const nowYear = new Date().getFullYear();
     const before = deduped.length;
-    const kept = deduped.filter(p => (p.citations ?? 0) >= 10 || Number(p.year) >= nowYear - 1);
+    // UNKNOWN citations (PubMed-only papers carry none) are not the same as
+    // ZERO. Dropping a paper because we didn't fetch its citation count would
+    // silently exclude landmark biomedical work; keep it and let ranking sort
+    // it. Only a KNOWN-low, non-recent paper is filtered.
+    const kept = deduped.filter(p => p.citations === undefined || p.citations >= 10 || Number(p.year) >= nowYear - 1);
     // Only apply the floor when it doesn't starve the agent
     if (kept.length >= 5) {
       deduped.length = 0;
@@ -1615,6 +1825,30 @@ async function runAcademicAgent(
         onProgress(`[ACADEMIC] ✓ Full text captured${wasClean ? ' (cleaned)' : ''}: "${p.title.slice(0, 60)}"`);
       } else {
         onProgress(`[ACADEMIC] ✗ PDF unavailable, using abstract: "${p.title.slice(0, 60)}"`);
+      }
+    } else if (!arxivId && (p.doi || extractDoi(p.url)) && activeAcademicDepth === 'full') {
+      // Non-arXiv paper: most of the published literature. An abstract-only
+      // source lets the report cite what a paper ADVERTISED, not what it FOUND.
+      // OpenAlex resolves a legally open-access PDF for a large share of DOIs
+      // (the same recovery already used for Cloudflare-gated web refs); parse it
+      // for the real text when there is one, else fall back to the abstract.
+      const doi = (p.doi || extractDoi(p.url))!;
+      onProgress(`[ACADEMIC] Seeking open-access full text: "${p.title.slice(0, 60)}"`);
+      try {
+        const oa = await resolveOpenAccessPdfUrl(doi, signal);
+        if (oa?.pdfUrl) {
+          const body = await pdfUrlToBody(oa.pdfUrl, undefined, true);
+          const clean = body.replace(/## Page \d+\n\n\*\(no extractable text\)\*/g, '').trim();
+          if (clean.length > 200) {
+            const cleaned = llmChatFn && isGarbledPdf(body) ? await cleanPdfText(body, llmChatFn).catch(() => body) : body;
+            md = `${headerLine}\n\n${abstractSection}\n\n## Full Paper\n\n${cleaned}`;
+            onProgress(`[ACADEMIC] ✓ Open-access full text captured: "${p.title.slice(0, 60)}"`);
+          }
+        } else {
+          onProgress(`[ACADEMIC] ✗ No open-access PDF, using abstract: "${p.title.slice(0, 60)}"`);
+        }
+      } catch {
+        onProgress(`[ACADEMIC] ✗ Full-text fetch failed, using abstract: "${p.title.slice(0, 60)}"`);
       }
     }
 
@@ -1777,13 +2011,58 @@ export function assembleReportBody(
   sources: SourceRecord[]
 ): { body: string; cited: SourceRecord[]; ordered: SourceRecord[] } {
   // Strip a leading H1 first so the doc title isn't doubled by the model's own.
-  const { text: linkedSynthesis, cited } = linkifyReportCitations(
-    stripStageBriefPseudoCitations(stripLeadingTitle(synthesis, topic)), sources);
-  const unique = dedupeSourceRecords(sources).filter(r => r.url || r.title);
-  const citedKeys = new Set(cited.map(r => r.docId || r.url));
-  const ordered = [...cited, ...unique.filter(r => !citedKeys.has(r.docId || r.url))];
-  const sourceLines = ordered.map((r, i) => `${i + 1}. ${renderSourceEntry(r)}`);
-  const body = `${linkedSynthesis}\n\n## Sources\n${sourceLines.join('\n')}`;
+  // Final net: every path lands here — sectioned, single-merge, and the
+  // revision passes — so a truncated tail from ANY of them is cleaned once,
+  // right before the Sources list is appended. Cheap, and it means a new
+  // synthesis path cannot reintroduce visible debris by forgetting to trim.
+  const { text: linked, cited } = linkifyReportCitations(
+    trimTruncatedTail(stripStageBriefPseudoCitations(stripLeadingTitle(synthesis, topic))), sources);
+  // AFTER linkify: anything still shaped like a bare doc id was never a
+  // resolvable anchor, so it can only render as noise.
+  // Duplicate tables survive the retrieval guard because selectBriefExcerpts
+  // feeds brief text that may already contain one. Dropped here, where every
+  // synthesis path converges.
+  const linkedSynthesis = flagBrokenFormula(stripStubCodeBlocks(dropDuplicateTables(stripUnresolvableAnchors(linked))));
+
+  // ## Sources lists ONLY what the prose actually cited, in citation order — so
+  // [[n]] still aligns with line n. A source count that equals the citations is
+  // an honest one; padding it with every scrape (the old [...cited, ...uncited])
+  // made "42 sources" read as breadth it didn't have.
+  const citedLines = cited.map((r, i) => `${i + 1}. ${renderSourceEntry(r)}`);
+
+  // Collected but never cited: kept, not hidden, under their own heading — and
+  // deduped by canonical identity so a paper cited via one URL doesn't reappear
+  // here under another. Excluded if they share a docId OR a canonical key with
+  // anything cited.
+  const citedDocIds = new Set(cited.map(r => r.docId).filter(Boolean));
+  const citedCanon = new Set(cited.map(r => canonicalSourceKey(r.url)).filter(Boolean));
+  const reviewed = dedupeSourceRecords(sources).filter(r =>
+    (r.url || r.title) &&
+    !(r.docId && citedDocIds.has(r.docId)) &&
+    !citedCanon.has(canonicalSourceKey(r.url)));
+
+  let body = `${linkedSynthesis}\n\n## Sources\n${citedLines.join('\n')}`;
+  if (reviewed.length) {
+    const revLines = reviewed.map((r, i) => `${i + 1}. ${renderSourceEntry(r)}`);
+    body += `\n\n## Additional sources reviewed\n${revLines.join('\n')}`;
+  }
+
+  // Honest note when the citations lean on one non-primary domain — "42 sources"
+  // hides that four came from a single blog. Counts CITED sources only.
+  const byHost = new Map<string, number>();
+  for (const r of cited) {
+    if (r.tier === 'high') continue;   // primary docs/papers don't need flagging
+    let host = '';
+    try { host = new URL(r.url).host.replace(/^www\./i, ''); } catch { /* no host */ }
+    if (host) byHost.set(host, (byHost.get(host) ?? 0) + 1);
+  }
+  const heavy = [...byHost.entries()].filter(([, n]) => n >= 3).sort((a, b) => b[1] - a[1]);
+  if (heavy.length) {
+    const notes = heavy.map(([host, n]) => `${n} citations come from \`${host}\``).join('; ');
+    body += `\n\n_Source note: ${notes} — weigh these as one voice, not independent corroboration._`;
+  }
+
+  const ordered = [...cited, ...reviewed];
   return { body, cited, ordered };
 }
 
@@ -1875,7 +2154,7 @@ export async function runDeepResearch(
     onProgress(`[PLANNING] Research depth: ${depth} (up to ${activeLimits.rounds} adaptive stages)`);
   }
   if (sourceMode === 'academic') {
-    onProgress('[PLANNING] Academic mode: papers only (Semantic Scholar · CrossRef · arXiv · HuggingFace) — no web or news agents');
+    onProgress('[PLANNING] Academic mode: papers only (Semantic Scholar · OpenAlex · PubMed · CrossRef · arXiv · HuggingFace) — no web or news agents');
   }
   if (activeQuality === 'high') onProgress('[PLANNING] Source quality: high-authority only');
   if (activeAcademicDepth === 'abstract') onProgress('[PLANNING] Academic papers: abstracts only');
@@ -1951,11 +2230,12 @@ STRUCTURE:
 - ${CONTRADICTIONS_SECTION_RULE}
 - Close with a decisive **Verdict** or **Recommendation** paragraph.
 
-LENGTH: target ${lengthSpec.quick} words — hit it by preserving the excerpts' SPECIFIC findings, numbers, and named examples, not by padding.
+LENGTH: target ${lengthSpec.quick} words — a range to land INSIDE, not a floor. Hit it by preserving the excerpts' SPECIFIC findings, numbers, and named examples; if you are over, cut restatement rather than evidence.
 
 ${PRESCRIPTIVE_GUIDANCE}
 ${REPORT_VOICE}
 ${EPISTEMIC_RULES}
+${RESEARCH_LANGUAGE_RULE}
 ${RESEARCH_CITATION_RULES}`;
 
   const rawSynthesis = await withKeepAlive(
@@ -2299,6 +2579,7 @@ Rewrite the report to FULLY address these findings using the source excerpts pro
 - Only if the sources genuinely cannot answer the topic: say so in the first paragraph and keep it short — but first make a real attempt to synthesise guidance from what IS there.
 
 ${PRESCRIPTIVE_GUIDANCE}
+${RESEARCH_LANGUAGE_RULE}
 ${RESEARCH_CITATION_RULES}`;
   const user = `ORIGINAL REPORT:\n\n${synthesis.slice(0, 24_000)}\n\nSOURCE EXCERPTS:\n\n${sourceContext.slice(0, 60_000)}${DATA_TRAILER}`;
   const revised = await withKeepAlive(
@@ -2400,6 +2681,20 @@ async function faithfulnessPass(synthesis: string, onProgress: (s: string) => vo
     } else if (fr.total > 0) {
       onProgress(`[FAITHFULNESS] all ${fr.total} citations verified`);
     }
+    // FIGURES: relevance-grade faithfulness above cannot see a wrong NUMBER
+    // pulled from the right chunk — the chunk IS about the claim. Numbers need no
+    // model, so this is a pure string check. Reported, never redacted: a figure
+    // can legitimately be rounded, converted or summed out of its source, and
+    // deleting on that basis would corrupt correct prose.
+    const fig = await checkFigures(synthesis, async (a) =>
+      (await getChunkByAnchor(a).catch(() => null))?.text ?? null);
+    if (fig.unverified.length > 0) {
+      const worst = fig.unverified.slice(0, 5).map(u => u.figure).join(', ');
+      onProgress(`[FIGURES] ${fig.checked - fig.unverified.length}/${fig.checked} figures found in their cited source — could not confirm: ${worst}`);
+      crumb('eval', 'figures unverified', { checked: fig.checked, unverified: fig.unverified.length, sample: worst });
+    } else if (fig.checked > 0) {
+      onProgress(`[FIGURES] all ${fig.checked} figures found in their cited sources`);
+    }
   } catch { /* verifier unavailable — keep the report as-is */ }
   return synthesis;
 }
@@ -2452,7 +2747,7 @@ async function reviseFlaggedSections(
       `- KEEP every [anchor_id] citation that still supports its sentence. Citations are the report's ` +
       `contract with the reader — a rewrite that drops them is a FAILED rewrite, however good the prose.\n` +
       `- Never fabricate an anchor that is not in the excerpts.\n\n` +
-      `${PRESCRIPTIVE_GUIDANCE}\n${RESEARCH_CITATION_RULES}`;
+      `${PRESCRIPTIVE_GUIDANCE}\n${RESEARCH_LANGUAGE_RULE}\n${RESEARCH_CITATION_RULES}`;
     const user =
       `SECTION TO REVISE:\n\n${sec.heading}\n${sec.body}\n\n` +
       `SOURCE EXCERPTS:\n\n${sourceContext.slice(0, 40_000)}${DATA_TRAILER}`;
@@ -2902,6 +3197,7 @@ async function synthesizeStageBrief(
     `You are a research analyst writing Stage ${stage} of ${totalStages} in a staged investigation of: "${topic}".
 ${specPreamble ? `\n${specPreamble}` : ''}
 Using ONLY the source excerpts below, write a comprehensive research brief (aim for ~1500 words).
+${RESEARCH_LANGUAGE_RULE}
 ${handoffContext ? `\nCONTEXT FROM PRIOR STAGES:\n${handoffContext}\n` : ''}
 Sub-questions to address:
 ${subQuestions.map((q, i) => `${i + 1}. ${q}`).join('\n')}
@@ -2952,16 +3248,17 @@ You have ${stageBriefs.length} research briefs from a staged investigation, each
 
 Write ONE long, comprehensive, decision-useful report — the kind a reader pays for because it saves them weeks. Depth and structure matter as much as accuracy.
 
-LENGTH & DEPTH — the #1 failure of these reports is being too SHORT. Target ${lengthSpec.total} words. Hit it by PRESERVING detail, not padding:
+LENGTH & DEPTH — target ${lengthSpec.total} words, and treat BOTH ends of that range as real limits. Undershooting means you compressed the briefs into a digest; overshooting means you padded. Hit the range by PRESERVING detail, not by adding words:
 - Do NOT summarise the briefs into a short digest. The briefs are your raw material — carry their SPECIFIC findings, mechanisms, numbers, named examples, and trade-offs into the report in full.
 - Every distinct point from the briefs earns its own sentence with its citation — do NOT collapse several distinct findings into one line.
 - Every sub-question gets its OWN multi-paragraph section (3–6 paragraphs), not a sentence or two.
 - For each recommendation or trade-off, give the mechanism AND the downside/cost, not just the headline.
-- If your draft is under the target range, you have compressed too much — go back and restore the detail the briefs contain.
+- If your draft is under the range, you compressed too much — restore the detail the briefs contain.
+- If your draft is over the range, you padded — cut restatement, throat-clearing, and section-opening summaries of what you are about to say. Never cut evidence, numbers, or citations to fit; if the material genuinely needs more room, exceed the range rather than dropping findings.
 
 STRUCTURE — adapt it to the subject; do NOT use a rigid template:
 - Do NOT write a top-level title / H1 (no "# Professional Report: …", no "Report on …") — the document already has a title, and a second one renders as an ugly double header. Start directly with the body.
-- Open with a strong 1–2 paragraph executive overview that frames the whole finding (no "Abstract:" label — write it as authoritative prose).
+- Open with a "**Key findings**" line and 3-5 one-sentence bullets (each ending with its [anchor_id]), THEN a 1–2 paragraph executive overview that frames the whole finding (no "Abstract:" label — authoritative prose). The reader must be able to grasp the thesis without reading further.
 - Organise the body into 4–8 sections with DESCRIPTIVE, topic-specific headings that name the actual finding (e.g. "Demand and Pain Points", "Willingness to Pay", "Competitive Landscape") — NOT generic labels like "Introduction / Section 1 / Discussion". Cover every sub-question, but through headings that fit the material:
 ${subQuestions.map((q, i) => `   ${i + 1}. ${q}`).join('\n')}
 - Use ### sub-headings within sections to break up long analysis.
@@ -2981,6 +3278,7 @@ SYNTHESIS RULES:
 ${PRESCRIPTIVE_GUIDANCE}
 ${REPORT_VOICE}
 ${EPISTEMIC_RULES}
+${RESEARCH_LANGUAGE_RULE}
 ${RESEARCH_CITATION_RULES}`;
 
   const userMsg = `RESEARCH BRIEFS:\n\n${briefsBlock}`;
@@ -3012,7 +3310,10 @@ export function normalizeSection(out: string, heading: string): string | null {
   const lead = /^##\s+([^\n]*)\n+/.exec(text);
   if (lead) text = text.slice(lead[0].length).trim();
   text = `## ${heading}\n\n${text}`;
-  return stripModelBibliography(text);
+  // Generation can stop mid-structure — one section ended on a table header
+  // with no delimiter row, which renders as a stray line of pipes. The cause is
+  // an output cap upstream, but shipping the debris is a choice.
+  return trimTruncatedTail(stripModelBibliography(text));
 }
 
 /**
@@ -3052,10 +3353,16 @@ async function synthesizeSectionedPaper(
   const chunkUse = new Map<string, number>();
   let retryBudget = 2;
   let failed = 0;
+  const synthStartedAt = Date.now();
+  let salvaged: 'stopped' | 'budget' | null = null;
 
   for (let i = 0; i < sections.length; i++) {
     const s = sections[i];
-    if (signal?.aborted) throwIfAborted(signal);
+    // Stop starting new sections when the run is aborted (Stop / watchdog) or
+    // this synthesis phase has run past its budget — but DON'T throw: break and
+    // ship the finished sections below, so the work isn't discarded.
+    if (signal?.aborted) { salvaged = 'stopped'; break; }
+    if (Date.now() - synthStartedAt > SYNTH_WALL_BUDGET_MS) { salvaged = 'budget'; break; }
 
     // Resume: a SW death mid-synthesis left finished sections in the checkpoint.
     if (sectionDrafts[s.id] && sectionDrafts[s.id].length > 150) {
@@ -3067,8 +3374,15 @@ async function synthesizeSectionedPaper(
 
     // Targeted retrieval: this section's material from ALL gathered sources.
     const query = `${s.heading} ${s.keyTerms.join(' ')}`.trim() || topic;
+    // A chunk may feed TWO sections — prose reuse is harmless, since each
+    // section paraphrases it for its own argument. A chunk carrying a TABLE is
+    // different: the second section re-renders the table from context rather
+    // than copying it, and gets it wrong. Observed live — the same
+    // interaction-mode table appeared in two sections, and in the second the
+    // engagement column had been written into the usability column. So a
+    // table-bearing chunk is allowed exactly once.
     const chunks = (await searchSessionChunks(projectId, query, 12, allDocIds, { qualityBoost, hyde: true, llmChatFn }).catch(() => []))
-      .filter(c => (chunkUse.get(c.anchorId) ?? 0) < 2);
+      .filter(c => (chunkUse.get(c.anchorId) ?? 0) < (/^\s*\|.*\|/m.test(c.text || '') ? 1 : 2));
     chunks.forEach(c => chunkUse.set(c.anchorId, (chunkUse.get(c.anchorId) ?? 0) + 1));
     const evidence = buildAnchoredContext(chunks, titles).trim();
     const briefExcerpts = selectBriefExcerpts(stageBriefs, s, 6000);
@@ -3096,13 +3410,14 @@ ${s.evidenceNotes.length ? `- Key evidence gathered: ${s.evidenceNotes.join(' | 
 ${prevTail}
 Requirements:
 - Output starts with EXACTLY "## ${s.heading}" and contains ONLY this section — no executive summary, no verdict, no conclusions, no other sections.
-- ${lengthSpec.sectionWords} words of analytical prose. Use ### sub-headings for long analysis.
+- ${lengthSpec.sectionWords} words of analytical prose — stay inside that range; the report's total budget assumes it. Use ### sub-headings for long analysis.
 - Present comparable or quantitative evidence as a Markdown table.
 - Carry the SPECIFIC findings, mechanisms, numbers, and named examples from the material — do not compress distinct findings into one line.
 
 ${PRESCRIPTIVE_GUIDANCE}
 ${REPORT_VOICE}
 ${EPISTEMIC_RULES}
+${RESEARCH_LANGUAGE_RULE}
 ${RESEARCH_CITATION_RULES}`;
 
     const user = `SECTION EVIDENCE (retrieved excerpts):\n\n${evidence || '(none — use the brief excerpts)'}\n\nRELEVANT BRIEF EXCERPTS:\n\n${briefExcerpts || '(none)'}${DATA_TRAILER}`;
@@ -3138,6 +3453,19 @@ ${RESEARCH_CITATION_RULES}`;
   }
 
   const body = written.join('\n\n');
+
+  // Salvage path: we stopped early (Stop/watchdog or the synthesis budget).
+  // Ship the finished sections with an incomplete banner — no capstone (it needs
+  // the LLM the abort just killed, and there's no time budget left). If nothing
+  // was written, fall through to null so the caller can try the cheaper merge.
+  if (salvaged) {
+    if (written.length === 0) return null;
+    crumb('synth', 'sectioned salvaged', { reason: salvaged, sections: written.length, of: sections.length });
+    const why = salvaged === 'stopped' ? 'the run was stopped' : 'the time budget was reached';
+    const banner = `> ⚠ **Incomplete report** — ${why} after ${written.length} of ${sections.length} planned sections. What follows is what had been written; the executive summary and verdict were not generated.\n\n`;
+    return banner + body;
+  }
+
   // Degradation gate: worse than the single-merge path → let the caller run it.
   if (failed > sections.length / 2 || body.length < 800) {
     crumb('synth', 'sectioned degraded → single merge', { failed, bodyChars: body.length });
@@ -3149,15 +3477,16 @@ ${RESEARCH_CITATION_RULES}`;
   try {
     const capSys =
       `You are finishing the definitive report on: "${topic}". The body sections are WRITTEN — do not rewrite them.
-Produce EXACTLY three blocks separated by these delimiter lines:
-(block 1) A 1-2 paragraph executive overview of the whole report — authoritative prose, NO heading, no "Abstract:" label.
+Produce EXACTLY three blocks separated by these delimiter lines, copied VERBATIM — do not expand, rename, or translate them (they are parsed, not read):
+(block 1) FIRST a "**Key findings**" line followed by 3-5 one-sentence bullets — each the single most important takeaway a reader must not miss, each ending with its [anchor_id]. THEN a 1-2 paragraph executive overview. No other heading, no "Abstract:" label. A report this dense is unreadable without a scannable summary up top.
 ---CONTRADICTIONS---
 (block 2) A "## Contradictions & Open Questions" section: where sources disagree (and which side is stronger), which load-bearing claims rest on a single source, what remains unverified.
 ---VERDICT---
 (block 3) A "## Verdict" section: a clear position, the strongest case for it, and the top 2-3 risks or caveats. Do not hedge into a shrug.
 Use ONLY [anchor_id] citations that appear in the provided material — never invent any.
 ${REPORT_VOICE}
-${EPISTEMIC_RULES}`;
+${EPISTEMIC_RULES}
+${RESEARCH_LANGUAGE_RULE}`;
     const capUser = `REPORT OUTLINE:\n${formatOutlineSkeleton(outline)}\n\nFINAL STAGE HANDOFF (known gaps/contradictions):\n${handoffContext.slice(0, 3000)}\n\nREPORT BODY:\n\n${body.slice(0, 20000)}`;
     const cap = await withKeepAlive(
       '[SYNTHESIZING] Capstone: overview, contradictions & verdict',
@@ -3166,20 +3495,21 @@ ${EPISTEMIC_RULES}`;
       30_000
     );
 
-    let exec = '', contradictions = '', verdict = '';
-    if (cap.includes('---CONTRADICTIONS---')) {
-      const [a, rest] = cap.split('---CONTRADICTIONS---');
-      const [b, c] = (rest || '').split('---VERDICT---');
-      exec = a.trim(); contradictions = (b || '').trim(); verdict = (c || '').trim();
-    } else {
-      // Tolerate a dropped delimiter: split on the headings themselves.
-      const ci = cap.search(/##\s*Contradictions/i);
-      const vi = cap.search(/##\s*Verdict/i);
-      exec = (ci > 0 ? cap.slice(0, ci) : cap).trim();
-      contradictions = ci >= 0 ? cap.slice(ci, vi > ci ? vi : undefined).trim() : '';
-      verdict = vi >= 0 ? cap.slice(vi).trim() : '';
+    // Delimiter parsing lives in lib/report-repair.ts and classifies a fence by
+    // the KEYWORD it contains. The previous exact-match version broke on a model
+    // that wrote `---CONTRADICTIONS & OPEN QUESTIONS---`: the split found
+    // nothing, the heading fallback found nothing (the fence replaced the
+    // heading), and the WHOLE capstone became the executive overview — raw
+    // fence lines at the top of the report and no Verdict at the bottom.
+    let { exec, contradictions, verdict } = splitCapstone(cap);
+    exec = trimTruncatedTail(exec.replace(/^#+\s+[^\n]*\n+/, '').trim()); // no heading on the opener
+    // Canonical headings, so a paraphrased fence can never reach the reader.
+    if (contradictions && !/^#{1,3}\s/.test(contradictions)) {
+      contradictions = `## Contradictions & Open Questions\n\n${contradictions}`;
     }
-    exec = exec.replace(/^#+\s+[^\n]*\n+/, '').trim(); // no heading on the opener
+    if (verdict && !/^#{1,3}\s/.test(verdict)) verdict = `## Verdict\n\n${verdict}`;
+    contradictions = trimTruncatedTail(contradictions);
+    verdict = trimTruncatedTail(verdict);
     const parts = [exec, body, contradictions, verdict].filter(Boolean);
     crumb('synth', 'sectioned done', { sections: written.length, failed, words: parts.join(' ').split(/\s+/).length });
     return parts.join('\n\n');
@@ -3706,6 +4036,7 @@ async function runDeeperResearch(
       `- Match register to the subject (analyst report for market/product questions with pricing + competitor tables and a recommendation; technical review for scientific ones).\n` +
       `- End with a decisive **Verdict** (or **Recommendation**): a clear position, the strongest case, and the top 2–3 risks. Do not hedge.\n\n` +
       `${PRESCRIPTIVE_GUIDANCE}\n` +
+      `${RESEARCH_LANGUAGE_RULE}\n` +
       `${RESEARCH_CITATION_RULES}`;
     synthesis = await withKeepAlive(
       '[SYNTHESIZING] Drafting direct synthesis',
@@ -3729,12 +4060,18 @@ async function runDeeperResearch(
         .map((b, i) => `## Stage ${i + 1} Research Brief\n\n${b}`)
         .join('\n\n---\n\n');
   }
-  synthesis = await evaluateAndRefine(
-    topic, synthesis, revisionContext, llmChatFn, evaluatorFn ?? llmChatFn, onProgress,
-    activeSourceMode === 'academic'
-      ? 'CORPUS NOTE: this run was papers-only BY DESIGN (/academic — Semantic Scholar, CrossRef, arXiv, HuggingFace). Do NOT penalize the absence of web, news, industry, or market sources; judge coverage against the academic literature only.'
-      : undefined
-  );
+  // The evaluator is a polish pass (another LLM round). Skip it when the run was
+  // stopped/timed out — the abort just killed the LLM, and the goal now is to
+  // save the salvaged partial, not improve it. Running it here would throw and
+  // lose the report.
+  if (!signal?.aborted) {
+    synthesis = await evaluateAndRefine(
+      topic, synthesis, revisionContext, llmChatFn, evaluatorFn ?? llmChatFn, onProgress,
+      activeSourceMode === 'academic'
+        ? 'CORPUS NOTE: this run was papers-only BY DESIGN (/academic — Semantic Scholar, CrossRef, arXiv, HuggingFace). Do NOT penalize the absence of web, news, industry, or market sources; judge coverage against the academic literature only.'
+        : undefined
+    );
+  }
   // The chat message renders this return value directly — strip pseudo-anchors
   // here too, not only in the saved-document path (saveSynthesisReport).
   synthesis = stripStageBriefPseudoCitations(synthesis);

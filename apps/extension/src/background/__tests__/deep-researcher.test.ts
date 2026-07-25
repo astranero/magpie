@@ -26,8 +26,10 @@ import {
   extractSearchUrls,
   generateSearchQueries,
   generateSubQuestions,
+  RESEARCH_LANGUAGE_RULE,
   sourceTier,
   dedupeSourceRecords,
+  canonicalSourceKey,
   buildSourcesDocMarkdown,
   formatEvaluationBlock,
   buildCleanedPdfDoc,
@@ -273,6 +275,39 @@ describe('generateSearchQueries', () => {
   });
 });
 
+// ─── Language ─────────────────────────────────────────────────────────────────
+// A Finnish question produced English directives in the plan card and an
+// English report. Only QUERY generation carried a language rule; every
+// reader-facing call carried none, and the sources are overwhelmingly English,
+// so the model followed them.
+
+describe('RESEARCH_LANGUAGE_RULE', () => {
+  it('keys off the topic rather than a locale or a script guess', () => {
+    // The topic is the user's own words, so this works for any language the
+    // model can write without a list to maintain or a detector to be wrong.
+    expect(RESEARCH_LANGUAGE_RULE).toMatch(/SAME LANGUAGE as the research topic/i);
+  });
+
+  it('names non-Latin scripts explicitly, not just European languages', () => {
+    expect(RESEARCH_LANGUAGE_RULE).toMatch(/kurdish/i);
+    expect(RESEARCH_LANGUAGE_RULE).toMatch(/arabic|japanese/i);
+  });
+
+  it('tells the model to translate findings rather than follow the sources', () => {
+    // The specific failure mode: reading English sources and drifting into
+    // English because that is what was in front of it.
+    expect(RESEARCH_LANGUAGE_RULE).toMatch(/TRANSLATE/);
+    expect(RESEARCH_LANGUAGE_RULE).toMatch(/[Nn]ever switch/);
+  });
+
+  it('protects the tokens that must not be translated', () => {
+    // Translating an anchor breaks every citation in the report.
+    expect(RESEARCH_LANGUAGE_RULE).toMatch(/anchor_id/);
+    expect(RESEARCH_LANGUAGE_RULE).toMatch(/proper nouns/i);
+    expect(RESEARCH_LANGUAGE_RULE).toMatch(/code/i);
+  });
+});
+
 // ─── generateSubQuestions ─────────────────────────────────────────────────────
 
 describe('generateSubQuestions', () => {
@@ -353,6 +388,69 @@ describe('dedupeSourceRecords', () => {
   it('keeps distinct sources', () => {
     const out = dedupeSourceRecords([rec({}), rec({ docId: 'doc-b', url: 'https://example.com/b' })]);
     expect(out.length).toBe(2);
+  });
+
+  it('collapses the four faces of one arXiv paper into one source', () => {
+    // abs, pdf, html, and a scribd mirror all point at the SAME paper. Distinct
+    // docIds (four scrapes) would keep four rows on the old exact-url key.
+    const out = dedupeSourceRecords([
+      rec({ docId: 'd1', url: 'https://arxiv.org/abs/2401.12345' }),
+      rec({ docId: 'd2', url: 'https://arxiv.org/pdf/2401.12345v2' }),
+      rec({ docId: 'd3', url: 'https://arxiv.org/html/2401.12345' }),
+      rec({ docId: 'd4', url: 'https://www.scribd.com/document/999/Paper-2401.12345' }),
+    ]);
+    expect(out.length).toBe(1);
+  });
+
+  it('on collapse keeps the higher-tier record for the paper', () => {
+    const out = dedupeSourceRecords([
+      rec({ docId: 'd1', url: 'https://www.scribd.com/document/1/x-2401.12345', tier: 'standard' }),
+      rec({ docId: 'd2', url: 'https://arxiv.org/abs/2401.12345', tier: 'high' }),
+    ]);
+    expect(out.length).toBe(1);
+    expect(out[0].tier).toBe('high');
+  });
+
+  it('does NOT merge two different pages on the same domain', () => {
+    const out = dedupeSourceRecords([
+      rec({ docId: 'd1', url: 'https://blog.example.com/post-one' }),
+      rec({ docId: 'd2', url: 'https://blog.example.com/post-two' }),
+    ]);
+    expect(out.length).toBe(2);
+  });
+});
+
+describe('canonicalSourceKey', () => {
+  it('gives one key to every URL of a paper', () => {
+    const k = canonicalSourceKey('https://arxiv.org/abs/2401.12345');
+    expect(canonicalSourceKey('https://arxiv.org/pdf/2401.12345')).toBe(k);
+    expect(canonicalSourceKey('https://arxiv.org/pdf/2401.12345v3')).toBe(k);
+    expect(canonicalSourceKey('https://arxiv.org/html/2401.12345')).toBe(k);
+    expect(canonicalSourceKey('https://huggingface.co/papers/2401.12345')).toBe(k);
+    expect(k).toBe('arxiv:2401.12345');
+  });
+
+  it('keys DOIs regardless of host', () => {
+    const a = canonicalSourceKey('https://doi.org/10.1177/08944393251366243');
+    const b = canonicalSourceKey('https://journals.sagepub.com/doi/10.1177/08944393251366243');
+    expect(a).toBe(b);
+    expect(a.startsWith('doi:')).toBe(true);
+  });
+
+  it('normalizes trivial URL differences but keeps the path', () => {
+    expect(canonicalSourceKey('https://www.example.com/a/')).toBe(canonicalSourceKey('http://example.com/a'));
+    expect(canonicalSourceKey('https://example.com/a?utm=x#frag')).toBe(canonicalSourceKey('https://example.com/a'));
+    expect(canonicalSourceKey('https://example.com/a')).not.toBe(canonicalSourceKey('https://example.com/b'));
+  });
+
+  it('does not treat a bare 2401.12345-looking slug on a random host as arXiv', () => {
+    // Only known mirrors get the bare-id treatment; an arbitrary blog does not.
+    expect(canonicalSourceKey('https://blog.example.com/2401.12345-notes'))
+      .not.toBe('arxiv:2401.12345');
+  });
+
+  it('is empty-safe', () => {
+    expect(canonicalSourceKey('')).toBe('');
   });
 });
 

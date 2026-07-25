@@ -124,10 +124,16 @@ export interface ReportLengthSpec {
   sections: string;
 }
 
+// standard was 1800–3000 with section targets (4-8 x 300–700) whose own top end
+// implied ~5600 — so even an obedient model overshot, and reports landed near
+// 4000 words. The per-section budget now multiplies out to roughly the total:
+// 6 sections x ~325 words + a capstone ≈ 2000, which is where a side-panel
+// reader actually stops scrolling. concise and comprehensive keep their spread
+// for people who deliberately want less or more.
 export const REPORT_LENGTH_SPECS: Record<ReportLength, ReportLengthSpec> = {
-  concise:       { total: '900–1500',  sectionWords: '150–350', quick: '500–900',   sections: '3-5'  },
-  standard:      { total: '1800–3000', sectionWords: '300–700', quick: '800–1500',  sections: '4-8'  },
-  comprehensive: { total: '2800–4500', sectionWords: '500–900', quick: '1200–2000', sections: '5-10' },
+  concise:       { total: '700–1100',  sectionWords: '120–240', quick: '400–700',   sections: '3-5'  },
+  standard:      { total: '1500–2200', sectionWords: '250–400', quick: '700–1200',  sections: '4-6'  },
+  comprehensive: { total: '2800–4000', sectionWords: '450–700', quick: '1200–1800', sections: '5-7'  },
 };
 
 export async function getReportLength(): Promise<ReportLength> {

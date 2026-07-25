@@ -23,6 +23,7 @@ measured**. §1.0 adds the instrumentation to replace them with real numbers.
 | §0b section-scoped revision + citation guards | ✅ |
 | §2 graded early stop (coverage + novelty) | ✅ |
 | §0 gather time budget (35 min → synthesize, don't abort) | ✅ |
+| §0c synthesis budget (`SYNTH_WALL_BUDGET_MS` 18 min) + partial-report salvage on abort/watchdog | ✅ — the shipped mitigation for the 60-min watchdog (commit 170ef37): finished sections are delivered under an "Incomplete report" banner instead of discarded |
 | §4 link caps: `MAX_LINKS` 4, `MAX_SELECTED` 6, `FETCH_DEADLINE_MS` 15s | ✅ |
 | §2b salvage truncated reflect JSON + novelty-only stop when reflect fails | ✅ |
 | §1.0 instrumentation crumbs | ❌ next |
@@ -146,8 +147,12 @@ This matches the symptom exactly: **rewrite → longer** (it's told to expand),
 
 `reviseSynthesis` feeds the model `synthesis.slice(0, 24_000)`. The code's own
 comment (`:2172`) notes *"a 3000-word report is ~20k [chars]"* — so a report at
-the top of the 1800–3000 word mandate is already near the cut, and a longer one
-is silently truncated. The rewrite then **replaces the entire report** with an
+the top of the then-current 1800–3000 word mandate is already near the cut, and
+a longer one is silently truncated.
+
+> **Update:** `standard` is now 1500–2200 words (~15k chars), so the default
+> setting no longer approaches the 24k cut. `comprehensive` (2800–4000, ~27k)
+> still can — the truncation is real, just no longer on the default path. The rewrite then **replaces the entire report** with an
 expansion of only the part it saw, discarding the tail and its citations.
 
 ### Fix — section-scoped revision (this is §3.3, promoted)

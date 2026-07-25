@@ -1,16 +1,19 @@
 # Capture
 
-All ingestion paths converge on: markdown → frontmatter → chunk → embed →
-save, with an added quality gate for scraped-URL sources (research,
-`/follow`). Nothing enters the library implicitly.
+All ingestion paths converge on: markdown → frontmatter → chunk → **save
+(vector-less) → embed (background)**, with an added quality gate for
+scraped-URL sources (research, `/follow`). Web-page capture returns as soon as
+the doc is saved (BM25-searchable immediately); embeddings backfill in the
+background (`deferEmbed`/`pendingEmbed`, see STORAGE.md). Nothing enters the
+library implicitly.
 
 ## Paths
 
 | Source | Route |
 |---|---|
-| **Web page** | Content script: Readability + Turndown → markdown (fallback: inject `content.js` then retry; if the page still can't be scraped and isn't a PDF, the capture fails) |
+| **Web page** | Content script: `sanitizeCaptureDom` (strip screen-reader-only nodes + `role="heading"` off non-`<h>` elements) → Readability + Turndown → markdown → `demoteRunawayHeadings` (a paragraph a site wrapped in a heading tag) → the salvage passes below → `funnyCaptureTitle` fallback when no usable title. Fallback: inject `content.js` then retry; if the page still can't be scraped and isn't a PDF, the capture fails |
 | **YouTube watch page** | Content script: timedtext API; empty/PO-token response falls back to scraping the player's own transcript panel |
-| **PDF by URL** (incl. extension-less like `arxiv.org/pdf/…` — detected via HEAD content-type) | `OFFSCREEN_PARSE_PDF_URL`: the offscreen document fetches (size-scaled timeout: 30 s + 3 s/MB, cap 5 min) and parses with pdf.js — bytes never cross `sendMessage` (~64 MB cap). Column-aware line building fixes two-column papers; citation brackets re-joined; scanned pages (no extractable text) get a placeholder marker — canvas/vision-model OCR rendering is currently disabled; 800-page cap |
+| **PDF by URL** (incl. extension-less like `arxiv.org/pdf/…` — detected via HEAD content-type) | Background fetch first; if it yields no text and the PDF is open in a tab, the content script re-fetches it from inside the page so it carries the user's session (see *Gated PDFs*). Then `OFFSCREEN_PARSE_PDF_URL`: the offscreen document fetches (size-scaled timeout: 30 s + 3 s/MB, cap 5 min) and parses with pdf.js — bytes never cross `sendMessage` (~64 MB cap). Column-aware line building fixes two-column papers; citation brackets re-joined; scanned pages (no extractable text) get a placeholder marker — canvas/vision-model OCR rendering is currently disabled; 800-page cap |
 | **Local `.md` files/folder** | File System Access picker; relative images inlined as data URLs (`lib/import-helpers.ts`); existing frontmatter preserved |
 | **Local PDF/images** | Base64 path (guarded: >48 MB errors with size instead of OOM), async with BroadcastChannel progress; images described by the vision model |
 | **Right-click** | "Capture page to Library" / capture selection |
@@ -23,13 +26,83 @@ save, with an added quality gate for scraped-URL sources (research,
 Capture destination: Global Lore always; linked to the active workspace when
 "Auto-add to active workspace" is ON. `/recall <topic>` links relevant global docs later.
 
+## Extraction salvage — what Readability drops
+
+Readability scores candidates by **prose density**; it exists to find the
+article in a news page. Two shapes lose badly, and both fail *silently* —
+`article.content` comes back non-empty and plausible, so no fallback fires.
+
+**Specification grids** (`lib/spec-salvage.ts`). A spec sheet is dozens of
+two-word cells with no sentences, so it scores near zero. Salvage runs alongside
+Readability and appends what it discarded, best source first: JSON-LD (read
+before `<script>` is stripped), `<dl>/<dt>/<dd>`, repeated two-or-three-cell
+rows, and flat CSS-grid label/value sequences. Layout wrappers are unwrapped up
+to 4 levels — real markup nests the row inside a single-child div, and counting
+the wrapper's children sees 1, not 2.
+
+Noise guards: >=3 pairs per container, cells short and sentence-free,
+`nav`/`footer`/`form` subtrees skipped, rows already in the markdown dropped,
+hard row cap. Salvage also **descends `@graph`** JSON-LD (the wrapper most real
+sites use — skipping it dropped the whole payload) and **recovers a listing's
+free-text description** as prose (JSON-LD `description`/`articleBody`, or DOM
+`[itemprop="description"]`) — the "is this a good bike?" text Readability drops
+next to the spec grid, and too long to survive the spec-cell length cap.
+
+**Chat-UI a11y chrome** (`lib/extraction-quality.ts` `sanitizeCaptureDom`, run
+before Readability). Chat UIs (Gemini, ChatGPT) mark the user's query bubble
+`role="heading"` on a `<div>` and hide a screen-reader label inside it. Neither
+is a document heading; sanitize strips the screen-reader-only nodes and removes
+`role="heading"`/`aria-level` from non-`<h1>-<h6>` elements so the query captures
+as prose, not a giant header or the doc title. `demoteRunawayHeadings` is the
+render-time backstop for a paragraph a site wrapped in a real heading tag;
+`funnyCaptureTitle` supplies a short on-theme title when a page has none usable.
+
+**Coverage check** (`lib/extraction-quality.ts`). No heuristic extractor works on
+every site — Readability is a scoring algorithm and some layout will always score
+wrong. What *is* guaranteed is that a bad extraction is **detected**:
+`assessCoverage` compares the captured text against the page's own. Below 12% of
+a substantial page we sampled rather than captured, and the fuller body text is
+used instead. The threshold sits well under normal article loss (70-80% of a page
+is legitimately nav/sidebar/footer), so ordinary extraction never trips it.
+
+A ratio is a fact about the numbers rather than about any one site, which is why
+it keeps working on sites nobody has tested.
+
+Both run in the content script (live DOM) **and** the parse worker (fetched
+HTML). The worker reuses its already-parsed document for the fallback: building
+a second full DOM there would defeat the reason the worker exists.
+
+## Gated PDFs
+
+A background fetch is a bare request with no session, so a host that gates
+downloads (ResearchGate, most publishers) answers with a verification page
+instead of the PDF. The **tab** has a session — the user opened the paper and the
+site let them through.
+
+`capturePdfUrl` falls back to `EXTRACT_PDF`, which asks the content script to
+fetch the same URL from inside the page so it carries their cookies. This is the
+user's own access used on their behalf: if they cannot open the PDF themselves,
+neither can this. Nothing here circumvents a check.
+
+`isJunkUrl` treats a PDF as content whatever path serves it. The `/profile/` rule
+was written for ResearchGate's HTML profile pages and had been discarding its
+full-text papers, which live at
+`/profile/<name>/publication/<id>/links/<hash>.pdf`.
+
 ## Quality gate (`lib/quality-gate.ts`)
 
 Every page scraped through the research / `/follow` pipeline (`scrapeUrl`)
 must pass before indexing:
 - anti-bot/captcha interstitials, JS-required, paywalls, login walls,
   error/maintenance pages, cookie walls (pattern checks apply only to short
-  pages, so long articles merely *mentioning* "captcha" pass),
+  pages, so long articles merely *mentioning* "captcha" pass). The interstitial
+  patterns are exported as `looksLikeChallengePage` and reused by the extraction
+  paths, which need the same question answered for a different reason: the gate
+  *rejects* a scraped URL, while a live tab has to explain to the user why the
+  page came back empty. One list either way — two would drift the first time a
+  provider reworded its block page. (Consolidating them immediately surfaced
+  four missing markers, and a pattern matching `verify you are human` but not
+  Cloudflare's current `Verifying you are human`.)
 - minimum size (200 chars / 50 words),
 - OCR-garbage detector for PDF text (alphanumeric ratio).
 

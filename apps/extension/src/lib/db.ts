@@ -16,16 +16,28 @@ import { makeDocShortId } from './chunker';
 // mid-research. Batching bounds per-call payload, worker memory, and time; a
 // failed batch only loses its own chunks (null), the rest still index.
 const EMBED_CALL_BATCH = 64;
+// Per-batch cap. The default offscreen timeout is 3 minutes — fine for a
+// research run, but on a COLD ONNX model the embedder can stall indefinitely
+// (it hangs rather than rejecting). At 3 min PER batch, a multi-batch capture
+// froze the panel for many minutes ("capturing is stuck"). 45s comfortably
+// covers a cold model-load + a warm batch; past that we degrade, not wait.
+const EMBED_BATCH_TIMEOUT_MS = 45_000;
 async function embedTextsBatched(texts: string[]): Promise<(number[] | null)[]> {
   const out: (number[] | null)[] = [];
+  let stalled = false;
   for (let i = 0; i < texts.length; i += EMBED_CALL_BATCH) {
     const slice = texts.slice(i, i + EMBED_CALL_BATCH);
+    // Once the embedder has timed out once, it is stalled — don't make the user
+    // wait the full timeout again for every remaining batch. Store the rest
+    // vector-less (still lexically searchable) and let the capture finish.
+    if (stalled) { for (let j = 0; j < slice.length; j++) out.push(null); continue; }
     try {
-      const res: any = await sendToOffscreen({ action: 'OFFSCREEN_GET_EMBEDDINGS', texts: slice });
+      const res: any = await sendToOffscreen({ action: 'OFFSCREEN_GET_EMBEDDINGS', texts: slice }, EMBED_BATCH_TIMEOUT_MS);
       const emb: any[] = res?.ok && Array.isArray(res.embeddings) ? res.embeddings : [];
       for (let j = 0; j < slice.length; j++) out.push(emb[j] ?? null);
     } catch (e) {
-      console.warn(`[embed] batch ${i}-${i + slice.length} failed, chunks stored vector-less:`, e);
+      if (/timed out/i.test(String((e as any)?.message || e))) stalled = true;
+      console.warn(`[embed] batch ${i}-${i + slice.length} failed, chunks stored vector-less${stalled ? ' (embedder stalled — skipping rest)' : ''}:`, e);
       for (let j = 0; j < slice.length; j++) out.push(null);
     }
   }
@@ -71,6 +83,10 @@ export interface StoredDocument {
   driveFileId?: string;
   /** BibTeX entry — present on academic papers with known metadata. */
   bibtex?: string;
+  /** Chunks were saved vector-less to return capture fast; embeddings are being
+   *  backfilled in the background. Cleared once embeddings are written. A killed
+   *  service worker leaves this set, so resumePendingEmbeds() can finish it. */
+  pendingEmbed?: boolean;
 }
 
 export interface Chunk {
@@ -95,6 +111,19 @@ export interface ChatMessage {
   citations?: CitationRef[];
   timestamp: string;
   provider?: string;
+  /** Images on this turn as data URLs: the user's attachment, or images the
+   *  model generated. Local-only — chat is not uploaded to Drive — and bounded
+   *  by the downscale applied before an attachment is stored. IndexedDB records
+   *  are schemaless, so this needs no store-version bump. */
+  images?: string[];
+  /** Interactive extras persisted so /teach lessons and /flashcard decks survive
+   *  a chat switch or reload. Schemaless store — no version bump. Typed loosely
+   *  here; the UI (types.ts) casts to QuizQuestion[] / Flashcard[]. */
+  quiz?: any[];
+  deck?: any[];
+  deckTitle?: string;
+  /** Command buttons under a message ("Continue → next lesson", "Reset course"). */
+  actions?: { label: string; command: string }[];
 }
 
 export interface CitationRef {
@@ -339,7 +368,7 @@ export async function updateProjectRules(id: string, rules: string): Promise<voi
 
 export async function linkDocumentToProject(projectId: string, documentId: string): Promise<void> {
   const db = await openDB();
-  const transaction = tx(db, 'projects', 'readwrite');
+  const transaction = tx(db, ['projects', 'documents'], 'readwrite');
   const store = transaction.objectStore('projects');
   const project = await reqToPromise<Project | undefined>(store.get(projectId));
   if (project) {
@@ -349,6 +378,15 @@ export async function linkDocumentToProject(projectId: string, documentId: strin
       project.updatedAt = new Date().toISOString();
       store.put(project);
     }
+  }
+  // Stamp the document's OWN projectId. Without this the field stayed empty on
+  // every captured doc, so Drive sync (which routes by doc.projectId) dumped
+  // everything into the Magpie root instead of Magpie/<project>/.
+  const docStore = transaction.objectStore('documents');
+  const doc = await reqToPromise<StoredDocument | undefined>(docStore.get(documentId));
+  if (doc && doc.projectId !== projectId) {
+    doc.projectId = projectId;
+    docStore.put(doc);
   }
   await txComplete(transaction);
   notifySync();
@@ -542,7 +580,8 @@ export async function findExistingDocumentByUrl(url: string): Promise<StoredDocu
 
 export async function saveDocument(
   doc: Omit<StoredDocument, 'id' | 'enabled'> & { enabled?: boolean },
-  chunks: Omit<Chunk, 'id' | 'docId'>[]
+  chunks: Omit<Chunk, 'id' | 'docId'>[],
+  opts: { deferEmbed?: boolean } = {}
 ): Promise<SaveDocumentResult> {
   // Deduplication: check if document with same URL already exists
   if (doc.url) {
@@ -572,16 +611,22 @@ export async function saveDocument(
   }));
 
   // Generate embeddings BEFORE opening the IDB transaction — in small batches so
-  // a big document can't spike memory and crash the offscreen renderer.
-  const embs = await embedTextsBatched(finalChunks.map(c => c.text));
-  embs.forEach((embedding, idx) => { if (embedding && finalChunks[idx]) finalChunks[idx].embedding = embedding; });
+  // a big document can't spike memory and crash the offscreen renderer. UNLESS
+  // the caller defers: embedding is the slow step, so capture persists chunks
+  // vector-less (still lexically searchable) and returns immediately, then
+  // backfills embeddings in the background (see embedChunksForDoc). The doc is
+  // flagged pendingEmbed so a killed worker can be resumed.
+  if (!opts.deferEmbed) {
+    const embs = await embedTextsBatched(finalChunks.map(c => c.text));
+    embs.forEach((embedding, idx) => { if (embedding && finalChunks[idx]) finalChunks[idx].embedding = embedding; });
+  }
 
   // Now open the transaction and write everything synchronously
   const transaction = tx(db, ['documents', 'chunks'], 'readwrite');
   const docStore = transaction.objectStore('documents');
   const chunkStore = transaction.objectStore('chunks');
 
-  docStore.put({ ...doc, id, enabled: doc.enabled ?? true });
+  docStore.put({ ...doc, id, enabled: doc.enabled ?? true, ...(opts.deferEmbed ? { pendingEmbed: true } : {}) });
 
   for (const chunk of finalChunks) {
     chunkStore.put(chunk);
@@ -627,6 +672,53 @@ export async function replaceChunksForDoc(docId: string, chunks: Omit<Chunk, 'id
     transaction.onerror = () => reject(transaction.error);
   });
   return finalChunks;
+}
+
+/**
+ * Backfill embeddings for a doc saved with `deferEmbed`. Loads its (vector-less)
+ * chunks, embeds them, rewrites them with vectors, and clears `pendingEmbed`.
+ * Returns the embedded chunks so the caller can add them to the vector store.
+ * Idempotent: a doc with no pending flag / already-embedded chunks is a no-op.
+ */
+export async function embedChunksForDoc(docId: string): Promise<Chunk[]> {
+  const existing = await getChunksForDoc(docId);
+  if (existing.length === 0) return [];
+
+  const embs = await embedTextsBatched(existing.map(c => c.text));
+  const withVecs: Omit<Chunk, 'id' | 'docId'>[] = existing.map((c, i) => {
+    const { id: _id, docId: _docId, ...rest } = c;
+    return { ...rest, embedding: embs[i] ?? c.embedding };
+  });
+  const saved = await replaceChunksForDoc(docId, withVecs);
+
+  // Clear the pending flag (best-effort; the chunks are what matter).
+  try {
+    const db = await openDB();
+    const t = tx(db, 'documents', 'readwrite');
+    const store = t.objectStore('documents');
+    const doc = await reqToPromise<StoredDocument | undefined>(store.get(docId));
+    if (doc?.pendingEmbed) { delete doc.pendingEmbed; store.put(doc); }
+    await txComplete(t);
+  } catch { /* flag is a hint, not correctness — chunks already carry vectors */ }
+
+  return saved;
+}
+
+/**
+ * Finish any captures whose background embed was cut off (e.g. the MV3 worker
+ * was suspended right after a fast capture returned). Called on worker startup.
+ * Sequential + best-effort; each doc's chunks stay lexically searchable until
+ * its turn comes.
+ */
+export async function resumePendingEmbeds(): Promise<number> {
+  const docs = await listDocuments();
+  const pending = docs.filter(d => d.pendingEmbed);
+  let done = 0;
+  for (const d of pending) {
+    try { await embedChunksForDoc(d.id); done++; }
+    catch (e) { console.warn('[embed] resume failed for', d.id, e); }
+  }
+  return done;
 }
 
 export async function listDocuments(projectId?: string): Promise<StoredDocument[]> {
@@ -969,13 +1061,114 @@ export async function clearChatHistory(chatId: string): Promise<void> {
   notifySync();
 }
 
+/**
+ * Delete `messageId` and every message after it in the chat. Returns how many
+ * were removed, or -1 when the id isn't in this chat (so the caller can say so
+ * instead of silently doing nothing).
+ *
+ * Backs regenerate and edit-and-re-run: both mean "the transcript from here on
+ * is about to be replaced". Ordering comes from getChatHistory, so "after"
+ * means the same thing here as it does on screen — deleting by raw timestamp
+ * comparison would disagree with the UI whenever two messages share a
+ * millisecond.
+ *
+ * Destructive and it participates in Drive sync (see notifySync below), so
+ * callers that discard more than the last answer should confirm first.
+ */
+export async function truncateChatFrom(chatId: string, messageId: string): Promise<number> {
+  const history = await getChatHistory(chatId);
+  const idx = history.findIndex(m => m.id === messageId);
+  if (idx === -1) return -1;
+  const doomed = history.slice(idx).map(m => m.id);
+
+  const db = await openDB();
+  const transaction = tx(db, 'chatHistory', 'readwrite');
+  const store = transaction.objectStore('chatHistory');
+  for (const id of doomed) store.delete(id);
+  await txComplete(transaction);
+  notifySync();
+  return doomed.length;
+}
+
 // ── Bulk Operations ──
+
+/**
+ * Whether an un-synced document is eligible to upload.
+ *
+ * The one place this rule lives, shared by getUnsyncedDocuments (what Force
+ * Resync uploads) and getSyncStats (the "N pending" the panel shows). If the
+ * two computed eligibility separately they could disagree, and a status that
+ * contradicts the button beside it is worse than none.
+ */
+export function isSyncEligible(doc: Pick<StoredDocument, 'content'>, syncAll: boolean): boolean {
+  return syncAll || !contentHasTag(doc.content || '', 'research-source');
+}
 
 export async function getUnsyncedDocuments(): Promise<StoredDocument[]> {
   const docs = await listDocuments();
   const s = await chrome.storage.local.get(['syncResearchSources']);
   const syncAll = !!s.syncResearchSources;
-  return docs.filter(d => !d.syncedToDrive && (syncAll || !contentHasTag(d.content || '', 'research-source')));
+  return docs.filter(d => !d.syncedToDrive && isSyncEligible(d, syncAll));
+}
+
+export interface SyncStats {
+  /** Documents flagged as synced to Drive. */
+  synced: number;
+  /** Documents eligible for sync that have not been uploaded yet. */
+  pending: number;
+  /** Every document in the library, including research sources. */
+  total: number;
+}
+
+/**
+ * Counts for the sync-status panel.
+ *
+ * `pending` uses the SAME eligibility filter as getUnsyncedDocuments (research
+ * sources excluded unless the user opted in), so "N pending" here matches
+ * exactly what "Force Resync" would upload — a number that meant something
+ * different from the button next to it would be worse than no number.
+ */
+export async function getSyncStats(): Promise<SyncStats> {
+  const docs = await listDocuments();
+  const s = await chrome.storage.local.get(['syncResearchSources']);
+  const syncAll = !!s.syncResearchSources;
+  let synced = 0;
+  let pending = 0;
+  for (const d of docs) {
+    if (d.syncedToDrive) { synced++; continue; }
+    if (isSyncEligible(d, syncAll)) pending++;
+  }
+  return { synced, pending, total: docs.length };
+}
+
+/**
+ * Every Drive file id this library already holds a copy of.
+ *
+ * Used to keep an import idempotent: without it, importing twice creates a
+ * second local document for the same Drive file, and the library grows by the
+ * size of the folder on every click.
+ *
+ * Reads via a cursor and keeps only the id string, never the record. A full
+ * `listDocuments()` here would materialise every document's markdown at once
+ * — the exact shape of an OOM this codebase has hit before.
+ */
+export async function getKnownDriveFileIds(): Promise<Set<string>> {
+  const db = await openDB();
+  const transaction = tx(db, 'documents', 'readonly');
+  const store = transaction.objectStore('documents');
+  const ids = new Set<string>();
+  await new Promise<void>((resolve, reject) => {
+    const req = store.openCursor();
+    req.onsuccess = (ev) => {
+      const cursor = (ev.target as any).result;
+      if (!cursor) { resolve(); return; }
+      const fid = cursor.value?.driveFileId;
+      if (typeof fid === 'string' && fid) ids.add(fid);
+      cursor.continue();
+    };
+    req.onerror = () => reject(req.error);
+  });
+  return ids;
 }
 
 export async function getDocumentWithChunks(docId: string): Promise<{
@@ -1000,9 +1193,17 @@ export async function resetSyncStatus(): Promise<number> {
       const cursor = (ev.target as any).result;
       if (cursor) {
         const doc = cursor.value;
-        if (doc.syncedToDrive || doc.driveFileId) {
+        if (doc.syncedToDrive) {
+          // Clear the FLAG, keep the file id.
+          //
+          // This used to drop driveFileId too, which made "Force Sync" a
+          // duplicator: the re-upload had no id to update, so it created a
+          // second Drive file for every document and orphaned the first. A
+          // 449-document library doubled the folder on each press, and the
+          // next import pulled both copies back. Keeping the id means the
+          // re-upload PATCHes the file that is already there, which is what
+          // "push my local content again" should mean.
           doc.syncedToDrive = false;
-          doc.driveFileId = undefined;
           cursor.update(doc);
           resetCount++;
         }

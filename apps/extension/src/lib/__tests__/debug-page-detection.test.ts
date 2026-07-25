@@ -217,14 +217,56 @@ describe('looksLikeDebugPage — coverage per family', () => {
   });
 });
 
+// ─────────────────────────────────────────────
+// Performance — OPT-IN: `PERF=1 npx vitest run`
+// ─────────────────────────────────────────────
+// Not part of the default suite, because wall-clock cannot be measured
+// reliably inside it. Vitest runs files in parallel workers, so the detector
+// competes with whatever else is executing.
+//
+// The record, so nobody re-litigates this by trying a fourth statistic:
+//   - absolute budget (<15ms/call) -> failed at 15-17ms on an UNMODIFIED tree
+//   - ratio of best-of-two pairs   -> 2.1x alone, 4.6x under full-suite load
+//   - median of 15 pairs           -> still failed 1 run in 3 (3.20x)
+//
+// A test that is red on a clean checkout is worse than no test: it teaches you
+// to skim past red. The check still has value when run deliberately on an idle
+// machine, so it is kept and gated rather than deleted. Measured curve at the
+// time of writing, and it is cleanly linear:
+//   10k lines 4.1ms · 20k 7.8ms · 40k 16.4ms · 80k 32.5ms
+const PERF = !!process.env.PERF;
+
 describe('performance', () => {
-  it('detector stays fast on a multi-MB log (single sampled pass)', () => {
-    const big = ('2026-07-22T10:14:03.123Z step output line with routine content\n'.repeat(40_000))
-      + '##[error]Process completed with exit code 1.\n';
-    const t0 = performance.now();
-    for (let i = 0; i < 20; i++) looksLikeDebugPage(big);
-    const perCall = (performance.now() - t0) / 20;
-    expect(perCall, `detector took ${perCall.toFixed(1)}ms/call`).toBeLessThan(15);
+  it.skipIf(!PERF)('detector scales linearly, not quadratically, with log size', () => {
+    const line = '2026-07-22T10:14:03.123Z step output line with routine content\n';
+    const tail = '##[error]Process completed with exit code 1.\n';
+    const small = line.repeat(20_000) + tail;
+    const big = line.repeat(40_000) + tail;
+
+    const once = (s: string) => {
+      const t0 = performance.now();
+      looksLikeDebugPage(s);
+      return performance.now() - t0;
+    };
+    looksLikeDebugPage(small); looksLikeDebugPage(big);   // warm: JIT, not signal
+
+    // Vitest runs files in parallel workers, so any single pair can be caught
+    // by a scheduler hiccup — measured 2.1x alone and 4.6x under full-suite
+    // load. Sampling pairs back-to-back and taking the MEDIAN ratio discards
+    // those outliers instead of letting one decide the verdict.
+    const ratios: number[] = [];
+    for (let i = 0; i < 15; i++) {
+      const a = once(small);
+      const b = once(big);
+      if (a > 0.5) ratios.push(b / a);   // ignore samples too small to time
+    }
+    ratios.sort((x, y) => x - y);
+    const median = ratios[Math.floor(ratios.length / 2)];
+
+    // Linear is 2. Quadratic is 4. Three catches an accidental O(n^2) scan
+    // while tolerating a noisy machine.
+    expect(ratios.length, 'no sample was large enough to time').toBeGreaterThan(4);
+    expect(median, `2x input took ${median.toFixed(2)}x the time`).toBeLessThan(3);
   });
 
   it('extractLogHighlights is not quadratic in error count', () => {

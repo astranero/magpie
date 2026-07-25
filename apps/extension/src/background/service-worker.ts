@@ -6,17 +6,20 @@
 
 import {
   saveDocument, listDocuments, updateDocumentSync,
-  getUnsyncedDocuments, getChatHistory, clearChatHistory, saveChatMessage,
-  linkDocumentToProject, getProject, listProjects,
-  getChunkByAnchor, deleteOrphanDocuments, resetSyncStatus,
+  getUnsyncedDocuments, getChatHistory, clearChatHistory, truncateChatFrom, saveChatMessage,
+  linkDocumentToProject, getProject, listProjects, createProject,
+  getChunkByAnchor, deleteOrphanDocuments, resetSyncStatus, getKnownDriveFileIds, getSyncStats,
   saveDocImages, getDocImage, listDocImages
 } from '../lib/db';
 import { chunkDocument, makeDocShortId } from '../lib/chunker';
+import { selectHistory } from '../lib/chat-memory';
+import { shouldSuggestFollowUps, parseFollowUps, FOLLOW_UP_PROMPT } from '../lib/follow-ups';
 import type { EmbeddedImage } from '../lib/pdf-parser';
 import { buildCitationContext, CITATION_SYSTEM_PROMPT, parseResponseCitations } from '../lib/citations';
 import { buildFrontmatter, hasFrontmatter } from '../lib/frontmatter';
 import { get as idbGet } from 'idb-keyval';
 import { runDeepResearch, generateSubQuestions, scrapeUrl, isJunkUrl, gatherWebSnippets } from './deep-researcher';
+import { isAllowedFetchUrl, redactObservedUrl, fetchJson } from '../lib/fetch-guard';
 import { harvestReferences } from '../lib/reference-harvest';
 import { needsIntentResolution, formatHistoryForIntent, parseRepoUrl, selectTreePaths, formatTreeBlock, isChitchat, isRefusalAnswer, isStructureQuestion, isImplementationQuestion, findRepoUrlInText, isPageMetaQuestion, questionKeywords, mentionsPageDeixis, overlapsPage, isLocationDependent, isGeneralKnowledgeQuestion, timezoneToPlace, isAssistantMetaQuestion, RepoRef } from '../lib/query-intent';
 import { sanitizeCliOutput, isCliErrorOutput, composeCliPrompt } from '../lib/cli-output';
@@ -26,11 +29,11 @@ import { getResearchLimits } from '../lib/research-limits';
 import { DEFAULT_COMPANION_MCP_URL, CLI_TEMPLATE_AUTO } from '../lib/settings';
 import { looksLikeBuildLog, looksLikeDebugPage, extractLogHighlights } from '../lib/log-highlights';
 import { addChunksToVectorStore, searchSessionChunks, resetSessionIndex, resetAllSessionIndexes, isConfidentMatch } from '../lib/vector-store';
-import { replaceChunksForDoc } from '../lib/db';
+import { replaceChunksForDoc, embedChunksForDoc, resumePendingEmbeds } from '../lib/db';
 import { pdfUrlToBody, pdfOpfsToBody, pdfBase64ToBody, ensureOffscreen as ensureOffscreenDoc, recreateOffscreen } from '../lib/pdf-parser';
 import { setEnsureOffscreen, setRecreateOffscreen, sendToOffscreen } from '../lib/offscreen-client';
 import { crumb, dumpCrashLog, installCrashHandlers, installCrumbReceiver } from '../lib/crash-log';
-import { getProviderSettings, buildProviderHeaders, chatWithCustom, chatWithCustomStream, handleFetchCustomModels, chatWithTools, ToolDef } from './llm-client';
+import { getProviderSettings, buildProviderHeaders, chatWithCustom, chatWithCustomStream, chatWithImages, handleFetchCustomModels, chatWithTools, ToolDef } from './llm-client';
 import { handleSearchLibrary, handleRecallDocs } from './library-handlers';
 import { handleLinkDocument, handleUnlinkDocument, handleListDocuments, handleGetDocument, handleDeleteDocument, handleGetDocumentCount, handleUpdateDocumentSelection } from './document-handlers';
 import { handleCreateProject, handleListProjects, handleGetProject, handleUpdateProject, handleDeleteProject, handleCreateChat, handleListChats, handleDeleteChat, handleUpdateChat } from './project-handlers';
@@ -41,7 +44,7 @@ import {
 } from '../lib/research-store';
 import { enqueueResearch, dequeueResearch, getResearchQueue, clearResearchQueue } from '../lib/research-queue';
 import { builtinCommandNames } from '../lib/commands';
-import { handleTeach } from './teach';
+import { handleTeach, gradeAnswer, handleFlashcards } from './teach';
 import { wikipediaSearch, wikipediaPageSummary } from '../lib/free-apis';
 
 // ─────────────────────────────────────────────
@@ -75,6 +78,15 @@ let offscreenHealthCheckInterval: number | null = null;
 // Register ensureOffscreen with the robust client for auto-recreation
 setEnsureOffscreen(ensureOffscreenDoc);
 setRecreateOffscreen(recreateOffscreen);
+
+// Resume any capture whose background embedding was cut off by a worker
+// suspension. Runs on each worker wake (module load); no-op when nothing is
+// pending. Delayed so it never competes with an in-flight capture's own embed.
+setTimeout(() => {
+  resumePendingEmbeds()
+    .then(n => { if (n) console.log(`[embed] resumed ${n} pending capture(s)`); })
+    .catch(() => { /* best-effort; docs stay lexically searchable regardless */ });
+}, 8000);
 
 // Start periodic offscreen health check (every 60s)
 function startOffscreenHealthCheck() {
@@ -136,7 +148,13 @@ installCrashHandlers('sw');
 installCrumbReceiver();
 dumpCrashLog('[Magpie crashlog]').catch(() => {});
 const SW_BOOT_AT = Date.now();
-crumb('sw', 'service worker started', { build: 'parse-worker-fixed' });
+// The hardcoded build label this replaced ('parse-worker-fixed') was written
+// once and never updated, so it told you nothing about what was running.
+// __BUILD_STAMP__ is injected at build time, and the console line means the
+// answer to "did my change load?" is one glance at the service-worker console
+// rather than an inference from behaviour.
+console.log(`[Magpie] service worker started — build ${__BUILD_STAMP__}`);
+crumb('sw', 'service worker started', { build: __BUILD_STAMP__ });
 
 // The offscreen doc can't read chrome.storage to learn the inference device, and
 // can't watch it for changes — so we push changes to it from here (this context
@@ -550,6 +568,23 @@ const messageHandlers: Record<string, MessageHandler> = {
     const ctx = (request as any).includePageContext ? await getPageContext().catch(() => null) : null;
     return handleTeach(request, ctx);
   },
+  GRADE_ANSWER: async (request) => {
+    const r = request as any;
+    const grade = await gradeAnswer(String(r.prompt || ''), String(r.modelAnswer || ''), String(r.userAnswer || ''));
+    return { success: true, ...grade };
+  },
+  FLASHCARDS: async (request) => {
+    const ctx = (request as any).includePageContext ? await getPageContext().catch(() => null) : null;
+    return handleFlashcards(request, ctx);
+  },
+  // Persist a client-built message (/teach lesson, /flashcard deck) so it survives
+  // a chat switch or reload — these bypass the streaming chat path that normally saves.
+  SAVE_CHAT_MESSAGE: async (request) => {
+    const m = (request as any).message || {};
+    if (!m.chatId || !m.role) return { success: false, error: 'message needs chatId + role' };
+    const id = await saveChatMessage(m);
+    return { success: true, id };
+  },
   REINDEX_LIBRARY: handleReindexLibrary,
   RECALL_DOCS: handleRecallDocs,
   CLEANUP_ORPHANS: async () => {
@@ -566,6 +601,8 @@ const messageHandlers: Record<string, MessageHandler> = {
     return { generating: liveChatStreams.has(chatId), full: liveChatStreams.get(chatId) || '' };
   },
   CLEAR_CHAT_HISTORY: handleClearChatHistory,
+  GET_BUILD_INFO: async () => ({ build: __BUILD_STAMP__, version: chrome.runtime.getManifest().version }),
+  TRUNCATE_CHAT_FROM: handleTruncateChatFrom,
   CANCEL_TASK: handleCancelTask,
 
   // ── Deep Research ──
@@ -641,7 +678,14 @@ const messageHandlers: Record<string, MessageHandler> = {
     return { resetCount };
   },
   IMPORT_FROM_DRIVE: handleImportFromDrive,
+  RECONCILE_FROM_DRIVE: handleReconcileFromDrive,
+  ENSURE_PROJECT_SUBFOLDER: handleEnsureProjectSubfolder,
   LIST_DRIVE_FILES: handleListDriveFiles,
+  SYNC_STATUS: async () => {
+    const stats = await getSyncStats();
+    const s = await chrome.storage.local.get(['lastDriveSyncAt']);
+    return { ...stats, lastSyncAt: (s.lastDriveSyncAt as string) || null };
+  },
 
   // ── Utils ──
   GET_MAIN_WORLD_YT_RESPONSE: async (_r, sender) => {
@@ -933,8 +977,11 @@ async function captureTab(tab: chrome.tabs.Tab, explicitProjectId: string | null
     content: fullMarkdown
   });
 
-  // Save to IndexedDB globally (always), then link if there's a target
-  const { id: docId, chunks: savedChunks } = await saveDocument({
+  // Save the .md + chunks FIRST, vector-less, so capture returns immediately —
+  // embedding is the slow step and made capture "feel" slow. The doc is
+  // persisted and lexically (BM25) searchable now; embeddings backfill in the
+  // background below. deferEmbed flags the doc pendingEmbed for crash recovery.
+  const { id: docId } = await saveDocument({
     title: scraped.title,
     url: scraped.url,
     content: fullMarkdown,
@@ -942,13 +989,18 @@ async function captureTab(tab: chrome.tabs.Tab, explicitProjectId: string | null
     favicon: scraped.favicon || tab.favIconUrl || '',
     wordCount,
     syncedToDrive: false
-  }, chunks);
+  }, chunks, { deferEmbed: true });
 
   if (linkTarget) {
     await linkDocumentToProject(linkTarget, docId);
-    // Add to vector store (chunks now carry their final id + docId)
-    await addChunksToVectorStore(linkTarget, savedChunks);
   }
+
+  // Backfill embeddings without blocking the capture response. Best-effort: if
+  // the worker is suspended before this finishes, resumePendingEmbeds() (called
+  // on the next worker startup) completes it. The doc is already searchable.
+  void embedChunksForDoc(docId)
+    .then(async embedded => { if (linkTarget && embedded.length) await addChunksToVectorStore(linkTarget, embedded); })
+    .catch(e => console.warn('[capture] background embed failed (doc still lexically searchable):', e));
 
   // Auto sync to Drive in the background
   handleSyncToDrive().catch(() => {});
@@ -1049,14 +1101,48 @@ async function capturePdfUrl(projectId: string | null, tab: chrome.tabs.Tab): Pr
   try {
     body = await pdfUrlToBody(url, imageToText, false, pdfImages);
   } catch (e) {
-    console.warn('Local PDF parse failed, falling back to Jina Reader', e);
+    console.warn('Local PDF parse failed, trying the tab, then Jina Reader', e);
   }
 
-  const textOnly = body.replace(/## Page \d+/g, '').replace(/\*\(no extractable text\)\*/g, '').trim();
+  let textOnly = body.replace(/## Page \d+/g, '').replace(/\*\(no extractable text\)\*/g, '').trim();
+
+  // The background fetch has no session: it is a bare request from the
+  // extension, so a host that gates downloads (ResearchGate, most publishers)
+  // answers with a verification page instead of the PDF.
+  //
+  // The TAB does have a session — the user opened the paper and the site
+  // already let them through. Ask the content script to fetch the same URL from
+  // inside that page, so it carries their cookies. This is the user's own
+  // access being used on their behalf, not a way around the check; if they
+  // cannot open the PDF themselves, this cannot either.
+  if (textOnly.length < 50 && tab.id) {
+    try {
+      const ex: any = await new Promise((resolve) => {
+        chrome.tabs.sendMessage(tab.id!, { action: 'EXTRACT_PDF', url }, (r) => {
+          resolve(chrome.runtime.lastError ? { ok: false, error: chrome.runtime.lastError.message } : r);
+        });
+      });
+      if (ex?.ok && ex.base64) {
+        pdfImages.length = 0;
+        body = await pdfBase64ToBody(ex.base64 as string, imageToText, false, pdfImages);
+        textOnly = body.replace(/## Page \d+/g, '').replace(/\*\(no extractable text\)\*/g, '').trim();
+      }
+    } catch (e) {
+      console.warn('[capture] in-tab PDF fetch failed', e);
+    }
+  }
+
   if (textOnly.length < 50) {
     const md = await fetchViaJina(url);
     if (!md || md.trim().length < 50) {
-      throw new Error('Could not extract text from this PDF (it may be scanned — try Import PDF instead).');
+      // Name the two real causes so the message is actionable. A verification
+      // wall and a scanned page look identical from here — both yield no text —
+      // but the user's next step differs completely.
+      throw new Error(
+        'Could not read this PDF. Either the site asked for verification before serving it — ' +
+        'open the PDF in a tab, let the check pass, then capture — or it is a scanned image, ' +
+        'in which case use Import PDF.'
+      );
     }
     body = md;
     pdfImages.length = 0; // Jina markdown has no extracted figures
@@ -1297,7 +1383,9 @@ async function handleReindexLibrary(): Promise<Record<string, unknown>> {
           const raw = chunkDocument({ docShortId: makeDocShortId(doc.id), content: doc.content });
           let embeddings: (number[] | undefined)[] = [];
     try {
-            const res: any = await sendToOffscreen({ action: 'OFFSCREEN_GET_EMBEDDINGS', texts: raw.map(c => c.text) });
+            // Bound it: a cold/stalled ONNX embedder hangs rather than rejecting,
+            // and the default 3-min timeout would freeze the reindex per doc.
+            const res: any = await sendToOffscreen({ action: 'OFFSCREEN_GET_EMBEDDINGS', texts: raw.map(c => c.text) }, 90_000);
             if (res?.ok && Array.isArray(res.embeddings)) embeddings = res.embeddings;
           } catch { /* vectorless chunks are valid — BM25 still works */ }
           const withVecs = raw.map((c, i) => ({ ...c, embedding: embeddings[i] }));
@@ -1406,6 +1494,16 @@ async function isChatWebFallbackEnabled(): Promise<boolean> {
   }
 }
 
+/** Web-data agent (/data) — OFF by default (powerful + network-heavy, opt-in). */
+async function isWebDataAgentEnabled(): Promise<boolean> {
+  try {
+    const s = await chrome.storage.local.get(['webDataAgentEnabled']);
+    return s.webDataAgentEnabled === true;
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Optional fast model for classification/intent calls (routing, question
  * rewriting, page-relevance). Falls back to the main chat model when unset.
@@ -1506,7 +1604,47 @@ const LANGUAGE_RULE =
   ` ALWAYS write your answer in the language of the user's latest message — or the language they explicitly ask for — ` +
   `even when the sources, page, or these instructions are in another language. Never claim you cannot chat in a language you can write.`;
 
-async function buildChatRequest(chatId: string, projectId: string, prompt: string, signal: AbortSignal, pageContext?: PageContext | null, onStatus?: (s: string) => void): Promise<{ systemPrompt: string; formattedHistory: Array<{ role: string; content: string }>; grounded: boolean; place?: string; branch: ChatBranch }> {
+// Declared at MODULE scope, not inside buildChatRequest. It used to be a local
+// const declared at the top of the citation branch — which sits AFTER the
+// general-knowledge, web-search and Wikipedia branches have already returned.
+// Those three shipped with no formatting guidance at all ("Answer concisely in
+// natural language"), so everyday non-workspace answers came back as walls of
+// prose while workspace answers were properly structured. Same rules for every
+// substantive branch now.
+// Answers render in a ~400px side panel; a 500-word tutorial for a
+// definition question is scroll punishment. Calibrate length to the ask.
+// LANGUAGE_RULE lives at the END of RESPONSE_STYLE, as the ninth bullet of a
+// long style block. Small, fast models (observed: gemini-2.5-flash-lite) drop
+// trailing instructions — a Finnish question about a Finnish page came back in
+// English. The codebase already hit this failure class once, with the
+// disclosure line that "was routinely skipped by small models".
+//
+// So the language instruction ALSO leads the prompt, in one short line before
+// anything else. Sandwiching a rule around the payload is the same trick
+// DATA_TRAILER uses, and for the same reason: first and last are the positions
+// a model actually honours.
+const LANGUAGE_DIRECTIVE =
+  `LANGUAGE: reply in the SAME language as the user's latest message. This overrides the language of the page, the sources, and these instructions. Never apologise for or comment on the language.\n\n`;
+
+const RESPONSE_STYLE =
+  `\nRESPONSE STYLE — write for a busy reader in a narrow side panel. Prioritise SCANNABILITY:\n` +
+  `• Lead with the answer. NO preamble, no "Certainly!/Great question!", no sycophancy, no closing summary or "if you want, I can…" offers.\n` +
+  `• Use REAL Markdown, always: '## ' for section headings (not bold-as-heading, not plain lines), '- ' for bullet lists, '1. ' for ordered steps, '**bold**' for the key term at the start of a bullet, and Markdown tables for comparisons. Put a blank line between every heading, paragraph and list.\n` +
+  `• Keep paragraphs to 1-3 short sentences. Break anything longer into bullets. Never write a wall of text.\n` +
+  `• Plain, concrete language — "it's 19°C, feels like 13°", not "the temperature is considered cold". Define a term in a half-sentence the first time; don't assume nor over-explain.\n` +
+  `• Match length to the ask: a definition = 2-4 sentences; a list question = a tight bulleted list; a comparison = a table. Answer only what was asked.\n` +
+  `• FAIL FAST: if the sources/page don't contain what's needed, say so in ONE line — never guess persuasively.\n` +
+  `• When fixing an error, name the ROOT CAUSE before the fix.\n` +
+  `• Do NOT end with a "Sources:" line or a list of URLs — the app shows sources separately.\n` +
+  `•${LANGUAGE_RULE}`;
+
+/**
+ * Where an answer may come from, when the user says rather than the router
+ * guesses. 'auto' is the existing routing, unchanged.
+ */
+export type SourceMode = 'auto' | 'sources' | 'web' | 'general';
+
+async function buildChatRequest(chatId: string, projectId: string, prompt: string, signal: AbortSignal, pageContext?: PageContext | null, onStatus?: (s: string) => void, sourceMode: SourceMode = 'auto'): Promise<{ systemPrompt: string; formattedHistory: Array<{ role: string; content: string }>; grounded: boolean; place?: string; branch: ChatBranch }> {
   // BATCH: workspace docs, project rules, locale, history, web-fallback — five
   // separate async sources that previously ran as five sequential awaits. Run
   // them concurrently where possible. History must land first (formattedHistory
@@ -1546,17 +1684,107 @@ async function buildChatRequest(chatId: string, projectId: string, prompt: strin
       `${tz ? ` Timezone: ${tz}.` : ''}\n--- END USER CONTEXT ---\n\n`
     : '';
 
-  // Build formatted history from the already-fetched history (batched above).
-  const formattedHistory = history
+  // The FULL stripped history. Kept whole because the retrieval path below can
+  // recall an older exchange from it once the query has been resolved; the
+  // early-return branches (chitchat, meta, web) only ever need the tail.
+  const fullHistory = history
     .filter((msg: any) => msg.role === 'user' || msg.role === 'assistant')
     // Strip the deterministic "*Sources:*" footer from saved assistant turns.
     // Fed back verbatim, the model learns the pattern and appends its own copy
     // — which then doubles with the footer the stream layer adds (observed:
     // two identical "Sources:" lines on one answer).
-    .map((msg: any) => ({ role: msg.role, content: stripSourcesFooter(msg.text) }))
-    // Sliding window: keep only the most recent turns so long chats don't
-    // balloon prompt size → slow TTFT.
-    .slice(-MAX_HISTORY_TURNS);
+    .map((msg: any) => ({ role: msg.role, content: stripSourcesFooter(msg.text) }));
+  // Sliding window: keep only the most recent turns so long chats don't
+  // balloon prompt size → slow TTFT.
+  let formattedHistory = fullHistory.slice(-MAX_HISTORY_TURNS);
+
+  // ── /data — the web-data agent ────────────────────────────────────────────
+  // Discover the API endpoints the current page uses, fetch them (credential-free)
+  // in a loop, and analyze. Short-circuits the normal RAG/page enrich.
+  const dataMatch = /^\/data\s+([\s\S]+)/i.exec(prompt.trim());
+  if (dataMatch) {
+    const q = dataMatch[1].trim();
+    if (!(await isWebDataAgentEnabled())) {
+      return {
+        systemPrompt: 'The user tried to use the /data web-data agent, which is currently disabled. Reply with EXACTLY this and nothing else: "The Web-data agent is off. Turn it on in Settings → Research to let `/data` discover and fetch public API data."',
+        formattedHistory: [],
+        grounded: false,
+        branch: 'general' as ChatBranch,
+        place: undefined,
+      };
+    }
+    try {
+    let observed: string[] = [];
+    let discovered: string[] = [];
+    let host = '';
+    try {
+      const tabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+      if (tabs[0]?.id) {
+        const [obs, disc] = await Promise.all([
+          getObservedApiCalls(tabs[0].id),
+          discoverPageEndpoints(tabs[0].id),
+        ]);
+        observed = obs;
+        discovered = disc.candidates;
+        host = disc.host;
+      }
+    } catch { /* no tab / restricted page */ }
+    const gathered = await agenticDataGather(q, observed, discovered, host, signal, onStatus).catch((e) => {
+      console.warn('[DATA] gather failed:', e); return { blocks: [], sources: [] as Array<{ title: string; url: string }> };
+    });
+    let blocks = gathered.blocks;
+    let sources = gathered.sources;
+
+    // Web-search FLOOR. The agent loop only fetches if the model emits tool
+    // calls, and some providers/models (notably Copilot-routed ones) don't
+    // support function calling — so the loop can end up fetching nothing through
+    // no fault of the site. Rather than dead-end on "reload the page", do a
+    // direct keyless web search so /data still returns real, cited data.
+    if (blocks.length === 0) {
+      onStatus?.('Searching the web…');
+      const web = await gatherWebSnippets(q, { signal }).catch(() => null);
+      if (web?.context) {
+        blocks = [`\n\n--- WEB RESULTS ---\n${web.context}\n--- END WEB RESULTS ---`];
+        sources = web.sources || [];
+      }
+    }
+
+    const dataSys =
+      `You are a data analyst. You were given data gathered from public APIs and/or web search (below). ` +
+      `Answer the user's request using ONLY that data — build the table/ranking/summary they asked for, and ` +
+      `include the LINK for each listing/item so the user can open it. Cite the sources/endpoints you used, and ` +
+      `state plainly if the data is incomplete or a call failed. Do not invent rows, prices, or links.\n\n` +
+      (blocks.length
+        ? `GATHERED DATA:\n${blocks.join('\n')}`
+        : `NO DATA WAS FETCHED THIS TURN. Report ONLY that, honestly. HARD RULES:\n` +
+          `- Do NOT claim whether the site has or lacks an API — you did NOT verify that.\n` +
+          `- Do NOT invent prices, listings, or any data.\n` +
+          `State that neither the site's API nor a web search returned usable data this turn, and suggest the ` +
+          `user reload the page and retry, or try a more specific query. Offer that one next step and nothing more.`);
+    return {
+      systemPrompt: LANGUAGE_DIRECTIVE + rulesBlock + localeBlock + dataSys +
+        `\n\nWRITE THE ENTIRE ANSWER IN THE SAME LANGUAGE AS THE USER'S REQUEST above (the /data question). ` +
+        `The gathered sources may be in other languages — translate as needed, but the answer's language must match the request, not the data.`,
+      formattedHistory,
+      grounded: false,
+      branch: (sources.length ? 'web' : 'general') as ChatBranch,
+      place: undefined,
+    };
+    } catch (dataErr) {
+      // Never let /data hard-fail the whole request ("Failed to construct URL"
+      // etc.). Degrade to an honest notice in the user's language.
+      console.warn('[DATA] branch failed:', dataErr);
+      return {
+        systemPrompt: LANGUAGE_DIRECTIVE + rulesBlock + localeBlock +
+          `The /data data-gathering step hit an internal error this turn. Tell the user plainly and briefly ` +
+          `that gathering failed and to try again or rephrase — in the SAME language as their request. Do NOT invent any data.`,
+        formattedHistory,
+        grounded: false,
+        branch: 'general' as ChatBranch,
+        place: undefined,
+      };
+    }
+  }
 
   // Greetings / small talk must NOT run retrieval: it returns weak top-k
   // chunks that trip the strict "I cannot answer from the sources" refusal
@@ -1567,6 +1795,18 @@ async function buildChatRequest(chatId: string, projectId: string, prompt: strin
   //
   // Only use the onboarding-style invite at conversation START. Mid-conversation
   // "ok"/"thanks"/"hi" gets a brief conversational reply instead.
+  // Explicit override: answer from the model's own knowledge only. Placed ahead
+  // of every other branch so it genuinely overrides rather than competing.
+  if (sourceMode === 'general') {
+    onStatus?.('Writing the answer…');
+    const systemPrompt = rulesBlock + localeBlock +
+      `You are a helpful assistant. The user has asked you to answer from your OWN general knowledge — ` +
+      `do NOT search the web and do NOT use their saved sources, even if some would be relevant. ` +
+      `Say plainly when something is outside what you know rather than guessing.` +
+      RESPONSE_STYLE;
+    return { systemPrompt: LANGUAGE_DIRECTIVE + systemPrompt, formattedHistory, grounded: false, place, branch: 'general' };
+  }
+
   if (isChitchat(prompt)) {
     onStatus?.('Writing the answer…');
     const isFresh = formattedHistory.length < 2;
@@ -1578,7 +1818,7 @@ async function buildChatRequest(chatId: string, projectId: string, prompt: strin
         : `You are Magpie, a research assistant. The user sent small talk — keep your reply to ONE short, friendly sentence. ` +
           `Do not invite them to do anything, do not mention sources, and do not ask follow-up questions. Never add a "Sources:" line.`) +
       LANGUAGE_RULE;
-    return { systemPrompt, formattedHistory, grounded: false, branch: 'chitchat' };
+    return { systemPrompt: LANGUAGE_DIRECTIVE + systemPrompt, formattedHistory, grounded: false, branch: 'chitchat' };
   }
 
   // Questions about the ASSISTANT itself ("do you support kurdish?", "what can
@@ -1594,7 +1834,7 @@ async function buildChatRequest(chatId: string, projectId: string, prompt: strin
       `(including Kurdish — Sorani and Kurmanji), you answer questions from their captured sources and the page they attach with 📄, ` +
       `you can search the web, and you run deep research via /research <topic>.` +
       LANGUAGE_RULE;
-    return { systemPrompt, formattedHistory, grounded: false, branch: 'meta' };
+    return { systemPrompt: LANGUAGE_DIRECTIVE + systemPrompt, formattedHistory, grounded: false, branch: 'meta' };
   }
 
   // Weather, time, math, trivia, facts — questions that need live data or
@@ -1615,9 +1855,9 @@ async function buildChatRequest(chatId: string, projectId: string, prompt: strin
         if (web?.context) {
           const systemPrompt = rulesBlock +
             `You are a helpful assistant. The excerpts below were pulled from a live web search just now — treat them as your facts. ` +
-            `Answer concisely in natural language. Do not fabricate citations.` + LANGUAGE_RULE +
+            `Do not fabricate citations.` + RESPONSE_STYLE +
             `\n--- WEB RESULTS ---\n${web.context}\n--- END WEB RESULTS ---`;
-          return { systemPrompt, formattedHistory, grounded: false, place, branch: 'web' };
+          return { systemPrompt: LANGUAGE_DIRECTIVE + systemPrompt, formattedHistory, grounded: false, place, branch: 'web' };
         }
       } catch (e) {
         if (signal.aborted) throw e;
@@ -1639,9 +1879,9 @@ async function buildChatRequest(chatId: string, projectId: string, prompt: strin
           `You are a helpful assistant. The following information was retrieved from Wikipedia — treat it as factual. ` +
           `If Wikipedia covers the general concept but the user asked about current conditions (weather, time, news), ` +
       `still provide the best answer using your general knowledge — do not refuse. ` +
-          `you may supplement from your own knowledge. Answer concisely.` + LANGUAGE_RULE +
+          `you may supplement from your own knowledge.` + RESPONSE_STYLE +
           `\n--- WIKIPEDIA ---\n${wikiContext}\n--- END WIKIPEDIA ---`;
-        return { systemPrompt, formattedHistory, grounded: false, place, branch: 'web' };
+        return { systemPrompt: LANGUAGE_DIRECTIVE + systemPrompt, formattedHistory, grounded: false, place, branch: 'web' };
       }
     } catch (e) {
       if (signal.aborted) throw e;
@@ -1651,14 +1891,34 @@ async function buildChatRequest(chatId: string, projectId: string, prompt: strin
       `You are a helpful AI assistant. Answer using your general knowledge. ` +
       `If asked about current weather, time, date, or news, provide the best answer you can from what you know. ` +
       `Never say you don't have access to current data or real-time information — just answer based on your training. ` +
-      `Be concise — the user wants a quick fact, not an essay.` + LANGUAGE_RULE;
-    return { systemPrompt, formattedHistory, grounded: false, place, branch };
+      `Be concise — the user wants a quick fact, not an essay.` + RESPONSE_STYLE;
+    return { systemPrompt: LANGUAGE_DIRECTIVE + systemPrompt, formattedHistory, grounded: false, place, branch };
   }
 
   // Follow-up questions get rewritten into standalone ones so retrieval,
   // page-section selection, and link scoring all see real signal.
   if (needsIntentResolution(prompt, formattedHistory.length)) onStatus?.('Understanding the question…');
   const effectiveQuery = await resolveQuestionIntent(prompt, formattedHistory, pageContext?.title, signal);
+
+  // MEMORY: a hard tail-slice made turn 1 vanish at turn 17 with no indication,
+  // so a question reaching back got a confident answer from a model that had
+  // never heard the earlier turn. Now the tail stays verbatim and the older
+  // exchanges the RESOLVED query actually touches are recalled alongside it,
+  // plus a mechanically-built ledger of earlier topics. All hard-capped, so the
+  // prompt has a fixed ceiling however long the chat runs — and none of it costs
+  // an LLM call. Applied HERE, not above, because it needs `effectiveQuery`:
+  // "what about the second one?" shares no tokens with anything, its resolved
+  // form does.
+  //
+  // With nothing older above the relevance floor this returns the same tail as
+  // before, so short conversations are untouched.
+  let historyLedger = '';
+  if (fullHistory.length > formattedHistory.length) {
+    const mem = selectHistory(fullHistory, effectiveQuery);
+    formattedHistory = mem.turns;
+    historyLedger = mem.ledger ? `\n--- CONVERSATION SO FAR ---\n${mem.ledger}\n--- END ---\n\n` : '';
+    if (mem.recalled > 0) console.log(`[MEMORY] recalled ${mem.recalled} older exchange(s), ${mem.elided} messages elided`);
+  }
 
   // Intent router: an attached page only wins when the question is actually
   // about it. "is it cold today?" with a docs page open must NOT be forced
@@ -1727,19 +1987,7 @@ async function buildChatRequest(chatId: string, projectId: string, prompt: strin
 
   let systemPrompt: string;
 
-  // Answers render in a ~400px side panel; a 500-word tutorial for a
-  // definition question is scroll punishment. Calibrate length to the ask.
-  const RESPONSE_STYLE =
-    `\nRESPONSE STYLE — write for a busy reader in a narrow side panel. Prioritise SCANNABILITY:\n` +
-    `• Lead with the answer. NO preamble, no "Certainly!/Great question!", no sycophancy, no closing summary or "if you want, I can…" offers.\n` +
-    `• Use REAL Markdown, always: '## ' for section headings (not bold-as-heading, not plain lines), '- ' for bullet lists, '1. ' for ordered steps, '**bold**' for the key term at the start of a bullet, and Markdown tables for comparisons. Put a blank line between every heading, paragraph and list.\n` +
-    `• Keep paragraphs to 1-3 short sentences. Break anything longer into bullets. Never write a wall of text.\n` +
-    `• Plain, concrete language — "it's 19°C, feels like 13°", not "the temperature is considered cold". Define a term in a half-sentence the first time; don't assume nor over-explain.\n` +
-    `• Match length to the ask: a definition = 2-4 sentences; a list question = a tight bulleted list; a comparison = a table. Answer only what was asked.\n` +
-    `• FAIL FAST: if the sources/page don't contain what's needed, say so in ONE line — never guess persuasively.\n` +
-    `• When fixing an error, name the ROOT CAUSE before the fix.\n` +
-    `• Do NOT end with a "Sources:" line or a list of URLs — the app shows sources separately.\n` +
-    `•${LANGUAGE_RULE}`;
+
 
   // Web-search fallback sources (below) surface as clickable footer links.
   let webSources: Array<{ title: string; url: string }> = [];
@@ -1762,9 +2010,17 @@ async function buildChatRequest(chatId: string, projectId: string, prompt: strin
   // Location/live questions ("weather today") must not ground on the workspace —
   // a stray chunk that clears the confidence bar sends them to the citation
   // refusal ("cannot answer from sources") instead of a localized web answer.
-  const groundOnWorkspace = !usePage &&
-    !isLocationDependent(effectiveQuery) &&
-    isConfidentMatch(relevantChunks as Array<{ rerankScore?: number }>);
+  //
+  // sourceMode is the user overruling the router. 'sources' grounds on the
+  // workspace whenever anything was retrieved at all, skipping the confidence
+  // gate — they asked for their own material, so a weak match beats silently
+  // answering from somewhere else. 'web' refuses to ground, so the web branch
+  // below takes the turn.
+  const groundOnWorkspace = sourceMode === 'web' ? false
+    : sourceMode === 'sources' ? relevantChunks.length > 0
+    : (!usePage &&
+       !isLocationDependent(effectiveQuery) &&
+       isConfidentMatch(relevantChunks as Array<{ rerankScore?: number }>));
   if (groundOnWorkspace) {
     grounded = true;
     // Build citation-anchored context (generous — favor fuller grounding over
@@ -1790,9 +2046,14 @@ async function buildChatRequest(chatId: string, projectId: string, prompt: strin
     // refusal→web net doesn't fire on these either.
     onStatus?.('Reading the page…');
     systemPrompt =
-      `You are a helpful research assistant. Answer using the CURRENT PAGE the user is viewing (provided below); ` +
-      `use your general knowledge only to fill small, obvious gaps. Do NOT invent citations. ` +
-      `If the page doesn't cover the question, say so in one line rather than guessing or padding with unrelated facts. ` +
+      `You are a helpful research assistant. Answer using the CURRENT PAGE the user is viewing (provided below). ` +
+      `The page is your source of FACTS about this specific item. Do NOT invent citations. ` +
+      // A listing page contains specs and a price; it cannot contain "is this
+      // any good?". Told only to answer from the page, the model correctly but
+      // uselessly reported that the page lacks a quality assessment — instead
+      // of reading the specs and saying what it knows about that model.
+      `When the user asks for an ASSESSMENT, comparison or recommendation — "is this any good?", "is it reliable?", "how does it compare?" — the page cannot contain the answer by its nature. Do NOT refuse. Read the page's facts (model, year, mileage, price, specs), then combine them with your own knowledge of that product, market or subject to give a real opinion. Make clear which parts come from the page and which from your general knowledge, and say plainly when something is outside what you know. ` +
+      `Only say "the page doesn't cover this" when the user asked for a FACT the page genuinely lacks. ` +
       `Do NOT end your reply with a "Sources:" line or list of URLs — sources are shown separately by the app.` +
       RESPONSE_STYLE;
   } else if (!pageContext && mentionsPageDeixis(effectiveQuery)) {
@@ -1805,7 +2066,7 @@ async function buildChatRequest(chatId: string, projectId: string, prompt: strin
       `Do NOT guess what the page might be, and do NOT answer from unrelated knowledge.` +
       RESPONSE_STYLE;
     onStatus?.('Writing the answer…');
-    return { systemPrompt: rulesBlock + localeBlock + systemPrompt, formattedHistory, grounded: false, place, branch: 'no-page' };
+    return { systemPrompt: LANGUAGE_DIRECTIVE + rulesBlock + localeBlock + systemPrompt, formattedHistory, grounded: false, place, branch: 'no-page' };
   } else {
     // No workspace match and no open page. Before conceding to stale "general
     // knowledge", escalate to a quick live web search (+ any enabled search
@@ -1921,7 +2182,7 @@ async function buildChatRequest(chatId: string, projectId: string, prompt: strin
     // getRepoTree only hits their public read APIs, which bounds the exposure.
     const { enterpriseGitHubUrl } = await chrome.storage.local.get(['enterpriseGitHubUrl']).catch(() => ({})) as Record<string, any>;
     const enterpriseHost = (enterpriseGitHubUrl && typeof enterpriseGitHubUrl === 'string')
-      ? new URL(enterpriseGitHubUrl).hostname : undefined;
+      ? (() => { try { return new URL(enterpriseGitHubUrl).hostname; } catch { return undefined; } })() : undefined;
     let repoRef = parseRepoUrl(pageContext.url, enterpriseHost);
     if (!repoRef && isImplementationQuestion(effectiveQuery)) {
       const linked = findRepoUrlInText(pageContext.markdown, enterpriseHost);
@@ -2025,7 +2286,7 @@ chatWebFallback
 
   onStatus?.('Writing the answer…');
   const branch: ChatBranch = grounded ? 'citation' : usePage ? 'page' : webSources.length ? 'web' : 'general';
-  return { systemPrompt: rulesBlock + localeBlock + systemPrompt, formattedHistory, grounded, place, branch };
+  return { systemPrompt: LANGUAGE_DIRECTIVE + rulesBlock + localeBlock + historyLedger + systemPrompt, formattedHistory, grounded, place, branch };
 }
 
 // ─────────────────────────────────────────────
@@ -2352,6 +2613,9 @@ const sys = isDebugPage
     (pageMarkdown
       ? `\nYou can read the page content in detail using read_section (by heading), search_page (grep), or read_lines (by line number). Start by searching for errors or reading the relevant section.\n`
       : '') +
+    (catalogLinks.length
+      ? `\nIf the question asks whether something is GOOD / reliable / worth it / recommended and the page itself only has specs or a listing (no verdict), do NOT stop at "the page doesn't say" — READ a linked reviews or ratings page with read_link (e.g. a "read N reviews", "arvostelua", "ratings" link) and answer from it. Follow the most relevant link before concluding you can't answer.\n`
+      : '') +
     (catalogFiles.length ? `\nRepository files you may read:\n${catalogFiles.join('\n')}\n` : '') +
     (catalogLinks.length ? `\nPage links you may read:\n${catalogLinks.map(l => `${l.anchorText || l.url} — ${l.url}`).join('\n')}\n` : '');
   const messages: any[] = [{ role: 'system', content: sys }, { role: 'user', content: question }];
@@ -2493,6 +2757,214 @@ const sys = isDebugPage
     if (used >= TOTAL_CTX_BUDGET) break;
   }
   console.log(`[CTX/agentic] gathered ${blocks.length} block(s), ${sources.length} source(s)`);
+  return { blocks, sources };
+}
+
+// ─────────────────────────────────────────────
+// Web-data agent (/data) — discover endpoints, fetch loop, analyze
+// ─────────────────────────────────────────────
+
+/** Read the MAIN-world network observer's buffer for a tab, filtered + redacted. */
+async function getObservedApiCalls(tabId: number): Promise<string[]> {
+  try {
+    const results = await chrome.scripting.executeScript({
+      target: { tabId }, world: 'MAIN',
+      func: () => (window as any).__magpieNet || [],
+    });
+    const raw = (results?.[0]?.result || []) as Array<{ method: string; url: string }>;
+    const out: string[] = [];
+    const seen = new Set<string>();
+    for (const e of raw) {
+      if (!e?.url || !isAllowedFetchUrl(e.url)) continue; // drops assets/trackers/non-http
+      const line = `${e.method || 'GET'} ${redactObservedUrl(e.url)}`;
+      if (seen.has(line)) continue;
+      seen.add(line);
+      out.push(line);
+      if (out.length >= 50) break;
+    }
+    return out;
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Discover candidate API endpoints from the page SOURCE at call time — no reload
+ * or runtime XHR needed. Scans inline scripts / HTML for api-ish URLs
+ * (`/api/`, `/graphql`, `.json`, `/vN/`), embedded state blobs (__NEXT_DATA__ etc),
+ * and api-ish `<link>`/`<script src>`. Runs in the page (ISOLATED) via
+ * executeScript and returns absolute, deduped candidates.
+ */
+async function discoverPageEndpoints(tabId: number): Promise<{ host: string; url: string; candidates: string[] }> {
+  try {
+    const results = await chrome.scripting.executeScript({
+      target: { tabId },
+      func: () => {
+        const found = new Set<string>();
+        const push = (u: string) => { try { const a = new URL(u, location.href).href; if (/^https?:/.test(a)) found.add(a); } catch { /* */ } };
+        const html = document.documentElement.outerHTML;
+        const apiish = '(?:/api/|/rest/|/graphql|/gql|/v\\d+/|/ajax/|\\.json)';
+        let m: RegExpExecArray | null; let n = 0;
+        const reRel = new RegExp('["\'`](/[^"\'`\\s]*?' + apiish + '[^"\'`\\s]*)["\'`]', 'gi');
+        while ((m = reRel.exec(html)) !== null && n < 300) { push(m[1]); n++; }
+        const reAbs = new RegExp('https?://[^"\'`\\s)]+' + apiish + '[^"\'`\\s)]*', 'gi');
+        n = 0; while ((m = reAbs.exec(html)) !== null && n < 300) { push(m[0]); n++; }
+        document.querySelectorAll('link[href],script[src],a[href]').forEach(el => {
+          const h = (el.getAttribute('href') || el.getAttribute('src') || '');
+          if (h && new RegExp(apiish, 'i').test(h)) push(h);
+        });
+        return { host: location.host, url: location.href, candidates: Array.from(found).slice(0, 60) };
+      },
+    });
+    const r = (results?.[0]?.result || { host: '', url: '', candidates: [] }) as { host: string; url: string; candidates: string[] };
+    const candidates = (r.candidates || []).filter(isAllowedFetchUrl).map(redactObservedUrl).slice(0, 40);
+    return { host: r.host || '', url: r.url || '', candidates };
+  } catch {
+    return { host: '', url: '', candidates: [] };
+  }
+}
+
+const DATA_MAX_ROUNDS = 6;
+const DATA_MAX_FETCHES = 30;
+const DATA_PER_CALL_CHARS = 8_000;
+const DATA_HOST_MIN_GAP_MS = 400;
+
+/**
+ * The web-data agent loop: mirror of `agenticGather` with two tools —
+ * `list_page_api_calls` (the site's real endpoints, from the network observer)
+ * and `http_get` (credential-free fetch of a public API/URL), plus `search_web`
+ * for finding public API docs. The model paginates + fans out, we accumulate the
+ * fetched JSON as context blocks; the caller's system prompt asks it to analyze.
+ * Guardrails: URL policy, a global fetch cap, and a per-host rate limit.
+ */
+async function agenticDataGather(
+  question: string, observed: string[], discovered: string[], host: string, signal: AbortSignal, onStatus?: (s: string) => void,
+): Promise<{ blocks: string[]; sources: Array<{ title: string; url: string }> }> {
+  // `/data` is an explicit data-gathering command, so web search is ALWAYS on
+  // here — it must not be coupled to the separate chat web-fallback toggle (that
+  // coupling is why a Reddit query returned nothing when only the web-data agent
+  // was enabled). gatherWebSnippets is keyless, so this needs no API key.
+  const tools: ToolDef[] = [
+    { type: 'function', function: { name: 'list_page_api_calls', description: 'List candidate API endpoints for the CURRENT page: (1) the requests it actually made at runtime, and (2) api-ish URLs found in its page source. These are the site\'s real API, not guesses. Token-like values are redacted. Use them as the basis for http_get.', parameters: { type: 'object', properties: {} } } },
+    { type: 'function', function: { name: 'http_get', description: 'GET a public API/JSON endpoint and return its JSON/text body. CREDENTIAL-FREE — public data only, no logins. Use it to fetch an endpoint, then paginate (next page) and fan out. Do not fetch the same URL twice.', parameters: { type: 'object', properties: { url: { type: 'string', description: 'Absolute https:// URL' } }, required: ['url'] } } },
+    { type: 'function', function: { name: 'fetch_page', description: 'Fetch a full web PAGE (not an API) and read its cleaned text. Use this on a site\'s SEARCH RESULTS page — construct the search URL (host + a search path with the query + a price sort, e.g. sort=price_asc) or find it via search_web — to read the listings directly when there is no JSON API. Credential-free.', parameters: { type: 'object', properties: { url: { type: 'string', description: 'Absolute https:// URL of a page to read' } }, required: ['url'] } } },
+    { type: 'function', function: { name: 'search_web', description: 'Live web search — use to find a public API\'s docs/endpoints (e.g. Reddit .json, GitHub API) or to answer directly when no site API fits.', parameters: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'] } } },
+  ];
+
+  const sys =
+    `You are a web-data agent. Gather the data that answers the user's request, then stop. Work from the user's INTENT, not from whatever tab happens to be open.\n\n` +
+    `FIRST decide where the answer actually lives:\n` +
+    `- The current tab is "${host || '(none)'}". Only use its endpoints (list_page_api_calls → http_get) if that site is genuinely the right source for THIS question. If the open tab is unrelated (e.g. it is Google Drive, Gmail, a docs app, or any site that does not hold the answer), IGNORE it completely — do not fetch its endpoints.\n` +
+    `- For a "find / compare / cheapest / best deals / opinions on X" request, the answer lives on OTHER sites you must discover:\n` +
+    `  1. Use search_web to identify the right sites for the intent — e.g. used vehicles for sale in Finland → nettimoto.com, tori.fi, nettimarkkina; product prices → the relevant shops; opinions → reddit (append /search.json?q=…).\n` +
+    `  2. For each promising site, EITHER http_get its JSON search endpoint if one exists, OR fetch_page its SEARCH RESULTS url — construct it as host + a search path + the query + a sort (e.g. sort=price_asc) — and read the listings.\n` +
+    `  3. Collect the actual items WITH their individual links, so the answer can list each result and link to it.\n` +
+    `- Endpoints follow patterns: once you find one like \`https://site/api/search?...\`, vary its query (model, condition=used, sort=price_asc, page=2) and paginate to accumulate enough rows.\n\n` +
+    `RULES:\n` +
+    `- All fetches are CREDENTIAL-FREE (public data only). Budget: at most ${DATA_MAX_FETCHES} fetches. Never repeat a URL.\n` +
+    `- If http_get returns HTTP 403 / a block page (common for Reddit and other sites that reject direct API calls), DO NOT retry it — that site blocks credential-free API access. Instead use fetch_page on the relevant human-readable page URL (e.g. a reddit thread or a \`site:reddit.com …\` result you found via search_web): fetch_page routes through a reader service that retrieves pages these APIs block.\n` +
+    `- Try several real sources before giving up (search_web + at least two candidate sites/endpoints). NEVER claim a site "has no API" — you cannot verify that.\n` +
+    `- Never invent listings, prices, or links. Only report what you actually fetched.\n` +
+    `- When you have enough, stop calling tools; the final answer is written separately from the data you gathered.`;
+  const messages: any[] = [{ role: 'system', content: sys }, { role: 'user', content: question }];
+
+  const blocks: string[] = [];
+  const sources: Array<{ title: string; url: string }> = [];
+  let used = 0;
+  let fetchCount = 0;
+  const hostLast = new Map<string, number>();
+  const fetchedUrls = new Set<string>();
+  const sleep = (ms: number) => new Promise<void>(r => setTimeout(r, ms));
+
+  for (let round = 0; round < DATA_MAX_ROUNDS; round++) {
+    const resp = await chatWithTools(messages, tools, signal);
+    if (resp.toolCalls.length === 0) break;
+    messages.push(resp.assistantMessage);
+
+    const pending = resp.toolCalls.map(async (call) => {
+      let result = 'error'; let block: string | null = null; let src: { title: string; url: string } | null = null; let charCount = 0;
+      try {
+        if (call.name === 'list_page_api_calls') {
+          const parts: string[] = [];
+          if (observed.length) parts.push(`OBSERVED (requests the page made at runtime):\n${observed.join('\n')}`);
+          if (discovered.length) parts.push(`FROM PAGE SOURCE (api-ish URLs found in the page):\n${discovered.join('\n')}`);
+          if (!parts.length) {
+            result = 'no endpoints observed or found in the page source — try a same-origin /api/ guess or search_web';
+          } else {
+            block = `\n\n--- CANDIDATE API ENDPOINTS (${host}) ---\n${parts.join('\n\n')}\n--- END ---\n`;
+            charCount = block.length;
+            result = `${observed.length} observed + ${discovered.length} from source`;
+          }
+        } else if (call.name === 'http_get') {
+          const url = String(call.args?.url || '').trim();
+          if (fetchCount >= DATA_MAX_FETCHES) result = 'fetch budget exhausted';
+          else if (fetchedUrls.has(url)) result = 'already fetched that URL';
+          else if (!isAllowedFetchUrl(url)) result = 'URL blocked by policy (https, or http to loopback only; no assets/trackers)';
+          else {
+            let host = ''; try { host = new URL(url).host; } catch { /* */ }
+            const wait = Math.max(0, DATA_HOST_MIN_GAP_MS - (Date.now() - (hostLast.get(host) || 0)));
+            if (wait) await sleep(wait);
+            hostLast.set(host, Date.now());
+            fetchCount++; fetchedUrls.add(url);
+            const r = await fetchJson(url, { signal, maxChars: DATA_PER_CALL_CHARS });
+            const body = r.json !== undefined ? JSON.stringify(r.json).slice(0, DATA_PER_CALL_CHARS) : (r.text || '');
+            // A 403/429 returns the block-page HTML as the body — do NOT store
+            // that as if it were data (the model then "analyzes" a CAPTCHA page).
+            // Report the block and steer to fetch_page, which uses a reader that
+            // isn't blocked.
+            if (!r.ok && (r.status === 403 || r.status === 429)) {
+              result = `blocked (HTTP ${r.status}) — ${host} rejects direct API calls; use fetch_page on the page URL instead`;
+            } else if (r.ok && body) {
+              block = `\n\n--- GET ${url} (HTTP ${r.status}) ---\n${body}\n--- END ---\n`;
+              charCount = block.length; src = { title: url, url };
+              result = `fetched ${url} (${r.status})`;
+            } else result = `fetch failed: HTTP ${r.status}${r.error ? ' — ' + r.error : ''}`;
+          }
+        } else if (call.name === 'fetch_page') {
+          const url = String(call.args?.url || '').trim();
+          if (fetchCount >= DATA_MAX_FETCHES) result = 'fetch budget exhausted';
+          else if (fetchedUrls.has(url)) result = 'already fetched that URL';
+          else if (!isAllowedFetchUrl(url)) result = 'URL blocked by policy (https, or http to loopback only; no assets/trackers)';
+          else {
+            let h = ''; try { h = new URL(url).host; } catch { /* */ }
+            const wait = Math.max(0, DATA_HOST_MIN_GAP_MS - (Date.now() - (hostLast.get(h) || 0)));
+            if (wait) await sleep(wait);
+            hostLast.set(h, Date.now());
+            fetchCount++; fetchedUrls.add(url);
+            const page = await scrapeUrl(url, signal).catch(() => null);
+            const md = (page?.markdown || '').slice(0, DATA_PER_CALL_CHARS * 2);
+            if (md) {
+              block = `\n\n--- PAGE ${url} ---\n${md}\n--- END ---\n`;
+              charCount = block.length; src = { title: page?.title || url, url };
+              result = `read page ${url}`;
+            } else result = 'page unreadable or empty';
+          }
+        } else if (call.name === 'search_web') {
+          const web = await gatherWebSnippets(String(call.args?.query || question), { signal });
+          if (web.context && used + web.context.length <= TOTAL_CTX_BUDGET) {
+            block = `\n\n--- WEB RESULTS ---\n${web.context}\n--- END WEB RESULTS ---`;
+            charCount = web.context.length; src = web.sources?.[0] || null; result = 'web results added';
+          } else result = 'no useful web results';
+        } else result = 'unknown tool';
+      } catch (e) {
+        if (signal.aborted) throw e;
+        result = 'error fetching';
+      }
+      return { call, result, block, src, charCount };
+    });
+
+    const settled = await Promise.all(pending);
+    for (const { call, result, block, src, charCount } of settled) {
+      if (block && used + charCount <= TOTAL_CTX_BUDGET) {
+        blocks.push(block); used += charCount;
+        if (src) sources.push(src);
+      }
+      onStatus?.(result.length > 60 ? result.slice(0, 60) + '…' : result);
+      messages.push({ role: 'tool', tool_call_id: call.id, content: result });
+    }
+    if (used >= TOTAL_CTX_BUDGET || fetchCount >= DATA_MAX_FETCHES) break;
+  }
+  console.log(`[DATA] gathered ${blocks.length} block(s), ${fetchCount} fetch(es)`);
   return { blocks, sources };
 }
 
@@ -2694,6 +3166,10 @@ chrome.runtime.onConnect.addListener((port) => {
     const chatId = req.chatId as string;
     const projectId = req.projectId as string;
     const systemPromptOverride = req.systemPromptOverride as string | undefined;
+    // An attached image (already downscaled in the panel) for this turn, and
+    // whether the user opted into image output. Both are per-turn.
+    const imageDataUrl = typeof req.imageDataUrl === 'string' ? req.imageDataUrl : undefined;
+    const allowImageOutput = !!req.allowImageOutput;
     if (!prompt || !chatId || !projectId) {
       safePost({ type: 'ERROR', error: 'prompt, chatId and projectId are required' });
       return;
@@ -2704,6 +3180,9 @@ chrome.runtime.onConnect.addListener((port) => {
     abortControllers.set(chatId, controller);
     const localController = controller;
     let full = '';
+    // Images the model generated this turn (feature: image output). Attached to
+    // the saved assistant message and sent on DONE so the local panel shows them.
+    let generatedImages: string[] = [];
 
     // Emit a token to the initiating port AND broadcast it so other sidepanel
     // instances of the same chat render the answer LIVE (not just spinner → final
@@ -2736,6 +3215,16 @@ chrome.runtime.onConnect.addListener((port) => {
       display(text);
     };
 
+    // Reasoning-model chain of thought. A SEPARATE channel on purpose: it never
+    // touches `full`, so it can't reach the answer, the saved transcript, or the
+    // citation/sentinel logic that reads `full`. Its only job is to prove the
+    // model is working — an R1-class model used to show nothing at all until it
+    // stopped thinking, which read as a hang.
+    const emitReasoning = (text: string) => {
+      safePost({ type: 'REASONING', text });
+      chrome.runtime.sendMessage({ action: 'CHAT_REASONING', chatId, text }).catch(() => {});
+    };
+
     // Keep the MV3 worker alive for the whole turn. Context assembly (intent
     // call, retrieval, link scrapes) and a slow provider's time-to-first-token
     // are silent gaps; a >30s gap with no chrome API activity evicts the worker
@@ -2748,10 +3237,35 @@ chrome.runtime.onConnect.addListener((port) => {
     interactiveDepth++;
     try {
       const pageCtx = req.includePageContext ? await getPageContext().catch(() => null) : null;
-      const built = await buildChatRequest(
-        chatId, projectId, prompt, localController.signal, pageCtx,
-        (text) => safePost({ type: 'STATUS', text })
-      );
+
+      // An IMAGE turn is a pure look-at-this Q&A — it must NOT go through the
+      // router. Routing "what is this about?" on the TEXT alone sent it to the
+      // web branch, which searched the web and answered from those results while
+      // ignoring the picture entirely (the "it answered about GitHub repos"
+      // bug). Short-circuit: a vision system prompt, recent history for
+      // follow-ups, and grounded:false so the web-escalation net below never
+      // fires. The image itself rides in userContent to the vision model.
+      let built: { systemPrompt: string; formattedHistory: Array<{ role: string; content: string }>; grounded: boolean; place?: string; branch: ChatBranch };
+      if (imageDataUrl) {
+        safePost({ type: 'STATUS', text: 'Looking at your image…' });
+        const recent = (await getChatHistory(chatId).catch(() => []))
+          .slice(-6)
+          .map(m => ({ role: m.role, content: m.text }));
+        built = {
+          systemPrompt: LANGUAGE_DIRECTIVE +
+            `You are answering the user's question about an IMAGE they attached. Look at the image and answer DIRECTLY from what you see in it — the image is your source. Do NOT search the web, do NOT talk about anything not visible in the image. If the question can't be answered from the image, describe what you do see.` +
+            RESPONSE_STYLE,
+          formattedHistory: recent,
+          grounded: false,
+          branch: 'general',
+        };
+      } else {
+        built = await buildChatRequest(
+          chatId, projectId, prompt, localController.signal, pageCtx,
+          (text) => safePost({ type: 'STATUS', text }),
+          (req.sourceMode as SourceMode) || 'auto',
+        );
+      }
       const { formattedHistory, grounded, place, branch } = built;
       let systemPrompt = built.systemPrompt;
 
@@ -2764,7 +3278,8 @@ chrome.runtime.onConnect.addListener((port) => {
         role: 'user',
         text: prompt,
         timestamp: new Date().toISOString(),
-        provider: 'custom'
+        provider: 'custom',
+        ...(imageDataUrl ? { images: [imageDataUrl] } : {}),
       });
 
       // Tell OTHER sidepanel instances a question is in flight for this chat so
@@ -2815,8 +3330,13 @@ chrome.runtime.onConnect.addListener((port) => {
       const cmdTemplate = storage.cliCommandTemplate || CLI_TEMPLATE_AUTO;
       const companionUrl = storage.localMcpCompanionUrl || DEFAULT_COMPANION_MCP_URL;
 
+      // The local CLI takes text only. An attached image, or an image-output
+      // request, must go straight to the provider — never route it through the
+      // CLI, which would silently drop the image.
       let useCli = false;
-      if (routeChat === 'enabled' || routeChat === true) {
+      if (imageDataUrl || allowImageOutput) {
+        useCli = false;
+      } else if (routeChat === 'enabled' || routeChat === true) {
         useCli = true;
       } else if (routeChat === 'auto') {
         try {
@@ -2854,7 +3374,29 @@ chrome.runtime.onConnect.addListener((port) => {
       }
 
       if (!cliSuccess) {
-        await chatWithCustomStream(systemPrompt, formattedHistory, prompt, localController.signal, emitAnswerDelta);
+        // Route by what the turn needs. Vision model override: an attachment
+        // goes to the configured vision model when there is one, else the
+        // default (many are multimodal). Same `.trim()` guard imageToText uses
+        // for the whitespace-only sentinel.
+        const { visionModel } = await getProviderSettings();
+        const visionOverride = imageDataUrl ? (visionModel?.trim() || undefined) : undefined;
+        const userContent = imageDataUrl
+          ? [{ type: 'text' as const, text: prompt }, { type: 'image_url' as const, image_url: { url: imageDataUrl } }]
+          : undefined;
+
+        if (allowImageOutput) {
+          // Non-streaming: image models return the picture in the final message.
+          const uc = userContent ?? [{ type: 'text' as const, text: prompt }];
+          const out = await chatWithImages(systemPrompt, formattedHistory, uc, localController.signal, visionOverride);
+          generatedImages = out.images;
+          if (out.text) emitAnswerDelta(out.text);
+          else if (out.images.length) emitAnswerDelta('*(image generated)*');
+        } else {
+          await chatWithCustomStream(
+            systemPrompt, formattedHistory, prompt, localController.signal, emitAnswerDelta,
+            visionOverride, emitReasoning, userContent,
+          );
+        }
       }
 
       // RELIABLE NET: the score gate can still let a workspace-grounded turn
@@ -2864,7 +3406,10 @@ chrome.runtime.onConnect.addListener((port) => {
       // model's own judgment is the ground truth the scores only approximate.
       // Command turns (systemPromptOverride, e.g. /compare) get the net too —
       // a refusal there used to be FINAL, a dead end with no escalation.
-      if (grounded && isRefusalAnswer(full) && await isChatWebFallbackEnabled()) {
+      // 'sources' means the user explicitly wanted their own material. Silently
+      // escalating to the web would answer a different question than the one
+      // they asked, so the refusal stands.
+      if (grounded && req.sourceMode !== 'sources' && isRefusalAnswer(full) && await isChatWebFallbackEnabled()) {
         safePost({ type: 'STATUS', text: 'Not in your workspace — searching the web…' });
         // Localize the query (same as the main web branch) so "weather today"
         // resolves to the user's region, not the search provider's server IP.
@@ -2882,7 +3427,7 @@ chrome.runtime.onConnect.addListener((port) => {
             `You are a friendly, knowledgeable assistant. The excerpts below are from a live web search run just now — treat them as your facts. ` +
             `Answer like a sharp, helpful friend: lead with the direct answer in natural, plain language, then just enough detail. ` +
             `Don't clutter the prose with [W#] tags — the sources are shown as links below. Use only what the excerpts support; if they don't answer it, say so plainly.` +
-            LANGUAGE_RULE +
+            RESPONSE_STYLE +
             `\n--- WEB RESULTS ---\n${web.context}\n--- END WEB RESULTS ---`;
           await chatWithCustomStream(webSys, [], prompt, localController.signal, emitDelta);
         }
@@ -2916,17 +3461,39 @@ chrome.runtime.onConnect.addListener((port) => {
       }
 
 
-      if (full.trim()) {
+      if (full.trim() || generatedImages.length) {
         const { model: usedModel } = await getProviderSettings();
         await saveChatMessage({
           chatId,
           role: 'assistant',
           text: full,
           timestamp: new Date().toISOString(),
-          provider: usedModel || 'custom'
+          provider: usedModel || 'custom',
+          ...(generatedImages.length ? { images: generatedImages } : {}),
         });
       }
-      safePost({ type: 'DONE', fullText: full });
+      safePost({ type: 'DONE', fullText: full, images: generatedImages });
+
+      // FOLLOW-UPS — after DONE, so they never delay the answer. A separate
+      // call rather than a tail instruction on the answer prompt: the codebase
+      // already found that trailing formatting instructions are "routinely
+      // skipped by small models", and a separate call also keeps the
+      // suggestions out of the saved transcript, out of history, and out of the
+      // screen reader's read of the reply. Shares the turn's controller, so
+      // Stop kills it too.
+      if (shouldSuggestFollowUps(branch, !!systemPromptOverride) && full.trim().length > 200) {
+        chatWithCustom(
+          FOLLOW_UP_PROMPT,
+          [],
+          `USER ASKED:\n${prompt}\n\nANSWER GIVEN:\n${full.slice(0, 3000)}`,
+          localController.signal,
+        ).then(raw => {
+          const items = parseFollowUps(raw);
+          if (!items.length || localController.signal.aborted) return;
+          safePost({ type: 'FOLLOWUPS', items });
+          chrome.runtime.sendMessage({ action: 'CHAT_FOLLOWUPS', chatId, items }).catch(() => {});
+        }).catch(() => { /* suggestions are a bonus; never surface a failure */ });
+      }
     } catch (err) {
       const aborted = localController.signal.aborted;
       if (full.trim()) {
@@ -2976,6 +3543,17 @@ async function handleClearChatHistory(request: Record<string, unknown>): Promise
   const chatId = request.chatId as string;
   await clearChatHistory(chatId);
   return {};
+}
+
+/** Drop `messageId` and everything after it — backs regenerate / edit-and-re-run. */
+async function handleTruncateChatFrom(request: Record<string, unknown>): Promise<Record<string, unknown>> {
+  const chatId = request.chatId as string;
+  const messageId = request.messageId as string;
+  if (!chatId || !messageId) throw new Error('chatId and messageId are required');
+  const removed = await truncateChatFrom(chatId, messageId);
+  // removed === -1 means the id was not in this chat: report it rather than
+  // letting the caller re-run against a transcript it thinks it truncated.
+  return { removed, found: removed !== -1 };
 }
 
 // ─────────────────────────────────────────────
@@ -3640,6 +4218,21 @@ async function resumePendingResearch(): Promise<void> {
       status: `[RESUME] Interrupted research detected — resuming from checkpoint (attempt ${attemptCount})…`
     }).catch(() => {});
     await appendJobLog(`[RESUME] Interrupted research detected — resuming from checkpoint (attempt ${attemptCount})…`).catch(() => {});
+
+    // Say so IN THE CHAT, once, on the first resume. Without this a resumed run
+    // is indistinguishable from a command that started itself — the run
+    // reattaches to the /deepresearch line the user typed before the worker
+    // died, so it reads as "I never asked for this". Only at attempt 1 so it
+    // isn't repeated across the several resumes a long run legitimately needs.
+    if (attemptCount === 1 && job.chatId) {
+      await saveChatMessage({
+        chatId: job.chatId,
+        role: 'system',
+        text: `↻ Resuming your earlier research on “${job.effectiveTopic || job.topic}”. Chrome restarts the extension's background worker about every 5 minutes, which interrupts long runs — Magpie picks them back up from where they stopped. If you didn't mean to continue this, press Stop in the field log.`,
+        timestamp: new Date().toISOString(),
+        provider: 'custom',
+      }).catch(() => {});
+    }
     await executeResearch({
       projectId: job.projectId,
       chatId: job.chatId,
@@ -3804,13 +4397,28 @@ async function clearToken(): Promise<void> {
 }
 
 async function driveRequest(path: string, token: string, init?: RequestInit): Promise<Response> {
-  const res = await fetch(`https://www.googleapis.com${path}`, {
-    ...init,
-    headers: {
-      Authorization: `Bearer ${token}`,
-      ...(init?.headers ?? {})
+  // A Drive call with no timeout can hang forever on a flaky network — which is
+  // exactly what made sync and import look "blocked" with no way out. Cap every
+  // request. The caller's own signal (if any) still wins; otherwise a 45s
+  // ceiling. 45s, not less, because a multipart upload of a large document is
+  // legitimately slow.
+  const signal = init?.signal ?? AbortSignal.timeout(45_000);
+  let res: Response;
+  try {
+    res = await fetch(`https://www.googleapis.com${path}`, {
+      ...init,
+      signal,
+      headers: {
+        Authorization: `Bearer ${token}`,
+        ...(init?.headers ?? {})
+      }
+    });
+  } catch (e: any) {
+    if (e?.name === 'TimeoutError' || e?.name === 'AbortError') {
+      throw new Error('Drive request timed out — check your connection and try again.');
     }
-  });
+    throw e;
+  }
   if (!res.ok) {
     const body = await res.text().catch(() => '');
     throw new Error(`Drive API ${res.status}: ${res.statusText}. ${body}`);
@@ -3858,20 +4466,29 @@ async function ensureFolder(token: string): Promise<string> {
   return createData.id;
 }
 
+/**
+ * Write a document to Drive.
+ *
+ * With `existingFileId` this UPDATES that file; without one it creates a new
+ * file in `folderId`. The update path is not an optimisation — creating
+ * unconditionally meant any re-upload of an already-synced document left a
+ * duplicate behind, which is how a library ends up with several copies of
+ * everything.
+ */
 async function uploadMarkdown(
   token: string,
   folderId: string,
   fileName: string,
-  content: string
+  content: string,
+  existingFileId?: string
 ): Promise<string> {
   const boundary = '----MAGPIE_BOUNDARY';
 
-// Brand import moved to top level removed here due to top-level import restriction
-  const metadata = {
-    name: fileName,
-    mimeType: 'text/markdown',
-    parents: [folderId]
-  };
+  // `parents` is only valid on create. Sending it in a PATCH is rejected by
+  // Drive — moving a file between folders needs the addParents query param.
+  const metadata: Record<string, unknown> = existingFileId
+    ? { name: fileName, mimeType: 'text/markdown' }
+    : { name: fileName, mimeType: 'text/markdown', parents: [folderId] };
 
   const body =
     `--${boundary}\r\n` +
@@ -3882,8 +4499,12 @@ async function uploadMarkdown(
     content +
     `\r\n--${boundary}--`;
 
-  const res = await driveRequest('/upload/drive/v3/files?uploadType=multipart', token, {
-    method: 'POST',
+  const path = existingFileId
+    ? `/upload/drive/v3/files/${existingFileId}?uploadType=multipart`
+    : '/upload/drive/v3/files?uploadType=multipart';
+
+  const res = await driveRequest(path, token, {
+    method: existingFileId ? 'PATCH' : 'POST',
     headers: { 'Content-Type': `multipart/related; boundary=${boundary}` },
     body
   });
@@ -3909,16 +4530,26 @@ async function handleSyncToDrive(request?: Record<string, unknown>): Promise<Rec
   let synced = 0;
   const errors: string[] = [];
 
+  // Uploading 55 documents took a minute in complete silence, which reads as
+  // "the button did nothing". Broadcast progress so the panel can say where it
+  // is. Fire-and-forget: no panel open is not an error.
+  const report = (text: string) =>
+    chrome.runtime.sendMessage({ action: 'SYNC_PROGRESS', text }).catch(() => {});
+  report(unsynced.length ? `Uploading 0/${unsynced.length} to Drive…` : 'Checking Drive…');
+
   for (const doc of unsynced) {
     try {
       const fileName = doc.title.replace(/[/\\?%*:|"<>]+/g, '-').substring(0, 120) + '.md';
 
-      // Determine the target folder: project subfolder when the doc belongs
-      // to a named project, otherwise the root Magpie folder.
+      // Every project — including the Default Session — gets its OWN subfolder,
+      // so the Drive layout is always Magpie/<project>/<docs> and never a flat
+      // dump of loose .md at the root (which made a wiped install unable to sort
+      // anything back into the right workspace). Only a doc with no/unknown
+      // project falls back to the root.
       let targetFolderId = magpieFolderId;
       if (doc.projectId) {
         const projectName = projectMap.get(doc.projectId);
-        if (projectName && projectName !== 'Default Session') {
+        if (projectName) {
           let subId = subfolderCache.get(doc.projectId);
           if (!subId) {
             subId = await ensureSubfolder(token, magpieFolderId, sanitizeSegment(projectName));
@@ -3928,14 +4559,30 @@ async function handleSyncToDrive(request?: Record<string, unknown>): Promise<Rec
         }
       }
 
-      const driveFileId = await uploadMarkdown(token, targetFolderId, fileName, doc.content);
+      // Update the file we already have up there, when we have one. If the
+      // user deleted it from Drive in the meantime the PATCH 404s, so fall
+      // back to creating a fresh file rather than failing the document.
+      let driveFileId: string;
+      try {
+        driveFileId = await uploadMarkdown(token, targetFolderId, fileName, doc.content, doc.driveFileId);
+      } catch (err) {
+        if (!doc.driveFileId) throw err;
+        driveFileId = await uploadMarkdown(token, targetFolderId, fileName, doc.content);
+      }
       await updateDocumentSync(doc.id, true, driveFileId);
+      report(`Uploading ${synced + 1}/${unsynced.length} to Drive…`);
       synced++;
     } catch (err) {
       errors.push(`${doc.title}: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
 
+  // Stamp the last successful sync so the status panel can show "synced 3m
+  // ago" instead of leaving the user guessing whether anything happened.
+  // Only when something was actually uploaded — a no-op run is not a sync.
+  if (synced > 0) {
+    await chrome.storage.local.set({ lastDriveSyncAt: new Date().toISOString() });
+  }
   return { synced, total: unsynced.length, errors };
 }
 
@@ -3970,104 +4617,286 @@ function sanitizeSegment(name: string): string {
     .trim() || 'untitled';
 }
 
+/**
+ * Every non-folder file under `rootFolderId`, following subfolders AND pages.
+ *
+ * The page loop is the point. Both Drive listings used to request a single
+ * `pageSize=100` and drop `nextPageToken` on the floor, so a folder with 449
+ * documents returned an arbitrary 100 of them — which is why importing looked
+ * like it picked files at random. It was not random; it was truncated.
+ *
+ * `folders` collects the subfolders seen, so callers that need the folder tree
+ * do not have to walk it again.
+ */
+async function listDriveTree(
+  token: string,
+  rootFolderId: string,
+  onFolder?: (f: { id: string; name: string }) => boolean,
+): Promise<Array<{ id: string; name: string; mimeType: string; createdTime: string; parents?: string[] }>> {
+  const out: Array<any> = [];
+  const toScan = [rootFolderId];
+  const seen = new Set<string>();
+
+  while (toScan.length > 0) {
+    const parentId = toScan.pop()!;
+    if (seen.has(parentId)) continue;
+    seen.add(parentId);
+
+    const q = encodeURIComponent(`'${parentId}' in parents and trashed=false`);
+    let pageToken: string | undefined;
+    do {
+      const params =
+        `q=${q}&fields=nextPageToken,files(id,name,mimeType,createdTime,parents)` +
+        `&orderBy=createdTime desc&pageSize=1000` +
+        (pageToken ? `&pageToken=${encodeURIComponent(pageToken)}` : '');
+      const res = await driveRequest(`/drive/v3/files?${params}`, token);
+      const data = await res.json();
+      for (const f of (data.files || [])) {
+        if (f.mimeType === 'application/vnd.google-apps.folder') {
+          if (!onFolder || onFolder(f)) toScan.push(f.id);
+        } else {
+          out.push(f);
+        }
+      }
+      pageToken = data.nextPageToken || undefined;
+    } while (pageToken);
+  }
+  return out;
+}
+
+/**
+ * The Drive subfolder a project's documents sync INTO, or null when the project
+ * has none (the Default Session, or a project whose folder was never created
+ * because it has synced nothing yet). Finds, never creates — reading the folder
+ * must not have side effects.
+ */
+async function findProjectSubfolderId(token: string, rootId: string, projectId: string): Promise<string | null> {
+  const project = await getProject(projectId).catch(() => null);
+  const name = project?.title;
+  if (!name || name === 'Default Session') return null;
+  const q = encodeURIComponent(
+    `name='${sanitizeSegment(name)}' and mimeType='application/vnd.google-apps.folder' and '${rootId}' in parents and trashed=false`
+  );
+  const res = await driveRequest(`/drive/v3/files?q=${q}&fields=files(id)`, token);
+  const data = await res.json();
+  return data.files?.[0]?.id ?? null;
+}
+
+/**
+ * Markdown files that belong to ONE project: the files sitting directly in the
+ * Magpie root (Default Session / pre-subfolder era) plus everything under that
+ * project's own subfolder. Files under OTHER projects' subfolders are excluded
+ * — the whole point of "show me this project, not the entire Magpie folder".
+ * With no subfolder id, returns just the root-level files.
+ */
+async function listProjectMarkdown(
+  token: string, rootId: string, subfolderId: string | null,
+): Promise<Array<{ id: string; name: string; createdTime: string; alreadyImported?: boolean }>> {
+  const out: Array<{ id: string; name: string; createdTime: string }> = [];
+  // A named project has its OWN subfolder — show ONLY that, so import scopes to
+  // this workspace instead of dumping the whole Drive folder. Root-level files
+  // belong to the Default Session / no project, so they only show when THIS
+  // project has no subfolder (i.e. it is the Default Session). This is the fix
+  // for "import still shows all the data".
+  const scanId = subfolderId ?? rootId;
+  // onFolder → false: this level only, never descend into sibling project
+  // folders (so a named project never pulls in another project's files, and
+  // the Default Session never pulls in the subfolders).
+  const tree = await listDriveTree(token, scanId, () => false);
+  for (const f of tree) if (f.name?.endsWith('.md')) out.push({ id: f.id, name: f.name, createdTime: f.createdTime });
+  return out;
+}
+
 async function handleImportFromDrive(request: Record<string, unknown>): Promise<Record<string, unknown>> {
   const token = await getToken(false);
   const rootFolderId = await ensureFolder(token);
   const projectId = request.projectId as string;
   if (!projectId) throw new Error('projectId is required for importing');
 
-  // Collect files from the root folder and all subfolders recursively.
-  const allFiles: Array<{ id: string; name: string; createdTime: string }> = [];
-  const foldersToScan = [rootFolderId];
-  const seen = new Set<string>();
+  // Which files to bring in. The panel sends an explicit list once the user
+  // has chosen; an absent list still means "everything in this project", so the
+  // old one-button behaviour keeps working — but scoped to the project, not the
+  // whole Magpie folder.
+  const wanted = Array.isArray(request.fileIds) ? new Set(request.fileIds as string[]) : null;
 
-  while (foldersToScan.length > 0) {
-    const parentId = foldersToScan.pop()!;
-    if (seen.has(parentId)) continue;
-    seen.add(parentId);
+  const subfolderId = await findProjectSubfolderId(token, rootFolderId, projectId);
+  let allFiles = await listProjectMarkdown(token, rootFolderId, subfolderId);
+  if (wanted) allFiles = allFiles.filter(f => wanted.has(f.id));
 
-    const q = encodeURIComponent(`'${parentId}' in parents and trashed=false`);
-    const res = await driveRequest(
-      `/drive/v3/files?q=${q}&fields=files(id,name,mimeType,createdTime,parents)&orderBy=createdTime desc&pageSize=100`,
-      token
-    );
-    const data = await res.json();
-    for (const f of (data.files || [])) {
-      if (f.mimeType === 'application/vnd.google-apps.folder') {
-        foldersToScan.push(f.id);
-      } else if (f.name?.endsWith('.md')) {
-        allFiles.push({ id: f.id, name: f.name, createdTime: f.createdTime });
-      }
-    }
-  }
+  // Never import a Drive file this library already holds. Without this, a
+  // second click made a second copy of every document.
+  const known = await getKnownDriveFileIds();
+  const skipped = allFiles.filter(f => known.has(f.id)).length;
+  allFiles = allFiles.filter(f => !known.has(f.id));
 
   let imported = 0;
+  const report = (text: string) =>
+    chrome.runtime.sendMessage({ action: 'SYNC_PROGRESS', text }).catch(() => {});
+  report(allFiles.length ? `Importing 0/${allFiles.length} from Drive…` : 'Nothing new to import.');
 
-  for (const file of allFiles) {
-    try {
-      const contentRes = await driveRequest(`/drive/v3/files/${file.id}?alt=media`, token);
-      const content = await contentRes.text();
+  // Bounded-parallel: the downloads overlap instead of running strictly one at
+  // a time. Embedding inside saveDocument is serialized downstream by the
+  // offscreen queue regardless, but the network no longer waits on itself.
+  const CONCURRENCY = 3;
+  let idx = 0;
+  const worker = async (): Promise<void> => {
+    while (idx < allFiles.length) {
+      const file = allFiles[idx++];
+      try {
+        const contentRes = await driveRequest(`/drive/v3/files/${file.id}?alt=media`, token);
+        const content = await contentRes.text();
 
-      const tempId = crypto.randomUUID?.() ?? `${Date.now()}`;
-      const docShortId = makeDocShortId(tempId);
-      const chunks = chunkDocument({ docShortId, content });
+        const tempId = crypto.randomUUID?.() ?? `${Date.now()}`;
+        const docShortId = makeDocShortId(tempId);
+        const chunks = chunkDocument({ docShortId, content });
 
-      const { id: docId, chunks: savedChunks } = await saveDocument({
-        title: file.name?.replace(/\.md$/i, '') || 'Imported',
-        url: '',
-        content,
-        capturedAt: file.createdTime || new Date().toISOString(),
-        wordCount: content.split(/\s+/).length,
-        syncedToDrive: true,
-        driveFileId: file.id
-      }, chunks);
+        const { id: docId, chunks: savedChunks } = await saveDocument({
+          title: file.name?.replace(/\.md$/i, '') || 'Imported',
+          url: '',
+          content,
+          capturedAt: file.createdTime || new Date().toISOString(),
+          wordCount: content.split(/\s+/).length,
+          syncedToDrive: true,
+          driveFileId: file.id
+        }, chunks);
 
-      // Link into the project so it shows up in the session's source list
-      await linkDocumentToProject(projectId, docId);
-      await addChunksToVectorStore(projectId, savedChunks);
+        // Link into the project so it shows up in the session's source list
+        await linkDocumentToProject(projectId, docId);
+        await addChunksToVectorStore(projectId, savedChunks);
 
-      imported++;
-    } catch {
-      // Skip files that fail to import
+        imported++;
+        report(`Importing ${imported}/${allFiles.length} from Drive…`);
+      } catch {
+        // Skip files that fail to import
+      }
     }
-  }
+  };
+  await Promise.all(Array.from({ length: Math.min(CONCURRENCY, allFiles.length) }, () => worker()));
 
-  return { imported, total: allFiles.length };
+  return { imported, total: allFiles.length, skipped };
 }
 
-async function handleListDriveFiles(): Promise<Record<string, unknown>> {
-  const token = await getToken(false);
-  const storage = await chrome.storage.local.get(['driveFolderId']);
-  if (!storage.driveFolderId) return { files: [] };
+/**
+ * Two-way reconcile: pull EVERY project back from Drive. For each subfolder
+ * directly under the Magpie root, find (or create) a local project with that
+ * name and import every .md the library does not already hold. This is what
+ * makes "the data exists only in Drive" self-heal — after a wiped install, one
+ * run rebuilds all workspaces from remote, no per-project clicking. Root-level
+ * loose .md are intentionally ignored: the forward layout is Magpie/<project>/…
+ * and orphan root files can't be attributed to a workspace.
+ */
+async function handleReconcileFromDrive(request?: Record<string, unknown>): Promise<Record<string, unknown>> {
+  const interactive = !!(request?.interactive);
+  const token = await getToken(interactive);
+  const rootId = await ensureFolder(token);
 
-  // Recursively list files from the root folder and all subfolders.
-  const allFiles: any[] = [];
-  const foldersToScan = [storage.driveFolderId];
-  const seen = new Set<string>();
+  const report = (text: string) =>
+    chrome.runtime.sendMessage({ action: 'SYNC_PROGRESS', text }).catch(() => {});
+  report('Scanning Drive…');
 
-  while (foldersToScan.length > 0) {
-    const parentId = foldersToScan.pop()!;
-    if (seen.has(parentId)) continue;
-    seen.add(parentId);
+  // Direct child subfolders of the Magpie root — one per project.
+  const fq = encodeURIComponent(
+    `'${rootId}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false`
+  );
+  const foldersRes = await driveRequest(`/drive/v3/files?q=${fq}&fields=files(id,name)&pageSize=1000`, token);
+  const subfolders: Array<{ id: string; name: string }> = (await foldersRes.json()).files || [];
 
-    const q = encodeURIComponent(`'${parentId}' in parents and trashed=false`);
-    const res = await driveRequest(
-      `/drive/v3/files?q=${q}&fields=files(id,name,mimeType,createdTime,parents)&orderBy=createdTime desc&pageSize=100`,
-      token
+  const projects = await listProjects();
+  const byTitle = new Map(projects.map(p => [p.title.toLowerCase(), p.id]));
+  const known = await getKnownDriveFileIds();
+
+  let imported = 0, projectsCreated = 0;
+  const errors: string[] = [];
+
+  for (const folder of subfolders) {
+    // Find or create the local project this subfolder belongs to.
+    let projectId = byTitle.get(folder.name.toLowerCase());
+    if (!projectId) {
+      projectId = await createProject(folder.name);
+      byTitle.set(folder.name.toLowerCase(), projectId);
+      projectsCreated++;
+    }
+
+    // Markdown sitting directly in this subfolder that we don't already hold.
+    const mq = encodeURIComponent(`'${folder.id}' in parents and trashed=false`);
+    const filesRes = await driveRequest(
+      `/drive/v3/files?q=${mq}&fields=files(id,name,createdTime)&pageSize=1000`, token,
     );
-    const data = await res.json();
-    for (const f of (data.files || [])) {
-      if (f.mimeType === 'application/vnd.google-apps.folder') {
-        // Only descend into folders that look like project root folders
-        // (not hidden, not empty name).
-        if (f.name && !f.name.startsWith('.')) {
-          foldersToScan.push(f.id);
-        }
-      } else {
-        allFiles.push(f);
+    const mdFiles = ((await filesRes.json()).files || [])
+      .filter((f: any) => f.name?.endsWith('.md') && !known.has(f.id));
+
+    for (const file of mdFiles) {
+      try {
+        const contentRes = await driveRequest(`/drive/v3/files/${file.id}?alt=media`, token);
+        const content = await contentRes.text();
+        const docShortId = makeDocShortId(crypto.randomUUID?.() ?? `${Date.now()}`);
+        const chunks = chunkDocument({ docShortId, content });
+        const { id: docId, chunks: savedChunks } = await saveDocument({
+          title: file.name.replace(/\.md$/i, '') || 'Imported',
+          url: '',
+          content,
+          capturedAt: file.createdTime || new Date().toISOString(),
+          wordCount: content.split(/\s+/).length,
+          syncedToDrive: true,
+          driveFileId: file.id,
+        }, chunks);
+        await linkDocumentToProject(projectId, docId);
+        await addChunksToVectorStore(projectId, savedChunks);
+        known.add(file.id);
+        imported++;
+        report(`Restoring ${imported} from Drive…`);
+      } catch (err) {
+        errors.push(`${file.name}: ${err instanceof Error ? err.message : String(err)}`);
       }
     }
   }
 
-  return { files: allFiles };
+  report(imported ? `Restored ${imported} document(s) from Drive.` : 'Everything already in sync.');
+  return { imported, projectsCreated, folders: subfolders.length, errors };
+}
+
+/**
+ * Create the Drive subfolder for a project up front, the moment the project is
+ * made — so `Magpie/<project>/` appears immediately instead of only when the
+ * first document happens to sync. Silent no-op when the user isn't signed in
+ * (getToken(false) rejects); the periodic sync will create it later anyway.
+ */
+async function handleEnsureProjectSubfolder(request?: Record<string, unknown>): Promise<Record<string, unknown>> {
+  const projectId = typeof request?.projectId === 'string' ? request.projectId : '';
+  if (!projectId) return { ok: false };
+  try {
+    const project = await getProject(projectId);
+    if (!project?.title) return { ok: false };
+    const token = await getToken(false);
+    const rootId = await ensureFolder(token);
+    const subId = await ensureSubfolder(token, rootId, sanitizeSegment(project.title));
+    return { ok: true, subId };
+  } catch {
+    // Not signed in / transient Drive error — the 5-min auto-sync will handle it.
+    return { ok: false };
+  }
+}
+
+async function handleListDriveFiles(request?: Record<string, unknown>): Promise<Record<string, unknown>> {
+  const token = await getToken(false);
+  const rootId = await ensureFolder(token);
+  const projectId = typeof request?.projectId === 'string' ? request.projectId : undefined;
+
+  // Scope to the active project: root-level files + this project's own
+  // subfolder, NOT every other project's folder. Without a projectId (older
+  // caller), fall back to the whole tree.
+  let files: Array<{ id: string; name: string; createdTime: string }>;
+  if (projectId) {
+    const subfolderId = await findProjectSubfolderId(token, rootId, projectId);
+    files = await listProjectMarkdown(token, rootId, subfolderId);
+  } else {
+    files = (await listDriveTree(token, rootId, f => !!f.name && !f.name.startsWith('.')))
+      .filter(f => f.name?.endsWith('.md'))
+      .map(f => ({ id: f.id, name: f.name, createdTime: f.createdTime }));
+  }
+
+  // Mark what is already here so the picker can say so instead of letting the
+  // user select files that will be silently skipped.
+  const known = await getKnownDriveFileIds();
+  return { files: files.map(f => ({ ...f, alreadyImported: known.has(f.id) })) };
 }

@@ -22,6 +22,9 @@ import './worker-dom-globals';
 import { DOMParser } from 'linkedom';
 import { Readability } from '@mozilla/readability';
 import TurndownService from 'turndown';
+import { salvageSpecs, readJsonLdBlocks } from '../lib/spec-salvage';
+import { funnyCaptureTitle, titleIsUnusable } from '../lib/funny-title';
+import { assessCoverage, approxPageText, demoteRunawayHeadings, sanitizeCaptureDom } from '../lib/extraction-quality';
 
 interface ParseReq { type: 'parse'; id: number; html: string; url: string }
 
@@ -34,11 +37,17 @@ function extract(html: string, url: string): { title: string; markdown: string; 
   base.href = url;
   parsed.head?.prepend(base);
 
+  // Same chat-UI cleanup as the content script (screen-reader labels;
+  // role="heading" on a query bubble) before Readability runs.
+  sanitizeCaptureDom(parsed);
+
   const reader = new Readability(parsed, { keepClasses: true });
   const article = reader.parse();
 
   const htmlContent: string = article?.content || parsed.body?.innerHTML || '';
-  const title: string = article?.title || parsed.title || 'Untitled';
+  const rawTitle: string = article?.title || parsed.title || '';
+  // Empty or runaway (paragraph-as-heading) title → a short on-theme fun name.
+  const title: string = titleIsUnusable(rawTitle) ? funnyCaptureTitle(url) : rawTitle;
 
   // Pass turndown a NODE, not a string. Turndown's STRING path calls an internal
   // HTML parser that needs a global DOMParser/document a Worker lacks (the captured
@@ -50,6 +59,29 @@ function extract(html: string, url: string): { title: string; markdown: string; 
   const turndown = new TurndownService({ headingStyle: 'atx', codeBlockStyle: 'fenced' });
   let markdown = turndown.turndown(contentNode as any);
   markdown = markdown.replace(/\n{4,}/g, '\n\n\n').trim();
+  markdown = demoteRunawayHeadings(markdown);
+
+  // Same coverage check as the content script. Here the comparison text is the
+  // raw HTML stripped of tags — an approximation is fine; this is a ratio.
+  const pageText = approxPageText(html);
+  const coverage = assessCoverage(markdown, pageText);
+  if (!coverage.ok && !coverage.blocked && parsed.body) {
+    // Reuse the document already parsed above. Building a SECOND full DOM here
+    // would defeat the reason this worker exists: the DOM build is the
+    // heap-heavy step, and doubling it on every under-covered page walks
+    // straight back toward the OOM the worker was extracted to avoid.
+    const fullMd = turndown.turndown(parsed.body as any).replace(/\n{4,}/g, '\n\n\n').trim();
+    if (fullMd.length > markdown.length) markdown = fullMd;
+  }
+
+  // Same blind spot as the content script: Readability drops specification
+  // grids because they carry no prose. Salvage them from the FULL parsed
+  // document, not from Readability's output — the point is what it removed.
+  markdown += salvageSpecs(parsed, readJsonLdBlocks(parsed), { existingMarkdown: markdown });
+
+  // Final pass, after the coverage fallback (which re-runs turndown and can
+  // reintroduce a paragraph-as-heading) and every append.
+  markdown = demoteRunawayHeadings(markdown);
 
   const wordCount = markdown.split(/\s+/).filter(w => w.length > 0).length;
   return { title, markdown, wordCount };

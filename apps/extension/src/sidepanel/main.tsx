@@ -41,15 +41,18 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
 // overrides with an explicit choice. Toggles the class the design tokens are
 // keyed on (previously the theme was dead code — nothing ever applied it).
 //
-// 'village' is a third palette, not a light/dark axis: it is a light theme, so
-// choosing it turns .dark off. The two classes are mutually exclusive.
+// 'village' and 'ghibli' are scene palettes, not points on a light/dark axis:
+// both are light themes, so choosing either turns .dark off. resolveTheme
+// guarantees at most one class is ever on — they key the same tokens, so two at
+// once would be settled by CSS source order instead of by the user.
 function applyThemePref(): void {
   let raw: string | null = null;
   try { raw = localStorage.getItem(THEME_STORAGE_KEY); } catch { /* private mode */ }
   const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
-  const { dark, village } = resolveTheme(readThemePref(raw), prefersDark);
+  const { dark, village, ghibli } = resolveTheme(readThemePref(raw), prefersDark);
   document.documentElement.classList.toggle('dark', dark);
   document.documentElement.classList.toggle('village', village);
+  document.documentElement.classList.toggle('ghibli', ghibli);
 }
 applyThemePref();
 try {

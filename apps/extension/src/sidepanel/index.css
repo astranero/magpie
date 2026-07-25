@@ -1,6 +1,19 @@
 @import "tw-animate-css";
 @import "shadcn/tailwind.css";
 @import "@fontsource-variable/geist";
+/* Ghibli type — real bundled webfonts so it looks the same on every machine,
+   not a system stack that falls back to whatever is installed. Caveat is
+   hand-lettering (the big brand/empty-state title, like a painted village
+   sign); Klee One is a warm storybook serif (headings). Latin subsets only. */
+@import "@fontsource/caveat/latin-600.css";
+@import "@fontsource/caveat/latin-700.css";
+@import "@fontsource/klee-one/latin-400.css";
+@import "@fontsource/klee-one/latin-600.css";
+/* Dark → Space Grotesk (techy geometric grotesque); Village → Lora (a real
+   book serif that renders everywhere, unlike the Mac-only Iowan it replaces).
+   Both variable, one file each. Every palette now has its OWN bundled font. */
+@import "@fontsource-variable/space-grotesk";
+@import "@fontsource-variable/lora";
 @import "katex/dist/katex.min.css";
 @tailwind base;
 @tailwind components;
@@ -174,6 +187,120 @@
     --sidebar-border: 34 26% 83%;
     --sidebar-ring: 145 26% 34%;
   }
+  /* ── Ghibli: big sky, deep meadow ──
+     Deliberately NOT a village re-tint. Village is interior and warm
+     (plaster, moss, terracotta); this is exterior and cool — a hillside
+     under an enormous sky. The saturation lives in the accents so long
+     reading passages stay calm. */
+  .ghibli {
+    --background: 196 52% 95%;       /* washed sky near the horizon */
+    --foreground: 205 30% 17%;       /* storm blue, never pure black */
+
+    --card: 190 46% 98%;             /* cloud */
+    --card-foreground: 205 30% 17%;
+
+    --popover: 190 46% 98%;
+    --popover-foreground: 205 30% 17%;
+
+    --primary: 203 58% 39%;          /* the sky itself */
+    --primary-foreground: 190 50% 98%;
+
+    --secondary: 190 34% 90%;
+    --secondary-foreground: 205 30% 20%;
+
+    --muted: 194 30% 90%;
+    --muted-foreground: 203 18% 37%; /* measured: 5.75:1 on bg, 5.15:1 on muted */
+
+    --accent: 150 30% 89%;           /* grass catching light */
+    --accent-foreground: 205 30% 17%;
+
+    --destructive: 358 58% 48%;
+    --destructive-foreground: 190 50% 98%;
+
+    --border: 197 26% 82%;
+    --input: 197 26% 82%;
+    --ring: 203 58% 39%;
+
+    --radius: 0.75rem;               /* softest of the four */
+
+    --rule: 6 66% 60%;               /* the red of a roof, a coat, a torii */
+    --highlight: 43 82% 55%;         /* sunflower */
+    --ink-panel: 205 34% 14%;        /* night before the credits */
+    --ink-panel-fg: 190 34% 90%;
+
+    --chart-1: 203 58% 50%;
+    --chart-2: 140 34% 42%;
+    --chart-3: 43 82% 55%;
+    --chart-4: 6 66% 60%;
+    --chart-5: 268 26% 56%;
+
+    --sidebar: 196 52% 96%;
+    --sidebar-foreground: 205 30% 22%;
+    --sidebar-primary: 203 58% 39%;
+    --sidebar-primary-foreground: 190 50% 98%;
+    --sidebar-accent: 190 34% 91%;
+    --sidebar-accent-foreground: 205 30% 17%;
+    --sidebar-border: 197 26% 82%;
+    --sidebar-ring: 203 58% 39%;
+  }
+  /* Sky, cloud bank, and a hint of hill at the bottom. Gradients only:
+     no asset, no request, and nothing that repaints while scrolling. */
+  .ghibli body {
+    background-image:
+      radial-gradient(ellipse 120% 60% at 50% -10%, hsl(203 62% 82% / 0.75), transparent 68%),
+      radial-gradient(ellipse 60% 30% at 18% 14%, hsl(0 0% 100% / 0.85), transparent 70%),
+      radial-gradient(ellipse 48% 24% at 82% 24%, hsl(0 0% 100% / 0.65), transparent 72%),
+      radial-gradient(ellipse 140% 42% at 50% 108%, hsl(140 38% 74% / 0.5), transparent 70%);
+    background-attachment: fixed;
+  }
+
+  /* The mark's sky. Hidden by default: the plain light and dark palettes are
+     paper-and-ink, and a sun behind the bird would contradict them. */
+  .magpie-mark-sky { display: none; }
+  .village .magpie-mark-sky, .ghibli .magpie-mark-sky { display: block; }
+  .village .magpie-mark-sky circle { fill: hsl(42 60% 88%); }
+  .village .magpie-mark-sun { fill: hsl(18 64% 62% / 0.55); }
+  .ghibli .magpie-mark-sky circle { fill: hsl(203 62% 86%); }
+  .ghibli .magpie-mark-sun { fill: hsl(43 82% 62% / 0.8); }
+  /* Storybook scene dressing (cloud + distant bird), scene palettes only. */
+  .magpie-mark-scene { display: none; }
+  .village .magpie-mark-scene, .ghibli .magpie-mark-scene { display: block; }
+  .village .magpie-mark-scene ellipse { fill: hsl(40 55% 97% / 0.9); }
+  .ghibli .magpie-mark-scene ellipse { fill: hsl(0 0% 100% / 0.9); }
+
+  /* ── The little magpie that flaps while it thinks (see FlyingMagpie.tsx) ──
+     A small side-profile bird beside the status text. Only the wing rotates
+     and the body bobs a pixel, both transform-only, so the compositor runs it
+     off the main thread — no stutter under a saturated stream or sync. */
+  .magpie-body { fill: hsl(var(--foreground) / 0.82); }
+  .magpie-wing { fill: hsl(var(--foreground) / 0.68); }
+  .magpie-leg  { color: hsl(var(--foreground) / 0.7); }
+  /* On the dark research field log, ink the bird light instead. */
+  .ink-panel .magpie-body { fill: hsl(var(--ink-panel-fg) / 0.9); }
+  .ink-panel .magpie-wing { fill: hsl(var(--ink-panel-fg) / 0.72); }
+  .ink-panel .magpie-leg  { color: hsl(var(--ink-panel-fg) / 0.7); }
+
+  @keyframes magpie-flap {
+    0%, 100% { transform: rotate(0deg); }
+    50%      { transform: rotate(-46deg); }
+  }
+  @keyframes magpie-bob {
+    0%, 100% { transform: translateY(0); }
+    50%      { transform: translateY(-1px); }
+  }
+  .magpie-flap {
+    /* Pivot at the shoulder so the wing beats, not shears. */
+    transform-origin: 20px 14px;
+    animation: magpie-flap 0.42s ease-in-out infinite;
+  }
+  .magpie-thinker svg { animation: magpie-bob 0.84s ease-in-out infinite; }
+
+  /* Asked not to animate: fold the wing to a resting angle, stop the bob. */
+  @media (prefers-reduced-motion: reduce) {
+    .magpie-flap { animation: none; transform: rotate(-14deg); }
+    .magpie-thinker svg { animation: none; }
+  }
+
   /* Plaster, not flat paint: two very soft washes so large empty areas
      have somewhere for the eye to rest. Gradients only — no asset, no
      request, no repaint cost beyond the initial composite. */
@@ -238,21 +365,80 @@
     box-shadow: 0 1px 2px hsl(230 60% 3% / 0.5), 0 2px 10px hsl(230 60% 3% / 0.45);
   }
 
-  /* Sleek modern display voice for report headings and empty-state notes */
+  /* Sleek modern display voice for report headings and empty-state notes.
+     The default (light "plumage") theme: a clean geometric-humanist stack.
+     Each theme below re-voices this so the four palettes read as four
+     distinct type identities — geometric / grotesque / humanist / serif —
+     all from system fonts, no webfont. */
+  /* Light + dark share the BUNDLED Geist — a modern neo-grotesque that renders
+     identically everywhere (the earlier system stacks weren't installed on most
+     machines and collapsed to the same fallback, which is why the themes looked
+     the same). They read as the "modern" pair; Village (serif) and Ghibli
+     (hand-lettered) are the illustrated pair. Dark tightens for a cooler,
+     more technical night feel. */
   .font-display {
     font-family: 'Geist Variable', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+    letter-spacing: -0.01em;
+  }
+  /* Dark ("plumage at night") → Space Grotesk, a techy geometric grotesque,
+     bundled so it looks the same everywhere. Its display AND body differ from
+     the light theme's Geist. */
+  .dark .font-display,
+  .dark .prose-headings-display :is(h1, h2, h3, h4) {
+    font-family: 'Space Grotesk Variable', 'Geist Variable', 'Segoe UI', sans-serif;
     letter-spacing: -0.02em;
+    font-weight: 600;
+  }
+  .dark body,
+  .dark .prose {
+    font-family: 'Space Grotesk Variable', 'Geist Variable', 'Segoe UI', system-ui, sans-serif;
   }
 
-  /* Village speaks in a serif — a system stack, so it costs no webfont.
-     Applies to both display slots (headings here, prose headings below). */
+  /* Village speaks in a serif — now Lora, a real bundled book serif, so it
+     reads the same everywhere instead of falling back to Georgia off a Mac.
+     Display headings AND body get it, for a cozy printed-page feel. */
   .village .font-display,
   .village .prose-headings-display :is(h1, h2, h3, h4) {
-    font-family: 'Iowan Old Style', 'Palatino Linotype', Palatino, 'Book Antiqua', Georgia, serif;
+    font-family: 'Lora Variable', 'Iowan Old Style', 'Palatino Linotype', Georgia, serif;
     letter-spacing: 0;
+    font-weight: 600;
+  }
+  .village body,
+  .village .prose {
+    font-family: 'Lora Variable', 'Iowan Old Style', 'Palatino Linotype', Georgia, serif;
   }
   .village .shadow-card {
     box-shadow: 0 1px 2px hsl(25 30% 20% / 0.06), 0 3px 10px hsl(25 30% 20% / 0.08);
+  }
+
+  /* Ghibli type — BUNDLED webfonts (imported at the top of this file), so it
+     looks identical on every machine instead of falling back to whatever
+     happens to be installed. This is why the themes used to look the same: the
+     old system stacks (Optima/Avenir) aren't on most machines and collapsed to
+     the default. */
+  /* The big display strings — the empty-state title, brand headings — are
+     hand-lettered, like the painted sign in a Ghibli village. */
+  .ghibli .font-display {
+    font-family: 'Caveat', 'Bradley Hand', 'Segoe Print', cursive;
+    font-weight: 700;
+    letter-spacing: 0.01em;
+  }
+  /* Report / markdown headings stay READABLE — a warm storybook serif
+     (handwriting-influenced) rather than the cursive, which would be hard to
+     scan at h3/h4. */
+  .ghibli .prose-headings-display :is(h1, h2, h3, h4) {
+    font-family: 'Klee One', 'Iowan Old Style', Georgia, serif;
+    font-weight: 600;
+    letter-spacing: 0;
+  }
+  /* Body copy in the same storybook serif — cozy to read, unmistakably not the
+     other themes. */
+  .ghibli body,
+  .ghibli .prose {
+    font-family: 'Klee One', 'Iowan Old Style', 'Palatino Linotype', Georgia, serif;
+  }
+  .ghibli .shadow-card {
+    box-shadow: 0 1px 2px hsl(205 40% 25% / 0.06), 0 3px 12px hsl(205 40% 25% / 0.10);
   }
 
   /* Dark ink surface (deep-research log, code-like panels) */
@@ -307,6 +493,25 @@
   }
   .prose pre {
     box-shadow: inset 3px 0 0 hsl(var(--primary) / 0.45);
+  }
+
+  /* A 400px panel is narrower than most tables and many code lines. Without an
+     explicit scroller the widest cell stretches the whole message bubble and
+     the reader ends up scrolling the PAGE sideways to finish a sentence.
+     Confine the overflow to the block that causes it. */
+  .prose table {
+    display: block;
+    width: 100%;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+  .prose pre {
+    overflow-x: auto;
+  }
+  /* Long URLs and unbroken identifiers are the other horizontal-overflow
+     source; wrap them rather than widening the column. */
+  .prose :is(p, li, td, th) {
+    overflow-wrap: anywhere;
   }
   .prose :is(ul, ol) {
     margin-top: 0.45em;
