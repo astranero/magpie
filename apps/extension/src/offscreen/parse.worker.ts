@@ -23,6 +23,7 @@ import { DOMParser } from 'linkedom';
 import { Readability } from '@mozilla/readability';
 import TurndownService from 'turndown';
 import { salvageSpecs, readJsonLdBlocks } from '../lib/spec-salvage';
+import { funnyCaptureTitle, titleIsUnusable } from '../lib/funny-title';
 import { assessCoverage, approxPageText, demoteRunawayHeadings } from '../lib/extraction-quality';
 
 interface ParseReq { type: 'parse'; id: number; html: string; url: string }
@@ -40,7 +41,9 @@ function extract(html: string, url: string): { title: string; markdown: string; 
   const article = reader.parse();
 
   const htmlContent: string = article?.content || parsed.body?.innerHTML || '';
-  const title: string = article?.title || parsed.title || 'Untitled';
+  const rawTitle: string = article?.title || parsed.title || '';
+  // Empty or runaway (paragraph-as-heading) title → a short on-theme fun name.
+  const title: string = titleIsUnusable(rawTitle) ? funnyCaptureTitle(url) : rawTitle;
 
   // Pass turndown a NODE, not a string. Turndown's STRING path calls an internal
   // HTML parser that needs a global DOMParser/document a Worker lacks (the captured

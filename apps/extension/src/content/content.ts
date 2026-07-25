@@ -3,6 +3,7 @@ import TurndownService from 'turndown';
 import { extractMailboxList } from './mailbox';
 import { salvageSpecs, readJsonLdBlocks } from '../lib/spec-salvage';
 import { assessCoverage, demoteRunawayHeadings } from '../lib/extraction-quality';
+import { funnyCaptureTitle, titleIsUnusable } from '../lib/funny-title';
 
 // ─────────────────────────────────────────────
 // Enhanced Content Script — AI Research Assistant
@@ -412,8 +413,10 @@ function extractTitleFromMarkdown(markdown: string, fallback: string): string {
   const headingMatch = markdown.match(/^#{1,2}\s+(.+)$/m);
   if (headingMatch) {
     const extracted = headingMatch[1].trim();
-    // Only use it if it's reasonably long and not a generic section name
-    if (extracted.length > 5 && !/^(introduction|overview|table of contents|summary|abstract)$/i.test(extracted)) {
+    // Reasonably long, not a generic section name, and NOT a runaway heading
+    // (a paragraph a site wrapped in a heading tag) — those make giant titles.
+    if (extracted.length > 5 && extracted.length <= 120
+        && !/^(introduction|overview|table of contents|summary|abstract)$/i.test(extracted)) {
       return extracted;
     }
   }
@@ -754,6 +757,13 @@ async function scrapePage(): Promise<{
   // try to extract a real content title from the first markdown heading.
   if (isGenericTitle(title)) {
     title = extractTitleFromMarkdown(markdown, title);
+  }
+
+  // Still nothing real to call it — generic app name, empty, or a runaway
+  // heading that slipped through? Give it a short, on-theme fun name instead of
+  // a wall of text or "Untitled". Seeded by URL so re-captures keep the name.
+  if (isGenericTitle(title) || titleIsUnusable(title)) {
+    title = funnyCaptureTitle(url);
   }
 
   const wordCount = markdown.split(/\s+/).filter(w => w.length > 0).length;
