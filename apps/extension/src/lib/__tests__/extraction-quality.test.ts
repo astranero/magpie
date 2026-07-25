@@ -123,4 +123,17 @@ describe('demoteRunawayHeadings', () => {
   it('is empty-safe', () => {
     expect(demoteRunawayHeadings('')).toBe('');
   });
+
+  it('demotes the exact reported Gemini paragraph-heading', () => {
+    // The line a user saw captured as a giant header, verbatim.
+    const reported = '### hf-notifications: the fetch agent produced a real, grounded summary of the actual discussions (#14, #15, #7, #18, #22…) — now visible in RESULTS.md.';
+    const out = demoteRunawayHeadings(reported);
+    expect(out.startsWith('#')).toBe(false);
+    expect(out).toContain('hf-notifications');
+  });
+
+  it('keeps a genuinely short heading like "what can fix this?"', () => {
+    // If a site marks this as its own <h3>, it IS a heading — do not strip it.
+    expect(demoteRunawayHeadings('### what can fix this?')).toBe('### what can fix this?');
+  });
 });

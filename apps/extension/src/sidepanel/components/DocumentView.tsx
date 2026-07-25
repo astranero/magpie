@@ -9,6 +9,7 @@ import { ArrowLeft, ExternalLink, FileText, Check, Tag } from 'lucide-react';
 import { splitFrontmatter, parseFrontmatterFields } from '../../lib/frontmatter';
 import { cleanContent } from '../../lib/content-cleaner';
 import { stripInvisibleMathOps } from '../../lib/unicode-text';
+import { demoteRunawayHeadings } from '../../lib/extraction-quality';
 import { MagpieImage } from './MagpieImage';
 
 // Same inline anchor format the chat renderer uses: [d3ab01.s1.p2] / [d3.s0.p1.0].
@@ -308,7 +309,10 @@ export const DocumentView: React.FC<DocumentViewProps> = ({
 
   // Invisible math operators (U+2061…) survive scraping/PDF extraction and make
   // KaTeX log a metrics warning for every one. They render as nothing either way.
-  const contentToRender = stripInvisibleMathOps(showRaw ? content : body);
+  // Demote runaway headings at RENDER time too, so a doc captured before the
+  // capture-side fix (a paragraph a site wrapped in a heading tag) no longer
+  // shows as a giant header. Rendered view only — the raw view stays verbatim.
+  const contentToRender = stripInvisibleMathOps(showRaw ? content : demoteRunawayHeadings(body));
 
   // Humanize known frontmatter values for display
   const prettyFmValue = (key: string, v: string): string => {
