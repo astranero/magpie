@@ -2807,15 +2807,16 @@ const DATA_HOST_MIN_GAP_MS = 400;
 async function agenticDataGather(
   question: string, observed: string[], discovered: string[], host: string, signal: AbortSignal, onStatus?: (s: string) => void,
 ): Promise<{ blocks: string[]; sources: Array<{ title: string; url: string }> }> {
-  const webAllowed = await isChatWebFallbackEnabled();
+  // `/data` is an explicit data-gathering command, so web search is ALWAYS on
+  // here — it must not be coupled to the separate chat web-fallback toggle (that
+  // coupling is why a Reddit query returned nothing when only the web-data agent
+  // was enabled). gatherWebSnippets is keyless, so this needs no API key.
   const tools: ToolDef[] = [
     { type: 'function', function: { name: 'list_page_api_calls', description: 'List candidate API endpoints for the CURRENT page: (1) the requests it actually made at runtime, and (2) api-ish URLs found in its page source. These are the site\'s real API, not guesses. Token-like values are redacted. Use them as the basis for http_get.', parameters: { type: 'object', properties: {} } } },
     { type: 'function', function: { name: 'http_get', description: 'GET a public API/JSON endpoint and return its JSON/text body. CREDENTIAL-FREE — public data only, no logins. Use it to fetch an endpoint, then paginate (next page) and fan out. Do not fetch the same URL twice.', parameters: { type: 'object', properties: { url: { type: 'string', description: 'Absolute https:// URL' } }, required: ['url'] } } },
     { type: 'function', function: { name: 'fetch_page', description: 'Fetch a full web PAGE (not an API) and read its cleaned text. Use this on a site\'s SEARCH RESULTS page — construct the search URL (host + a search path with the query + a price sort, e.g. sort=price_asc) or find it via search_web — to read the listings directly when there is no JSON API. Credential-free.', parameters: { type: 'object', properties: { url: { type: 'string', description: 'Absolute https:// URL of a page to read' } }, required: ['url'] } } },
+    { type: 'function', function: { name: 'search_web', description: 'Live web search — use to find a public API\'s docs/endpoints (e.g. Reddit .json, GitHub API) or to answer directly when no site API fits.', parameters: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'] } } },
   ];
-  if (webAllowed) {
-    tools.push({ type: 'function', function: { name: 'search_web', description: 'Live web search — use to find a public API\'s docs/endpoints (e.g. Reddit .json, GitHub API) when the page has none.', parameters: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'] } } });
-  }
 
   const sys =
     `You are a web-data agent for the site "${host || 'the current page'}". Collect the data needed to answer, then stop.\n` +
@@ -2894,7 +2895,7 @@ async function agenticDataGather(
               result = `read page ${url}`;
             } else result = 'page unreadable or empty';
           }
-        } else if (call.name === 'search_web' && webAllowed) {
+        } else if (call.name === 'search_web') {
           const web = await gatherWebSnippets(String(call.args?.query || question), { signal });
           if (web.context && used + web.context.length <= TOTAL_CTX_BUDGET) {
             block = `\n\n--- WEB RESULTS ---\n${web.context}\n--- END WEB RESULTS ---`;
