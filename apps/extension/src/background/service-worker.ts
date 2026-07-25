@@ -576,6 +576,14 @@ const messageHandlers: Record<string, MessageHandler> = {
     const ctx = (request as any).includePageContext ? await getPageContext().catch(() => null) : null;
     return handleFlashcards(request, ctx);
   },
+  // Persist a client-built message (/teach lesson, /flashcard deck) so it survives
+  // a chat switch or reload — these bypass the streaming chat path that normally saves.
+  SAVE_CHAT_MESSAGE: async (request) => {
+    const m = (request as any).message || {};
+    if (!m.chatId || !m.role) return { success: false, error: 'message needs chatId + role' };
+    const id = await saveChatMessage(m);
+    return { success: true, id };
+  },
   REINDEX_LIBRARY: handleReindexLibrary,
   RECALL_DOCS: handleRecallDocs,
   CLEANUP_ORPHANS: async () => {

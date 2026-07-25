@@ -1924,32 +1924,36 @@ loadChatHistory(activeChatId).then(() => {
       const topic = text.slice('/flashcard'.length).trim();
       setInput('');
       const currentChatId = activeChatId;
+      const ts = new Date().toISOString();
       setMessages(prev => ({
         ...prev,
         [currentChatId]: [...(prev[currentChatId] || []), { id: uid(), role: 'user', text }]
       }));
+      void persistMsg(currentChatId, { role: 'user', text }, ts);
       setGenerating(prev => ({ ...prev, [currentChatId]: true }));
       const res = await msg('FLASHCARDS', { projectId: activeProjectId, chatId: currentChatId, topic, includePageContext });
       setGenerating(prev => ({ ...prev, [currentChatId]: false }));
       const deckCards = res.cards as Flashcard[] | undefined;
       if (res.success !== false && Array.isArray(deckCards) && deckCards.length) {
         const deckTitle = String(res.title || 'Study deck');
+        const dtext = `**${deckTitle}** — ${deckCards.length} cards, built from this workspace's research and saved to Lore. Tap **Study deck** to play; reopen it any time.`;
         setMessages(prev => ({
           ...prev,
           [currentChatId]: [...(prev[currentChatId] || []), {
-            id: uid(), role: 'assistant' as const,
-            text: `**${deckTitle}** — ${deckCards.length} cards, built from this workspace's research and saved to Lore. Opening the deck…`,
-            deck: deckCards, deckTitle,
+            id: uid(), role: 'assistant' as const, text: dtext, deck: deckCards, deckTitle,
           }]
         }));
+        void persistMsg(currentChatId, { role: 'assistant', text: dtext, deck: deckCards, deckTitle }, new Date(Date.now() + 1).toISOString());
         setActiveDeck({ title: deckTitle, cards: deckCards });
         setView('flashcards');
         if (res.docId) loadDocuments(activeProjectId);
       } else {
+        const etext = `Couldn't build a deck: ${res.error || 'unknown error'}`;
         setMessages(prev => ({
           ...prev,
-          [currentChatId]: [...(prev[currentChatId] || []), { id: uid(), role: 'assistant', text: `Couldn't build a deck: ${res.error || 'unknown error'}` }]
+          [currentChatId]: [...(prev[currentChatId] || []), { id: uid(), role: 'assistant', text: etext }]
         }));
+        void persistMsg(currentChatId, { role: 'assistant', text: etext }, new Date(Date.now() + 1).toISOString());
       }
       return;
     }
@@ -1960,36 +1964,46 @@ loadChatHistory(activeChatId).then(() => {
       const topic = text.slice('/teach'.length).trim();
       setInput('');
       const currentChatId = activeChatId;
+      const ts = new Date().toISOString();
       setMessages(prev => ({
         ...prev,
         [currentChatId]: [...(prev[currentChatId] || []), { id: uid(), role: 'user', text }]
       }));
+      void persistMsg(currentChatId, { role: 'user', text }, ts);
       setGenerating(prev => ({ ...prev, [currentChatId]: true }));
       const res = await msg('TEACH', { projectId: activeProjectId, chatId: currentChatId, topic, includePageContext });
       setGenerating(prev => ({ ...prev, [currentChatId]: false }));
       let body: string;
       let quiz: any;
+      let actions: { label: string; command: string }[] | undefined;
       if (res.reset) {
         body = `**Course reset.** Cleared the mission${res.deleted ? ` and removed ${res.deleted} lesson/plan doc(s)` : ''}. Run \`/teach\` again and I'll build a fresh course from this workspace's research.`;
+        actions = [{ label: 'Start course', command: '/teach' }];
       } else if (res.courseComplete) {
         body = String(res.body || 'Course complete.');
+        actions = [{ label: '↻ Restart course', command: '/teach reset' }];
       } else if (res.success !== false && res.title) {
         const header = res.missionCreated
-          ? `**Course started.** I've set this workspace's mission to:\n\n> ${res.mission}\n\nIf that's not quite your goal, say so — every lesson is built from it.\n\n---\n\n`
+          ? `**Course started.** I've set this workspace's mission to:\n\n> ${res.mission}\n\nNot your goal? Tap **Reset course** to rebuild it from your research.\n\n---\n\n`
           : '';
         // First time a syllabus is built from the research: show the course plan.
         const plan = Array.isArray(res.syllabus) && res.syllabus.length
-          ? `**Course plan** (built from this workspace's research — \`/teach\` again to advance):\n\n${res.syllabus.map((s: any) => `${s.n}. **${s.title}** — ${s.covers || s.goal}`).join('\n')}\n\n---\n\n`
+          ? `**Course plan** (built from this workspace's research):\n\n${res.syllabus.map((s: any) => `${s.n}. **${s.title}** — ${s.covers || s.goal}`).join('\n')}\n\n---\n\n`
           : '';
-        body = `${header}${plan}## Lesson ${res.lessonNumber}: ${res.title}\n\n${res.body}\n\n---\n*Lesson also saved to Lore — use \`/teach\` again when you're ready for the next one.*`;
+        body = `${header}${plan}## Lesson ${res.lessonNumber}: ${res.title}\n\n${res.body}\n\n---\n*Saved to Lore. Use the buttons below to continue or start over.*`;
         quiz = Array.isArray(res.quiz) && res.quiz.length ? res.quiz : undefined;
+        actions = [
+          { label: 'Continue → next lesson', command: '/teach' },
+          { label: 'Reset course', command: '/teach reset' },
+        ];
       } else {
         body = `Couldn't build the lesson: ${res.error || 'unknown error'}`;
       }
       setMessages(prev => ({
         ...prev,
-        [currentChatId]: [...(prev[currentChatId] || []), { id: uid(), role: 'assistant', text: body, ...(quiz ? { quiz } : {}) }]
+        [currentChatId]: [...(prev[currentChatId] || []), { id: uid(), role: 'assistant', text: body, ...(quiz ? { quiz } : {}), ...(actions ? { actions } : {}) }]
       }));
+      void persistMsg(currentChatId, { role: 'assistant', text: body, quiz, actions }, new Date(Date.now() + 1).toISOString());
       if (res.success !== false && res.title) loadDocuments(activeProjectId);
       return;
     }
@@ -2323,6 +2337,28 @@ loadChatHistory(activeChatId).then(() => {
       if (item.imageDataUrl) setPendingImage(item.imageDataUrl);
     }
   };
+
+  // Run a slash command as if the user typed it — for in-message action buttons
+  // ("Continue → next lesson", "Reset course"). send() reads inputRef.current.
+  const runCommand = (cmd: string) => {
+    if (generating[activeChatId]) return;
+    inputRef.current = cmd;
+    setInput(cmd);
+    void send();
+  };
+
+  // Persist a client-built message (/teach lesson, /flashcard deck) so it survives
+  // a chat switch or reload — these bypass the streaming path that normally saves.
+  const persistMsg = (chatId: string, m: Partial<ChatMessage> & { role: 'user' | 'assistant' | 'system'; text: string }, ts?: string) =>
+    msg('SAVE_CHAT_MESSAGE', {
+      message: {
+        chatId, role: m.role, text: m.text, timestamp: ts || new Date().toISOString(),
+        ...(m.quiz ? { quiz: m.quiz } : {}),
+        ...(m.deck ? { deck: m.deck } : {}),
+        ...(m.deckTitle ? { deckTitle: m.deckTitle } : {}),
+        ...(m.actions ? { actions: m.actions } : {}),
+      },
+    }).catch(() => {});
 
   /**
    * "Cancel & edit" on the message being answered: an UNDO of the send. Stop the
@@ -2695,6 +2731,7 @@ loadChatHistory(activeChatId).then(() => {
                 return { verdict: (r?.verdict as any) || 'partial', feedback: String(r?.feedback || '') };
               }}
               onOpenDeck={(title, cards) => { setActiveDeck({ title, cards }); setView('flashcards'); }}
+              onRunCommand={runCommand}
               onOpenSettings={() => setView('settings')}
               onRetryLast={retryLast}
               onUnqueue={unqueueMessage}

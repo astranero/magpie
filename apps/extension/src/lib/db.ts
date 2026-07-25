@@ -116,6 +116,14 @@ export interface ChatMessage {
    *  by the downscale applied before an attachment is stored. IndexedDB records
    *  are schemaless, so this needs no store-version bump. */
   images?: string[];
+  /** Interactive extras persisted so /teach lessons and /flashcard decks survive
+   *  a chat switch or reload. Schemaless store — no version bump. Typed loosely
+   *  here; the UI (types.ts) casts to QuizQuestion[] / Flashcard[]. */
+  quiz?: any[];
+  deck?: any[];
+  deckTitle?: string;
+  /** Command buttons under a message ("Continue → next lesson", "Reset course"). */
+  actions?: { label: string; command: string }[];
 }
 
 export interface CitationRef {

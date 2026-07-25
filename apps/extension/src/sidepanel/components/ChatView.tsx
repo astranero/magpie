@@ -53,6 +53,8 @@ interface ChatViewProps {
   onGradeAnswer?: (q: QuizQuestion, answer: string) => Promise<{ verdict: 'correct' | 'partial' | 'incorrect'; feedback: string }>;
   /** Open a flashcard deck in the full-panel player. */
   onOpenDeck?: (title: string, cards: import('../types').Flashcard[]) => void;
+  /** Run a slash command from an in-message action button (e.g. "Continue"). */
+  onRunCommand?: (command: string) => void;
   /** Open the settings/config view — the recovery action for auth/config errors. */
   onOpenSettings?: () => void;
   /** Re-run the last question — the recovery action for a transient failure. */
@@ -1288,6 +1290,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
   onCancelAndEdit,
   onGradeAnswer,
   onOpenDeck,
+  onRunCommand,
   onOpenSettings,
   onRetryLast,
   onUnqueue,
@@ -1698,6 +1701,27 @@ export const ChatView: React.FC<ChatViewProps> = ({
                   <BookOpen size={15} className="text-primary" />
                   Study deck · {m.deck.length} cards
                 </button>
+              )}
+
+              {/* Command action buttons (e.g. /teach "Continue → next lesson"). */}
+              {m.role === 'assistant' && m.actions && m.actions.length > 0 && onRunCommand && (
+                <div className="mt-2 flex flex-wrap gap-2">
+                  {m.actions.map((a, ai) => (
+                    <button
+                      key={ai}
+                      type="button"
+                      onClick={() => onRunCommand(a.command)}
+                      disabled={busy}
+                      className={`inline-flex items-center gap-1.5 text-xs font-medium px-3 py-1.5 rounded-full transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${
+                        ai === 0
+                          ? 'bg-primary text-primary-foreground hover:bg-primary/90'
+                          : 'border border-border text-muted-foreground hover:text-foreground hover:bg-accent'
+                      }`}
+                    >
+                      {a.label}
+                    </button>
+                  ))}
+                </div>
               )}
             </div>
 
