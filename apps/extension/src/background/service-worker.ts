@@ -1750,8 +1750,9 @@ async function buildChatRequest(chatId: string, projectId: string, prompt: strin
 
     const dataSys =
       `You are a data analyst. You were given data gathered from public APIs and/or web search (below). ` +
-      `Answer the user's request using ONLY that data — build the table/ranking/summary they asked for, cite ` +
-      `the sources you used, and state plainly if the data is incomplete or a call failed. Do not invent rows.\n\n` +
+      `Answer the user's request using ONLY that data — build the table/ranking/summary they asked for, and ` +
+      `include the LINK for each listing/item so the user can open it. Cite the sources/endpoints you used, and ` +
+      `state plainly if the data is incomplete or a call failed. Do not invent rows, prices, or links.\n\n` +
       (blocks.length
         ? `GATHERED DATA:\n${blocks.join('\n')}`
         : `NO DATA WAS FETCHED THIS TURN. Report ONLY that, honestly. HARD RULES:\n` +
@@ -2834,14 +2835,18 @@ async function agenticDataGather(
   ];
 
   const sys =
-    `You are a web-data agent for the site "${host || 'the current page'}". Collect the data needed to answer, then stop.\n` +
-    `- ALWAYS begin with list_page_api_calls — it gives the site's real endpoints (runtime requests + api-ish URLs from the page source). http_get the most relevant candidate.\n` +
-    `- Inspect each JSON response, then construct the next call: paginate (page/offset/limit/start params) and fan out to related endpoints. Accumulate enough rows to answer.\n` +
-    `- Endpoints often follow a pattern — if you see one like \`${host ? 'https://' + host : 'https://site'}/api/search?...\`, vary its query (model, condition=used, sort=price_asc, page=2) to get what the user asked for.\n` +
-    `- The CURRENT page may be a single item (a detail page). Questions like "cheapest / all / list the X on the market" need the site's SEARCH RESULTS, which a detail page never loads. In that case DO NOT stop at the current page's endpoints: construct the site's search URL (host + a search path with the query + a price sort, e.g. sort=price_asc) — or find it with search_web — and fetch_page it to read the listings, or http_get its JSON search endpoint if you can find one.\n` +
-    `- You may also fetch known public APIs directly: Reddit (append .json / /search.json?q=…), the GitHub REST API, HN Algolia.\n` +
+    `You are a web-data agent. Gather the data that answers the user's request, then stop. Work from the user's INTENT, not from whatever tab happens to be open.\n\n` +
+    `FIRST decide where the answer actually lives:\n` +
+    `- The current tab is "${host || '(none)'}". Only use its endpoints (list_page_api_calls → http_get) if that site is genuinely the right source for THIS question. If the open tab is unrelated (e.g. it is Google Drive, Gmail, a docs app, or any site that does not hold the answer), IGNORE it completely — do not fetch its endpoints.\n` +
+    `- For a "find / compare / cheapest / best deals / opinions on X" request, the answer lives on OTHER sites you must discover:\n` +
+    `  1. Use search_web to identify the right sites for the intent — e.g. used vehicles for sale in Finland → nettimoto.com, tori.fi, nettimarkkina; product prices → the relevant shops; opinions → reddit (append /search.json?q=…).\n` +
+    `  2. For each promising site, EITHER http_get its JSON search endpoint if one exists, OR fetch_page its SEARCH RESULTS url — construct it as host + a search path + the query + a sort (e.g. sort=price_asc) — and read the listings.\n` +
+    `  3. Collect the actual items WITH their individual links, so the answer can list each result and link to it.\n` +
+    `- Endpoints follow patterns: once you find one like \`https://site/api/search?...\`, vary its query (model, condition=used, sort=price_asc, page=2) and paginate to accumulate enough rows.\n\n` +
+    `RULES:\n` +
     `- All fetches are CREDENTIAL-FREE (public data only). Budget: at most ${DATA_MAX_FETCHES} fetches. Never repeat a URL.\n` +
-    `- DO NOT GIVE UP without trying: try at least 3 candidate endpoints (from list_page_api_calls, a same-origin \`/api/…\` guess, and search_web) before concluding you couldn't fetch data. NEVER claim the site "has no API" — you cannot verify that.\n` +
+    `- Try several real sources before giving up (search_web + at least two candidate sites/endpoints). NEVER claim a site "has no API" — you cannot verify that.\n` +
+    `- Never invent listings, prices, or links. Only report what you actually fetched.\n` +
     `- When you have enough, stop calling tools; the final answer is written separately from the data you gathered.`;
   const messages: any[] = [{ role: 'system', content: sys }, { role: 'user', content: question }];
 
