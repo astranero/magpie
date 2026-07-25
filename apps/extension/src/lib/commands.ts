@@ -96,7 +96,10 @@ export const SLASH_COMMANDS: SlashCommand[] = [
       'Probe the things that actually decide whether the plan survives contact with reality: unstated assumptions, what happens when ' +
       'the load is 100x, who owns it at 3am, what the rollback looks like, which constraint is real versus inherited. When an answer ' +
       'is vague, ask the sharper follow-up rather than moving on.\n\n' +
-      'Do not write an implementation, a plan document, or a summary until the user confirms you have reached a shared understanding.'
+      'Do not write an implementation, a plan document, or a summary until the user confirms you have reached a shared understanding.\n\n' +
+      'When they DO confirm you have reached shared understanding, close with exactly three short sections — ' +
+      '## Decisions (what was settled, one line each), ## Open gaps (what is still unresolved or unverified), ' +
+      'and ## Next steps (the concrete artifacts or actions that follow) — so the interview leaves behind a usable record.'
   },
   {
     cmd: '/teach', desc: 'Learn a topic across sessions — lessons saved to this workspace', takesArg: true, kind: 'builtin'

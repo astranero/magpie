@@ -43,7 +43,7 @@ import {
 } from '../lib/research-store';
 import { enqueueResearch, dequeueResearch, getResearchQueue, clearResearchQueue } from '../lib/research-queue';
 import { builtinCommandNames } from '../lib/commands';
-import { handleTeach } from './teach';
+import { handleTeach, gradeAnswer } from './teach';
 import { wikipediaSearch, wikipediaPageSummary } from '../lib/free-apis';
 
 // ─────────────────────────────────────────────
@@ -566,6 +566,11 @@ const messageHandlers: Record<string, MessageHandler> = {
   TEACH: async (request) => {
     const ctx = (request as any).includePageContext ? await getPageContext().catch(() => null) : null;
     return handleTeach(request, ctx);
+  },
+  GRADE_ANSWER: async (request) => {
+    const r = request as any;
+    const grade = await gradeAnswer(String(r.prompt || ''), String(r.modelAnswer || ''), String(r.userAnswer || ''));
+    return { success: true, ...grade };
   },
   REINDEX_LIBRARY: handleReindexLibrary,
   RECALL_DOCS: handleRecallDocs,

@@ -15,7 +15,7 @@
 // returns to these to review.
 
 import { getProject, updateProjectRules, listDocuments, linkDocumentToProject, saveDocument, getChatHistory } from '../lib/db';
-import { buildFrontmatter } from '../lib/frontmatter';
+import { buildFrontmatter, splitFrontmatter } from '../lib/frontmatter';
 import { chatWithCustom } from './llm-client';
 
 /** Delimited so a mission can be rewritten without clobbering the user's own
@@ -25,6 +25,19 @@ export const MISSION_CLOSE = '<!-- /magpie:mission -->';
 
 export interface PriorLesson { number: number; title: string; covers: string }
 
+/** One step of a course syllabus built from the workspace's research. */
+export interface SyllabusStep { n: number; title: string; covers: string; goal: string }
+
+/** One interactive quiz question. `mcq` is checked locally; `open` is LLM-graded. */
+export interface QuizQuestion {
+  type: 'mcq' | 'open';
+  prompt: string;
+  options?: string[];     // mcq: the choices
+  answerIndex?: number;   // mcq: index into options
+  modelAnswer?: string;   // open: the reference answer to grade against / reveal
+  explanation?: string;   // why the answer is right (shown after submit)
+}
+
 export interface TeachResult {
   lessonNumber: number;
   title: string;
@@ -33,6 +46,111 @@ export interface TeachResult {
   missionCreated: boolean;
   body: string;
   covers: string;
+  /** Interactive quiz for this lesson (may be empty if the model didn't produce one). */
+  quiz: QuizQuestion[];
+  /** Present only the first time a course syllabus is built — for the "course plan" preview. */
+  syllabus?: SyllabusStep[];
+  /** True once every syllabus step has a lesson. */
+  courseComplete?: boolean;
+}
+
+const SYLLABUS_OPEN = '<!-- magpie:syllabus -->';
+
+/** Extract the bodies of ```json / ``` fenced code blocks, in order. */
+function fencedBlocks(raw: string): string[] {
+  const out: string[] = [];
+  const re = /```(?:json)?\s*([\s\S]*?)```/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(raw || '')) !== null) out.push(m[1].trim());
+  return out;
+}
+
+/**
+ * Parse a syllabus from LLM output (or a saved syllabus doc): the first fenced
+ * JSON block that is an array (or `{steps:[…]}`) of `{title, covers, goal}`.
+ * Steps are renumbered by order so `n` is always dense and 1-based. Returns []
+ * on anything malformed — the caller then falls back to un-syllabused teaching.
+ */
+export function parseSyllabus(raw: string): SyllabusStep[] {
+  for (const block of fencedBlocks(raw)) {
+    try {
+      const parsed = JSON.parse(block);
+      const arr = Array.isArray(parsed) ? parsed : Array.isArray(parsed?.steps) ? parsed.steps : null;
+      if (!arr) continue;
+      const out: SyllabusStep[] = [];
+      for (const s of arr) {
+        if (!s || typeof s.title !== 'string' || !s.title.trim()) continue;
+        out.push({
+          n: out.length + 1,
+          title: s.title.trim().slice(0, 120),
+          covers: String(s.covers ?? '').trim().slice(0, 300),
+          goal: String(s.goal ?? '').trim().slice(0, 300),
+        });
+      }
+      if (out.length >= 2) return out.slice(0, 8);
+    } catch { /* try the next fence */ }
+  }
+  return [];
+}
+
+/** The next step to teach = the one whose number matches the next lesson. */
+export function nextStep(prior: PriorLesson[], steps: SyllabusStep[]): SyllabusStep | null {
+  if (steps.length === 0) return null;
+  const n = nextLessonNumber(prior);
+  return steps.find(s => s.n === n) ?? null;
+}
+
+/** Validate + normalize one quiz question; null if unusable. */
+function normalizeQuestion(q: any): QuizQuestion | null {
+  if (!q || typeof q.prompt !== 'string' || !q.prompt.trim()) return null;
+  const prompt = q.prompt.trim().slice(0, 500);
+  const explanation = typeof q.explanation === 'string' ? q.explanation.trim().slice(0, 500) : undefined;
+  if (q.type === 'mcq') {
+    const options = Array.isArray(q.options)
+      ? q.options.map((o: any) => String(o).trim()).filter(Boolean).slice(0, 6)
+      : [];
+    const answerIndex = Number.isInteger(q.answerIndex) ? q.answerIndex : -1;
+    if (options.length < 2 || answerIndex < 0 || answerIndex >= options.length) return null;
+    return { type: 'mcq', prompt, options, answerIndex, explanation };
+  }
+  // Anything not a valid mcq is treated as an open question, IF it has a model answer.
+  const modelAnswer = typeof q.modelAnswer === 'string' ? q.modelAnswer.trim()
+    : typeof q.answer === 'string' ? q.answer.trim() : '';
+  if (!modelAnswer) return null;
+  return { type: 'open', prompt, modelAnswer: modelAnswer.slice(0, 800), explanation };
+}
+
+/**
+ * Parse the quiz JSON block out of a model reply. Fails soft to [] so a lesson
+ * is still delivered when the model omits or mangles the block — the quiz is a
+ * bonus, never a gate on teaching.
+ */
+export function parseQuizBlock(raw: string): QuizQuestion[] {
+  for (const block of fencedBlocks(raw)) {
+    try {
+      const parsed = JSON.parse(block);
+      const arr = Array.isArray(parsed) ? parsed : Array.isArray(parsed?.questions) ? parsed.questions : null;
+      if (!arr) continue;
+      const out = arr.map(normalizeQuestion).filter(Boolean) as QuizQuestion[];
+      if (out.length) return out.slice(0, 6);
+    } catch { /* try the next fence */ }
+  }
+  return [];
+}
+
+export type GradeVerdict = 'correct' | 'partial' | 'incorrect';
+export interface GradeResult { verdict: GradeVerdict; feedback: string }
+
+/** Parse the grader's reply: "VERDICT: correct|partial|incorrect" + a why line. */
+export function parseGrade(raw: string): GradeResult {
+  const v = /verdict:\s*(correct|partial|incorrect)/i.exec(raw || '');
+  const verdict = (v?.[1]?.toLowerCase() as GradeVerdict) || 'partial';
+  const feedback = (raw || '')
+    .replace(/^\s*verdict:.*$/im, '')
+    .replace(/```[\s\S]*?```/g, '')
+    .trim()
+    .slice(0, 600) || 'No feedback returned.';
+  return { verdict, feedback };
 }
 
 /** Pull the mission out of a workspace's rules, if a course was started here. */
@@ -153,8 +271,77 @@ async function draftMission(topic: string, workspaceTitle: string, pageContext?:
   return out.trim().slice(0, 1200);
 }
 
+/**
+ * Concatenated text of the workspace's RESEARCH (captures, reports) — never
+ * lessons/syllabus. A course is built from what we actually gathered, so the
+ * model teaches the material and cites it rather than relying on its own recall.
+ */
+export function researchSourceText(docs: Array<{ title: string; content: string }>, cap = 14000): string {
+  const parts: string[] = [];
+  for (const d of docs) {
+    const type = frontmatterField(d.content, 'type');
+    if (type === 'lesson' || type === 'syllabus') continue;
+    const body = (splitFrontmatter(d.content).body || d.content).trim();
+    if (body.length < 40) continue;
+    parts.push(`# ${d.title}\n\n${body}`);
+    if (parts.join('\n\n').length > cap) break;
+  }
+  return parts.join('\n\n---\n\n').slice(0, cap);
+}
+
+/** The saved course syllabus for this workspace, if one was built. */
+export function findSyllabus(docs: Array<{ title: string; content: string }>): SyllabusStep[] {
+  const doc = docs.find(d => frontmatterField(d.content, 'type') === 'syllabus');
+  return doc ? parseSyllabus(doc.content) : [];
+}
+
+/** Ask the model to sequence the research into an easy-steps course. */
+async function buildSyllabus(mission: string, sourceText: string): Promise<SyllabusStep[]> {
+  const sys =
+    'You design a short, well-sequenced course that teaches someone the material below IN EASY STEPS, ' +
+    'building from fundamentals to the harder ideas. Each step is one finishable lesson.\n\n' +
+    'Return ONLY a fenced ```json block: an array of 3-7 objects {"title","covers","goal"} where "title" ' +
+    'names the step, "covers" lists the concepts it teaches (comma-separated), and "goal" is the one ' +
+    'concrete thing the learner can DO after it. Order matters: earlier steps must not depend on later ' +
+    'ones. No prose outside the JSON.';
+  const user = `MISSION (why they are learning this):\n${mission}\n\nMATERIAL TO TEACH (their own research):\n${sourceText.slice(0, 14000)}`;
+  const raw = await chatWithCustom(sys, [], user).catch(() => '');
+  return parseSyllabus(raw);
+}
+
+/** A short retrieval-practice quiz for a just-written lesson. Fails soft to []. */
+async function generateQuiz(topic: string, lessonTitle: string, lessonBody: string): Promise<QuizQuestion[]> {
+  const sys =
+    'You write a short retrieval-practice quiz for the lesson below: 3-5 questions that make the learner ' +
+    'RECALL, not recognize.\n\nReturn ONLY a fenced ```json block: an array of question objects. Two allowed ' +
+    'shapes:\n' +
+    '- {"type":"mcq","prompt":"…","options":["…","…","…","…"],"answerIndex":0,"explanation":"why"} — the ' +
+    'options MUST be similar in length so the answer cannot be guessed by shape.\n' +
+    '- {"type":"open","prompt":"…","modelAnswer":"the concise correct answer","explanation":"what a good ' +
+    'answer must contain"}\n' +
+    'Mix both shapes. Base every question ONLY on the lesson. No prose outside the JSON.';
+  const user = `TOPIC: ${topic}\nLESSON: ${lessonTitle}\n\n${lessonBody.slice(0, 6000)}`;
+  const raw = await chatWithCustom(sys, [], user).catch(() => '');
+  return parseQuizBlock(raw);
+}
+
+/** Grade a learner's free-text answer against the lesson's reference answer. */
+export async function gradeAnswer(prompt: string, modelAnswer: string, userAnswer: string): Promise<GradeResult> {
+  const sys =
+    "You grade a learner's answer against the reference answer. Be fair: reward correct understanding even " +
+    'when the wording differs; never demand exact phrasing.\n\nReply in EXACTLY this format:\n' +
+    'VERDICT: correct | partial | incorrect\n' +
+    '<one or two sentences: what was right, and the single most important thing to fix or add. Encouraging ' +
+    'and specific; do not restate the whole answer.>';
+  const user = `QUESTION: ${prompt}\n\nREFERENCE ANSWER: ${modelAnswer}\n\nLEARNER'S ANSWER: ${userAnswer}`;
+  const raw = await chatWithCustom(sys, [], user);
+  return parseGrade(raw);
+}
+
 async function writeLesson(
-  mission: string, topic: string, lessonNumber: number, prior: PriorLesson[], pageContext?: { title: string; url: string; markdown: string }
+  mission: string, topic: string, lessonNumber: number, prior: PriorLesson[],
+  pageContext?: { title: string; url: string; markdown: string },
+  step?: SyllabusStep | null, sourceText?: string
 ): Promise<{ title: string; covers: string; body: string }> {
   const history = prior.length
     ? prior.map(l => `- Lesson ${l.number}: ${l.title}${l.covers ? ` — covers ${l.covers}` : ''}`).join('\n')
@@ -178,11 +365,21 @@ async function writeLesson(
     `right here in chat, and finally "## Answers" if the practice had answerable questions. ` +
     `Around 400-700 words — finishable in one sitting.>`;
 
+  // When teaching a syllabus step, the step's goal IS the request; the research
+  // material is the ground truth to teach from (report's "AI amplifies docs").
+  const stepBlock = step
+    ? `THIS STEP OF THE COURSE:\n- Title: ${step.title}\n- Teach: ${step.covers || step.title}\n- By the end they can: ${step.goal || 'apply this step'}\n\n`
+    : '';
+  const materialBlock = sourceText
+    ? `\n\nMATERIAL (teach FROM this — it is the learner's own research; use its specifics, do not rely on your own recall):\n${sourceText.slice(0, 8000)}`
+    : '';
   const user =
     `MISSION (why they are learning this):\n${mission}\n\n` +
+    stepBlock +
     `LESSONS SO FAR:\n${history}\n\n` +
-    `THIS REQUEST: ${topic || '(no specific request — choose the best next lesson)'}` +
-    (pageContext ? `\n\nCURRENT PAGE CONTEXT (the learner asked about this page — write the lesson around it):\nTitle: ${pageContext.title}\nURL: ${pageContext.url}\nContent:\n${pageContext.markdown.slice(0, 4000)}` : '');
+    `THIS REQUEST: ${step ? step.goal || step.title : (topic || '(no specific request — choose the best next lesson)')}` +
+    (pageContext ? `\n\nCURRENT PAGE CONTEXT (the learner asked about this page — write the lesson around it):\nTitle: ${pageContext.title}\nURL: ${pageContext.url}\nContent:\n${pageContext.markdown.slice(0, 4000)}` : '') +
+    materialBlock;
 
   const raw = await chatWithCustom(sys, [], user);
   const parsed = parseLessonResponse(raw);
@@ -226,7 +423,42 @@ export async function handleTeach(request: Record<string, unknown>, pageContext?
   const prior = priorLessons(docs);
   const lessonNumber = nextLessonNumber(prior);
 
-  const { title, covers, body } = await writeLesson(mission, topic, lessonNumber, prior, pageContext || undefined);
+  // Build a course FROM the workspace's research the first time — so /teach
+  // walks the report in easy steps instead of teaching from the model's recall.
+  const sourceText = researchSourceText(docs);
+  let syllabus = findSyllabus(docs);
+  let syllabusJustBuilt: SyllabusStep[] | undefined;
+  if (syllabus.length === 0 && sourceText.length > 400) {
+    const built = await buildSyllabus(mission, sourceText);
+    if (built.length >= 2) {
+      const body = `${SYLLABUS_OPEN}\n\n# Course plan\n\n${built.map(s => `${s.n}. **${s.title}** — ${s.covers || s.goal}`).join('\n')}\n\n\`\`\`json\n${JSON.stringify(built)}\n\`\`\`\n`;
+      const { id } = await saveDocument({
+        title: 'Course plan', url: '', content: buildFrontmatter({ title: 'Course plan', type: 'syllabus', wordCount: built.length }) + body,
+        capturedAt: new Date().toISOString(), favicon: '', wordCount: built.length, syncedToDrive: false,
+      }, []).catch(() => ({ id: '' } as any));
+      if (id) await linkDocumentToProject(projectId, id).catch(() => {});
+      syllabus = built;
+      syllabusJustBuilt = built;
+    }
+  }
+
+  const step = nextStep(prior, syllabus);
+  // Course finished: every step has a lesson. Report done rather than inventing more.
+  if (syllabus.length > 0 && !step) {
+    return {
+      lessonNumber, title: '', docId: '', mission, missionCreated, covers: '', quiz: [],
+      courseComplete: true,
+      body: `You've completed all ${syllabus.length} steps of this course 🎉 Ask me anything you want to go deeper on, or start a new topic with \`/teach\`.`,
+    } satisfies TeachResult as unknown as Record<string, unknown>;
+  }
+
+  const { title, covers, body } = await writeLesson(
+    mission, topic, lessonNumber, prior, pageContext || undefined, step, step ? sourceText : undefined
+  );
+
+  // A retrieval-practice quiz for the chat layer (interactive). The saved lesson
+  // keeps its own readable practice/answers; the quiz is a bonus, never a gate.
+  const quiz = await generateQuiz(topic || step?.title || title, title, body);
 
   const docTitle = `Lesson ${lessonNumber}: ${title}`;
   const wordCount = body.split(/\s+/).filter(Boolean).length;
@@ -248,5 +480,5 @@ export async function handleTeach(request: Record<string, unknown>, pageContext?
   }, []);
   await linkDocumentToProject(projectId, docId);
 
-  return { lessonNumber, title, docId, mission, missionCreated, body, covers } satisfies TeachResult as unknown as Record<string, unknown>;
+  return { lessonNumber, title, docId, mission, missionCreated, body, covers, quiz, syllabus: syllabusJustBuilt } satisfies TeachResult as unknown as Record<string, unknown>;
 }

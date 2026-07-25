@@ -1929,17 +1929,25 @@ loadChatHistory(activeChatId).then(() => {
       const res = await msg('TEACH', { projectId: activeProjectId, chatId: currentChatId, topic, includePageContext });
       setGenerating(prev => ({ ...prev, [currentChatId]: false }));
       let body: string;
-      if (res.success !== false && res.title) {
+      let quiz: any;
+      if (res.courseComplete) {
+        body = String(res.body || 'Course complete.');
+      } else if (res.success !== false && res.title) {
         const header = res.missionCreated
           ? `**Course started.** I've set this workspace's mission to:\n\n> ${res.mission}\n\nIf that's not quite your goal, say so — every lesson is built from it.\n\n---\n\n`
           : '';
-        body = `${header}## Lesson ${res.lessonNumber}: ${res.title}\n\n${res.body}\n\n---\n*Lesson also saved to Lore — use \`/teach\` again when you're ready for the next one.*`;
+        // First time a syllabus is built from the research: show the course plan.
+        const plan = Array.isArray(res.syllabus) && res.syllabus.length
+          ? `**Course plan** (built from this workspace's research — \`/teach\` again to advance):\n\n${res.syllabus.map((s: any) => `${s.n}. **${s.title}** — ${s.covers || s.goal}`).join('\n')}\n\n---\n\n`
+          : '';
+        body = `${header}${plan}## Lesson ${res.lessonNumber}: ${res.title}\n\n${res.body}\n\n---\n*Lesson also saved to Lore — use \`/teach\` again when you're ready for the next one.*`;
+        quiz = Array.isArray(res.quiz) && res.quiz.length ? res.quiz : undefined;
       } else {
         body = `Couldn't build the lesson: ${res.error || 'unknown error'}`;
       }
       setMessages(prev => ({
         ...prev,
-        [currentChatId]: [...(prev[currentChatId] || []), { id: uid(), role: 'assistant', text: body }]
+        [currentChatId]: [...(prev[currentChatId] || []), { id: uid(), role: 'assistant', text: body, ...(quiz ? { quiz } : {}) }]
       }));
       if (res.success !== false && res.title) loadDocuments(activeProjectId);
       return;
@@ -2631,6 +2639,10 @@ loadChatHistory(activeChatId).then(() => {
               onRegenerate={regenerateAnswer}
               onEditAndRerun={editAndRerun}
               onCancelAndEdit={cancelAndEdit}
+              onGradeAnswer={async (q, answer) => {
+                const r = await msg('GRADE_ANSWER', { prompt: q.prompt, modelAnswer: q.modelAnswer || '', userAnswer: answer });
+                return { verdict: (r?.verdict as any) || 'partial', feedback: String(r?.feedback || '') };
+              }}
               onOpenSettings={() => setView('settings')}
               onRetryLast={retryLast}
               onUnqueue={unqueueMessage}

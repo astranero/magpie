@@ -4,7 +4,7 @@ import ReactMarkdown, { defaultUrlTransform } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import remarkMath from 'remark-math';
 import rehypeKatex from 'rehype-katex';
-import { LocalDocument, ChatMessage, ResearchPlan, ResolvedCitation } from '../types';
+import { LocalDocument, ChatMessage, ResearchPlan, ResolvedCitation, QuizQuestion } from '../types';
 import { Send, StopCircle, Sparkles, ChevronDown, ChevronUp, Loader2, Microscope, Search, BookOpen, User, Copy, Check, Paperclip, FileText, RotateCcw, Pencil, Globe, Newspaper, Plug, PenLine, ShieldCheck, CheckCircle2, XCircle, Image as ImageIcon } from 'lucide-react';
 import { parseResearchActivity, PHASE_ORDER, PHASE_LABEL, type ResearchPhase } from '../../lib/research-activity';
 import { diagnoseError } from '../../lib/error-recovery';
@@ -49,6 +49,8 @@ interface ChatViewProps {
   /** Undo a send that's mid-generation: cancel, remove it from chat, and put
    *  its text + image back in the input. */
   onCancelAndEdit?: (userMsgId: string) => void;
+  /** Grade a learner's open quiz answer (LLM). Resolves to a verdict + feedback. */
+  onGradeAnswer?: (q: QuizQuestion, answer: string) => Promise<{ verdict: 'correct' | 'partial' | 'incorrect'; feedback: string }>;
   /** Open the settings/config view — the recovery action for auth/config errors. */
   onOpenSettings?: () => void;
   /** Re-run the last question — the recovery action for a transient failure. */
@@ -1131,6 +1133,136 @@ const AddContextButton: React.FC<{
 };
 
 // ─────────────────────────────────────────────
+// Quiz card — interactive retrieval practice under a /teach lesson
+// ─────────────────────────────────────────────
+// MCQ is checked locally (instant, free); an open question sends the typed
+// answer to the LLM to grade, with a "Reveal answer" escape hatch. State is
+// local to the card (the quiz is never persisted, like the research plan).
+const QuizCard: React.FC<{
+  quiz: QuizQuestion[];
+  onGrade: (q: QuizQuestion, answer: string) => Promise<{ verdict: 'correct' | 'partial' | 'incorrect'; feedback: string }>;
+}> = ({ quiz, onGrade }) => {
+  const [state, setState] = useState<QuizQuestion[]>(() => quiz.map(q => ({ ...q })));
+  const patch = (i: number, upd: Partial<QuizQuestion>) =>
+    setState(prev => prev.map((q, j) => (j === i ? { ...q, ...upd } : q)));
+
+  const answered = state.filter(q => q.uiVerdict).length;
+
+  const submitMcq = (i: number) => {
+    const q = state[i];
+    const chosen = Number(q.uiAnswer);
+    if (!Number.isInteger(chosen)) return;
+    patch(i, { uiVerdict: chosen === q.answerIndex ? 'correct' : 'incorrect' });
+  };
+  const submitOpen = async (i: number) => {
+    const q = state[i];
+    if (!q.uiAnswer?.trim() || q.uiGrading) return;
+    patch(i, { uiGrading: true });
+    try {
+      const g = await onGrade(q, q.uiAnswer.trim());
+      patch(i, { uiGrading: false, uiVerdict: g.verdict, uiFeedback: g.feedback });
+    } catch {
+      patch(i, { uiGrading: false, uiFeedback: "Couldn't grade that — check your model connection.", uiVerdict: 'partial' });
+    }
+  };
+
+  const verdictTone = (v?: string) =>
+    v === 'correct' ? 'text-emerald-600 dark:text-emerald-400'
+      : v === 'incorrect' ? 'text-red-600 dark:text-red-400'
+        : 'text-amber-600 dark:text-amber-400';
+
+  return (
+    <div className="mt-3 rounded-xl border border-border bg-card/60 p-3">
+      <div className="flex items-center justify-between mb-2">
+        <span className="text-[11px] font-semibold text-foreground">Check yourself</span>
+        <span className="text-[10px] text-muted-foreground">{answered}/{state.length} answered</span>
+      </div>
+      <ol className="space-y-3">
+        {state.map((q, i) => {
+          const done = !!q.uiVerdict;
+          return (
+            <li key={i} className="text-sm">
+              <div className="font-medium text-foreground mb-1.5">{i + 1}. {q.prompt}</div>
+
+              {q.type === 'mcq' ? (
+                <div className="space-y-1">
+                  {(q.options || []).map((opt, oi) => {
+                    const chosen = Number(q.uiAnswer) === oi;
+                    const isCorrect = q.answerIndex === oi;
+                    const showState = done && (chosen || isCorrect);
+                    return (
+                      <label
+                        key={oi}
+                        className={`flex items-start gap-2 rounded-lg border px-2.5 py-1.5 cursor-pointer transition-colors ${
+                          showState && isCorrect ? 'border-emerald-500/50 bg-emerald-500/10'
+                            : showState && chosen ? 'border-red-500/50 bg-red-500/10'
+                              : chosen ? 'border-primary/50 bg-primary/5' : 'border-border hover:bg-accent/50'
+                        } ${done ? 'cursor-default' : ''}`}
+                      >
+                        <input
+                          type="radio" name={`q${i}`} className="mt-0.5" disabled={done}
+                          checked={chosen} onChange={() => patch(i, { uiAnswer: String(oi) })}
+                        />
+                        <span className="text-[13px] text-foreground flex-1">{opt}</span>
+                        {showState && isCorrect && <CheckCircle2 size={14} className="text-emerald-600 dark:text-emerald-400 shrink-0" />}
+                        {showState && chosen && !isCorrect && <XCircle size={14} className="text-red-600 dark:text-red-400 shrink-0" />}
+                      </label>
+                    );
+                  })}
+                  {!done ? (
+                    <button
+                      type="button" onClick={() => submitMcq(i)} disabled={q.uiAnswer == null}
+                      className="mt-1 text-[11px] font-medium px-2.5 py-1 rounded-full bg-primary text-primary-foreground disabled:opacity-40 disabled:cursor-not-allowed"
+                    >Check</button>
+                  ) : q.explanation ? (
+                    <p className="mt-1 text-[12px] text-muted-foreground">{q.explanation}</p>
+                  ) : null}
+                </div>
+              ) : (
+                <div className="space-y-1.5">
+                  <textarea
+                    value={q.uiAnswer || ''} disabled={done || q.uiGrading}
+                    onChange={e => patch(i, { uiAnswer: e.target.value })}
+                    placeholder="Type your answer…" rows={2}
+                    className="w-full rounded-lg border border-input bg-background px-2.5 py-1.5 text-[13px] focus:outline-none focus:ring-2 focus:ring-primary/20 disabled:opacity-70"
+                  />
+                  {!done && (
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button" onClick={() => submitOpen(i)} disabled={!q.uiAnswer?.trim() || q.uiGrading}
+                        className="text-[11px] font-medium px-2.5 py-1 rounded-full bg-primary text-primary-foreground disabled:opacity-40 disabled:cursor-not-allowed inline-flex items-center gap-1"
+                      >
+                        {q.uiGrading && <Loader2 size={11} className="animate-spin" />}
+                        {q.uiGrading ? 'Checking…' : 'Check answer'}
+                      </button>
+                      <button
+                        type="button" onClick={() => patch(i, { uiVerdict: 'revealed' })}
+                        className="text-[11px] font-medium px-2.5 py-1 rounded-full border border-border text-muted-foreground hover:text-foreground hover:bg-accent"
+                      >Reveal answer</button>
+                    </div>
+                  )}
+                  {done && (
+                    <div className="text-[12px]">
+                      <span className={`font-semibold capitalize ${verdictTone(q.uiVerdict)}`}>
+                        {q.uiVerdict === 'revealed' ? 'Answer' : q.uiVerdict}
+                      </span>
+                      {q.uiFeedback && <span className="text-muted-foreground"> — {q.uiFeedback}</span>}
+                      {(q.uiVerdict === 'revealed' || q.uiVerdict === 'incorrect') && q.modelAnswer && (
+                        <p className="mt-1 text-muted-foreground"><span className="font-medium text-foreground">Model answer:</span> {q.modelAnswer}</p>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
+            </li>
+          );
+        })}
+      </ol>
+    </div>
+  );
+};
+
+// ─────────────────────────────────────────────
 // Chat view
 // ─────────────────────────────────────────────
 
@@ -1152,6 +1284,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
   onRegenerate,
   onEditAndRerun,
   onCancelAndEdit,
+  onGradeAnswer,
   onOpenSettings,
   onRetryLast,
   onUnqueue,
@@ -1545,6 +1678,11 @@ export const ChatView: React.FC<ChatViewProps> = ({
                     </button>
                   ))}
                 </div>
+              )}
+
+              {/* Interactive quiz under a /teach lesson. */}
+              {m.role === 'assistant' && m.quiz && m.quiz.length > 0 && onGradeAnswer && (
+                <QuizCard quiz={m.quiz} onGrade={onGradeAnswer} />
               )}
             </div>
 

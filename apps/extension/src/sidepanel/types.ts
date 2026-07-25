@@ -55,6 +55,28 @@ export interface ChatMessage {
   /** Images on this turn as data URLs: the user's attachment or images the
    *  model generated. Rendered as thumbnails under the bubble. */
   images?: string[];
+  /** Interactive quiz for a /teach lesson — rendered as a card under the text.
+   *  UI state only (per-question answers/verdicts live here). */
+  quiz?: QuizQuestion[];
+}
+
+/**
+ * One interactive quiz question under a lesson. `mcq` is checked locally; `open`
+ * is graded by the LLM. The `ui*` fields are per-question local state, mutated
+ * as the learner answers — the quiz is never persisted, like ResearchPlan.
+ */
+export interface QuizQuestion {
+  type: 'mcq' | 'open';
+  prompt: string;
+  options?: string[];
+  answerIndex?: number;
+  modelAnswer?: string;
+  explanation?: string;
+  /** Local state ↓ */
+  uiAnswer?: string;                 // open: typed text / mcq: selected option index as string
+  uiVerdict?: 'correct' | 'partial' | 'incorrect' | 'revealed';
+  uiFeedback?: string;               // grader's one-liner (open)
+  uiGrading?: boolean;               // open: awaiting the grade call
 }
 
 /**

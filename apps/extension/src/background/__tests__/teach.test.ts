@@ -116,3 +116,82 @@ ${'Explanatory prose. '.repeat(20)}`;
     expect(parseLessonResponse('TITLE: x\nCOVERS: y\nLESSON:\ntoo short')).toBeNull();
   });
 });
+
+import { parseSyllabus, nextStep, parseQuizBlock, parseGrade } from '../teach';
+
+describe('parseSyllabus', () => {
+  const block = (steps: any) => `Here is your course:\n\`\`\`json\n${JSON.stringify(steps)}\n\`\`\``;
+
+  it('parses an ordered array of steps and renumbers densely', () => {
+    const steps = parseSyllabus(block([
+      { title: 'Foundations', covers: 'a, b', goal: 'define X' },
+      { title: 'Applying it', covers: 'c', goal: 'use X' },
+      { title: 'Edge cases', covers: 'd', goal: 'handle Y' },
+    ]));
+    expect(steps.map(s => s.n)).toEqual([1, 2, 3]);
+    expect(steps[0].title).toBe('Foundations');
+    expect(steps[1].goal).toBe('use X');
+  });
+
+  it('accepts a {steps:[…]} wrapper', () => {
+    expect(parseSyllabus(block({ steps: [{ title: 'A' }, { title: 'B' }] })).length).toBe(2);
+  });
+
+  it('returns [] for a missing or malformed block', () => {
+    expect(parseSyllabus('no json here')).toEqual([]);
+    expect(parseSyllabus('```json\nnot json\n```')).toEqual([]);
+    expect(parseSyllabus(block([{ title: 'only one' }]))).toEqual([]); // needs >=2
+  });
+});
+
+describe('nextStep', () => {
+  const steps = parseSyllabus('```json\n' + JSON.stringify([{ title: 'A' }, { title: 'B' }, { title: 'C' }]) + '\n```');
+  it('returns step matching the next lesson number', () => {
+    expect(nextStep([], steps)?.title).toBe('A');
+    expect(nextStep([{ number: 1, title: 'A', covers: '' }], steps)?.title).toBe('B');
+  });
+  it('returns null once the course is done', () => {
+    const prior = [1, 2, 3].map(n => ({ number: n, title: '', covers: '' }));
+    expect(nextStep(prior, steps)).toBe(null);
+  });
+});
+
+describe('parseQuizBlock', () => {
+  const wrap = (qs: any) => `Lesson text.\n\`\`\`json\n${JSON.stringify(qs)}\n\`\`\``;
+
+  it('parses mixed mcq + open questions', () => {
+    const qs = parseQuizBlock(wrap([
+      { type: 'mcq', prompt: 'Pick', options: ['a', 'b', 'c'], answerIndex: 1, explanation: 'because' },
+      { type: 'open', prompt: 'Explain', modelAnswer: 'the answer' },
+    ]));
+    expect(qs.length).toBe(2);
+    expect(qs[0]).toMatchObject({ type: 'mcq', answerIndex: 1 });
+    expect(qs[1]).toMatchObject({ type: 'open', modelAnswer: 'the answer' });
+  });
+
+  it('drops an mcq without >=2 options or a valid answerIndex', () => {
+    expect(parseQuizBlock(wrap([{ type: 'mcq', prompt: 'x', options: ['only'], answerIndex: 0 }]))).toEqual([]);
+    expect(parseQuizBlock(wrap([{ type: 'mcq', prompt: 'x', options: ['a', 'b'], answerIndex: 9 }]))).toEqual([]);
+  });
+
+  it('drops an open question with no model answer, and accepts {answer} as an alias', () => {
+    expect(parseQuizBlock(wrap([{ type: 'open', prompt: 'x' }]))).toEqual([]);
+    expect(parseQuizBlock(wrap([{ type: 'open', prompt: 'x', answer: 'y' }]))[0].modelAnswer).toBe('y');
+  });
+
+  it('fails soft to [] on a missing or malformed block', () => {
+    expect(parseQuizBlock('no quiz')).toEqual([]);
+    expect(parseQuizBlock('```json\n{bad\n```')).toEqual([]);
+  });
+});
+
+describe('parseGrade', () => {
+  it('reads the verdict and strips the verdict line from feedback', () => {
+    const g = parseGrade('VERDICT: correct\nNice — you nailed the key idea.');
+    expect(g.verdict).toBe('correct');
+    expect(g.feedback).toBe('Nice — you nailed the key idea.');
+  });
+  it('defaults to partial when no verdict is found', () => {
+    expect(parseGrade('some rambling with no verdict').verdict).toBe('partial');
+  });
+});
