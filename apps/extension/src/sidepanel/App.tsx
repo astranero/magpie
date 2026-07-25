@@ -1540,6 +1540,18 @@ loadChatHistory(activeChatId).then(() => {
   };
 
   const login = async () => {
+    // `identity` is an OPTIONAL permission (not granted on install, and reset by
+    // a full reinstall). Request it from this user gesture BEFORE the worker
+    // touches chrome.identity — otherwise the worker sees chrome.identity ===
+    // undefined and rejects with "Google sign-in is not available." The side
+    // panel is an extension page, so permissions.request works within the click.
+    try {
+      const has = await chrome.permissions.contains({ permissions: ['identity'] });
+      if (!has) {
+        const granted = await chrome.permissions.request({ permissions: ['identity'] });
+        if (!granted) { showToast('error', 'Google sign-in needs the “identity” permission — it wasn’t granted.'); return; }
+      }
+    } catch { /* older Chrome without runtime optional perms: fall through and let the worker try */ }
     const res = await msg('GET_OAUTH_TOKEN_INTERACTIVE');
     if (res.success && res.token) {
       setAuthed(true);

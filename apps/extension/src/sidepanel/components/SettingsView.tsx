@@ -222,7 +222,7 @@ function CopilotSSOSection({ enterpriseGitHubUrl, setEnterpriseGitHubUrl, saveSe
         <div className="flex items-center gap-2">
           <span className="w-2 h-2 rounded-full bg-green-500" />
           <span className="text-xs font-medium text-foreground">Connected to GitHub Copilot</span>
-          {enterpriseGitHubUrl && <span className="text-[10px] text-muted-foreground">({new URL(enterpriseGitHubUrl).hostname})</span>}
+          {enterpriseGitHubUrl && (() => { let h = ''; try { h = new URL(enterpriseGitHubUrl).hostname; } catch { h = enterpriseGitHubUrl; } return <span className="text-[10px] text-muted-foreground">({h})</span>; })()}
         </div>
 
         {/* Copilot model picker — clearly labeled so it isn't mistaken for the
