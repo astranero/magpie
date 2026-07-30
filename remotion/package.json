@@ -1,0 +1,22 @@
+{
+  "name": "magpie-demo",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Remotion motion-graphics demo for the Magpie research-assistant extension.",
+  "scripts": {
+    "dev": "remotion studio",
+    "render": "remotion render MagpieDemo out/magpie-demo.mp4",
+    "still": "remotion still MagpieDemo out/poster.png --frame=60",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@remotion/cli": "4.0.499",
+    "react": "18.3.1",
+    "react-dom": "18.3.1",
+    "remotion": "4.0.499"
+  },
+  "devDependencies": {
+    "@types/react": "18.3.3",
+    "typescript": "5.5.4"
+  }
+}
