@@ -643,7 +643,7 @@ export async function scrapeUrl(url: string, signal?: AbortSignal): Promise<Pars
   //    and entirely when the user disabled the proxy in Settings)
   if (!/news\.google\.com/i.test(url) && await isJinaEnabled()) {
     try {
-      const md = await fetchText(`https://r.jina.ai/${url}`, 20000, signal);
+      const md = await fetchText(`https://r.jina.ai/${url}`, 8000, signal);
       const cleaned = md.trim();
       if (cleaned.length > 200) {
         // Jina prepends "Title: ...\nURL Source: ...\nMarkdown Content:\n"
@@ -892,7 +892,8 @@ async function indexResearchDoc(
     wordCount,
     syncedToDrive: false,
     enabled: true,
-    bibtex
+    bibtex,
+    isResearchSource: true
   }, rawChunks));
 
   if (isDuplicate) {

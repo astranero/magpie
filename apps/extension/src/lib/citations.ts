@@ -138,20 +138,25 @@ export function buildCitationContext(
   maxChars: number = 30000
 ): string {
   let context = '';
-  let currentDocId = '';
-
+  const groups: Map<string, Chunk[]> = new Map();
   for (const chunk of chunks) {
-    if (context.length > maxChars) break;
-
-    // Add document header when switching to a new document
-    if (chunk.docId !== currentDocId) {
-      const title = docTitles.get(chunk.docId) || 'Unknown';
-      context += `\n[Source: ${title}]\n`;
-      currentDocId = chunk.docId;
+    let list = groups.get(chunk.docId);
+    if (!list) {
+      list = [];
+      groups.set(chunk.docId, list);
     }
+    list.push(chunk);
+  }
 
-    const compressed = compressText(chunk.text);
-    context += `<c>${chunk.anchorId}</c> ${compressed}\n\n`;
+  for (const [docId, docChunks] of groups.entries()) {
+    if (context.length > maxChars) break;
+    const title = docTitles.get(docId) || 'Unknown';
+    context += `\n[Source Document: ${title}]\n`;
+    for (const chunk of docChunks) {
+      if (context.length > maxChars) break;
+      const compressed = compressText(chunk.text);
+      context += `[${chunk.anchorId}] ${compressed}\n\n`;
+    }
   }
 
   return context;
@@ -161,16 +166,15 @@ export function buildCitationContext(
  * System prompt that enforces source-grounded citation.
  */
 export const CITATION_SYSTEM_PROMPT =
-  `You are a private AI Research Assistant. Answer ONLY using the provided source documents below.\n` +
-  `RULES:\n` +
-  `1. For every factual claim, cite the source by placing the citation anchor in brackets immediately after the claim.\n` +
-  `2. Citation format: [anchor_id] — e.g., "Neural networks learn via backpropagation [d3ab01.s1.p2]."\n` +
-  `   ONE anchor per bracket. For multiple sources write [d3ab01.s1.p2][d3ab01.s4.p1] — NEVER comma-separate inside one bracket like [a, b].\n` +
-  `3. Each <c>anchor</c> tag marks a citable paragraph. Use the anchor ID inside the tag.\n` +
-  `4. If the information is NOT in the provided sources, reply with ONLY the exact token NO_SOURCES_IN_WORKSPACE and nothing else (no explanation, no apology). This lets the app escalate to a web search in ANY language.\n` +
+  `You are a strict, factual AI Research Assistant. Answer ONLY using the excerpts provided in the --- SOURCES --- section below.\n` +
+  `STRICT GROUNDING RULES:\n` +
+  `1. DO NOT use external knowledge. Do NOT mention products, tools, or concepts that are not explicitly written in the provided sources below.\n` +
+  `2. Summarize what the provided source documents ACTUALLY discuss (e.g. if the sources discuss Kimi K3, Godot, Claude Fable 5, or Blender, summarize those).\n` +
+  `3. For every factual claim, cite its source anchor in brackets immediately after the claim e.g. "Kimi K3 handles 3D Blender modeling [d3ab01.s1.p2]". Copy the exact [anchor_id] string from the start of the source paragraph into brackets.\n` +
+  `   ONE anchor per bracket. For multiple sources write [d3ab01.s1.p2][d3ab01.s4.p1] — NEVER write simple single digits like "art 1" or comma-separate inside one bracket.\n` +
+  `4. If the provided sources do NOT contain any information about the user's question, reply with ONLY the exact token NO_SOURCES_IN_WORKSPACE and nothing else.\n` +
   `5. Never fabricate citations or use anchor IDs that don't exist in the provided context.\n` +
-  `6. Cite a passage ONLY when it directly supports the claim it is attached to. If a provided passage is off-topic or only shares a keyword with the question, ignore it completely — do not cite it and do not work it into the answer.\n` +
-  `7. Use structured formatting with headings and bullet points when appropriate.\n`;
+  `6. Use structured formatting with clear headings and bullet points.\n`;
 
 /**
  * Strip citation markers from text for plain display.

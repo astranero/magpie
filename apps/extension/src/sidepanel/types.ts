@@ -65,6 +65,8 @@ export interface ChatMessage {
   deckTitle?: string;
   /** Command buttons under a message, e.g. "Continue → next lesson" (/teach). */
   actions?: { label: string; command: string }[];
+  /** Workspace documents used for grounding this turn. */
+  sources?: Array<{ docId: string; docTitle: string; url?: string }>;
 }
 
 /** One flashcard: a recall cue and its answer. */

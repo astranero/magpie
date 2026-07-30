@@ -487,7 +487,7 @@ setInterval(() => {
   if (inFlight > 0) return; // busy — closing now would kill in-flight work
   if (Date.now() - lastActivity >= IDLE_CLOSE_MS) {
     try { crumb('offscreen', 'idle close — freeing renderer', {}); } catch { /* ignore */ }
-    try { window.close(); } catch { /* ignore */ }
+    try { chrome.runtime.sendMessage({ action: 'CLOSE_OFFSCREEN_DOCUMENT' }).catch(() => {}); } catch { /* ignore */ }
   }
 }, 30_000);
 

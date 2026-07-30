@@ -9,7 +9,7 @@ import {
   getUnsyncedDocuments, getChatHistory, clearChatHistory, truncateChatFrom, saveChatMessage,
   linkDocumentToProject, getProject, listProjects, createProject,
   getChunkByAnchor, deleteOrphanDocuments, resetSyncStatus, getKnownDriveFileIds, getSyncStats,
-  saveDocImages, getDocImage, listDocImages
+  saveDocImages, getDocImage, listDocImages, isPrimaryCapture
 } from '../lib/db';
 import { chunkDocument, makeDocShortId } from '../lib/chunker';
 import { selectHistory } from '../lib/chat-memory';
@@ -21,15 +21,15 @@ import { get as idbGet } from 'idb-keyval';
 import { runDeepResearch, generateSubQuestions, scrapeUrl, isJunkUrl, gatherWebSnippets } from './deep-researcher';
 import { isAllowedFetchUrl, redactObservedUrl, fetchJson } from '../lib/fetch-guard';
 import { harvestReferences } from '../lib/reference-harvest';
-import { needsIntentResolution, formatHistoryForIntent, parseRepoUrl, selectTreePaths, formatTreeBlock, isChitchat, isRefusalAnswer, isStructureQuestion, isImplementationQuestion, findRepoUrlInText, isPageMetaQuestion, questionKeywords, mentionsPageDeixis, overlapsPage, isLocationDependent, isGeneralKnowledgeQuestion, timezoneToPlace, isAssistantMetaQuestion, RepoRef } from '../lib/query-intent';
+import { needsIntentResolution, formatHistoryForIntent, parseRepoUrl, selectTreePaths, formatTreeBlock, isChitchat, isRefusalAnswer, isStructureQuestion, isImplementationQuestion, findRepoUrlInText, isPageMetaQuestion, questionKeywords, mentionsPageDeixis, isLocationDependent, isGeneralKnowledgeQuestion, timezoneToPlace, isAssistantMetaQuestion, detectQueryIntent, stripConversationalPreamble, RepoRef } from '../lib/query-intent';
 import { sanitizeCliOutput, isCliErrorOutput, composeCliPrompt } from '../lib/cli-output';
 import { stripSourcesFooter, stripAnySourcesFooter } from '../lib/format';
 import { selectSemantic, fetchWithinBudget, parseRouterSelection, TOTAL_CTX_BUDGET, RerankFn, LinkRef, Selection } from '../lib/context-retrieval';
 import { getResearchLimits } from '../lib/research-limits';
 import { DEFAULT_COMPANION_MCP_URL, CLI_TEMPLATE_AUTO } from '../lib/settings';
 import { looksLikeBuildLog, looksLikeDebugPage, extractLogHighlights } from '../lib/log-highlights';
-import { addChunksToVectorStore, searchSessionChunks, resetSessionIndex, resetAllSessionIndexes, isConfidentMatch } from '../lib/vector-store';
-import { replaceChunksForDoc, embedChunksForDoc, resumePendingEmbeds } from '../lib/db';
+import { addChunksToVectorStore, searchSessionChunks, resetSessionIndex, resetAllSessionIndexes, isConfidentMatch, invalidateDocInVectorStore } from '../lib/vector-store';
+import { replaceChunksForDoc, embedChunksForDoc, resumePendingEmbeds, updateDocumentContent } from '../lib/db';
 import { pdfUrlToBody, pdfOpfsToBody, pdfBase64ToBody, ensureOffscreen as ensureOffscreenDoc, recreateOffscreen } from '../lib/pdf-parser';
 import { setEnsureOffscreen, setRecreateOffscreen, sendToOffscreen } from '../lib/offscreen-client';
 import { crumb, dumpCrashLog, installCrashHandlers, installCrumbReceiver } from '../lib/crash-log';
@@ -86,6 +86,10 @@ setTimeout(() => {
   resumePendingEmbeds()
     .then(n => { if (n) console.log(`[embed] resumed ${n} pending capture(s)`); })
     .catch(() => { /* best-effort; docs stay lexically searchable regardless */ });
+
+  synthesizePendingYouTubeDocs()
+    .then(n => { if (n) console.log(`[YOUTUBE SYNTHESIS] Synthesized ${n} YouTube doc(s)`); })
+    .catch(() => {});
 }, 8000);
 
 // Start periodic offscreen health check (every 60s)
@@ -417,6 +421,12 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         }
       }
     });
+    return true;
+  }
+
+  if (request.action === 'CLOSE_OFFSCREEN_DOCUMENT') {
+    (chrome.offscreen as any)?.closeDocument?.().catch(() => {});
+    sendResponse?.({ success: true });
     return true;
   }
 
@@ -1005,6 +1015,11 @@ async function captureTab(tab: chrome.tabs.Tab, explicitProjectId: string | null
   // Auto sync to Drive in the background
   handleSyncToDrive().catch(() => {});
 
+  // For YouTube captures, synthesize transcript into structured research notes in background
+  if (scraped.kind === 'youtube') {
+    void synthesizeYouTubeCapture(docId, linkTarget, scraped.title, scraped.author || '', scraped.url, scraped.markdown);
+  }
+
   return { docId, title: scraped.title, chunkCount: chunks.length, linkedTo: linkTarget };
 }
 
@@ -1495,7 +1510,7 @@ async function isChatWebFallbackEnabled(): Promise<boolean> {
 }
 
 /** Web-data agent (/data) — OFF by default (powerful + network-heavy, opt-in). */
-async function isWebDataAgentEnabled(): Promise<boolean> {
+export async function isWebDataAgentEnabled(): Promise<boolean> {
   try {
     const s = await chrome.storage.local.get(['webDataAgentEnabled']);
     return s.webDataAgentEnabled === true;
@@ -1559,8 +1574,7 @@ async function isQuestionAboutPage(q: string, page: PageContext, signal: AbortSi
   // travel page must not hijack them). Belt-and-braces: buildChatRequest
   // intercepts the raw prompt, this catches intent-rewritten forms.
   if (isAssistantMetaQuestion(q)) return false;
-  if (mentionsPageDeixis(q)) return true;
-  if (overlapsPage(q, `${page.title} ${page.markdown.slice(0, 4000)}`)) return true;
+  if (mentionsPageDeixis(q) || isPageMetaQuestion(q)) return true;
 
   const key = `${page.url}::${q.toLowerCase().replace(/\s+/g, ' ').trim().slice(0, 160)}`;
   const cached = pageRelevanceCache.get(key);
@@ -1568,9 +1582,15 @@ async function isQuestionAboutPage(q: string, page: PageContext, signal: AbortSi
 
   try {
     const sys =
-      `You are an intent router. The user is viewing a web page titled "${page.title}". ` +
-      `Decide whether their question is about THIS page (its subject, site, or content) or is an unrelated general question ` +
-      `— weather, math, world facts, another website, personal chit-chat. Reply with exactly one word: PAGE or OTHER.`;
+      `You are an intent router. The user has a web page open titled "${page.title}". ` +
+      `Decide: is the user's question asking about THIS SPECIFIC PAGE or its content? ` +
+      `\nRules:\n` +
+      `- PAGE = the user wants info FROM or ABOUT this specific page (e.g. "summarize this", "what does it say about X", "how much does it cost")\n` +
+      `- OTHER = the user is asking a general/broad question that happens to share a topic with the page. ` +
+      `Sharing a keyword is NOT enough — "what do youtubers say about AI" on an AI page is OTHER because it asks about youtubers in general, not this page.\n` +
+      `- Broad research requests ("create a report", "find out everything", "what are the best tools") are ALWAYS OTHER.\n` +
+      `- Questions about other people's opinions, external reviews, or third-party content are ALWAYS OTHER.\n` +
+      `Reply with exactly one word: PAGE or OTHER.`;
     const ans = await withTimeout(
       chatWithCustom(sys, [], q, signal, await classificationModel()),
       INTENT_LLM_TIMEOUT_MS,
@@ -1644,7 +1664,7 @@ const RESPONSE_STYLE =
  */
 export type SourceMode = 'auto' | 'sources' | 'web' | 'general';
 
-async function buildChatRequest(chatId: string, projectId: string, prompt: string, signal: AbortSignal, pageContext?: PageContext | null, onStatus?: (s: string) => void, sourceMode: SourceMode = 'auto'): Promise<{ systemPrompt: string; formattedHistory: Array<{ role: string; content: string }>; grounded: boolean; place?: string; branch: ChatBranch }> {
+async function buildChatRequest(chatId: string, projectId: string, prompt: string, signal: AbortSignal, pageContext?: PageContext | null, onStatus?: (s: string) => void, sourceMode: SourceMode = 'auto'): Promise<{ systemPrompt: string; formattedHistory: Array<{ role: string; content: string }>; grounded: boolean; place?: string; branch: ChatBranch; groundingSources?: Array<{ docId: string; docTitle: string }> }> {
   // BATCH: workspace docs, project rules, locale, history, web-fallback — five
   // separate async sources that previously ran as five sequential awaits. Run
   // them concurrently where possible. History must land first (formattedHistory
@@ -1656,7 +1676,7 @@ async function buildChatRequest(chatId: string, projectId: string, prompt: strin
     getChatHistory(chatId),
     isChatWebFallbackEnabled(),
   ]);
-  const enabledDocs = allDocs.filter((d: any) => d.enabled !== false);
+  const enabledDocs = allDocs.filter((d: any) => d.enabled !== false && isPrimaryCapture(d));
   const docIds = enabledDocs.map((d: any) => d.id);
   const docTitles = new Map(enabledDocs.map((d: any) => [d.id, d.title]));
   console.log(`[RAG] Project ${projectId}: ${enabledDocs.length} enabled docs, ${docIds.length} IDs`);
@@ -1704,15 +1724,6 @@ async function buildChatRequest(chatId: string, projectId: string, prompt: strin
   const dataMatch = /^\/data\s+([\s\S]+)/i.exec(prompt.trim());
   if (dataMatch) {
     const q = dataMatch[1].trim();
-    if (!(await isWebDataAgentEnabled())) {
-      return {
-        systemPrompt: 'The user tried to use the /data web-data agent, which is currently disabled. Reply with EXACTLY this and nothing else: "The Web-data agent is off. Turn it on in Settings → Research to let `/data` discover and fetch public API data."',
-        formattedHistory: [],
-        grounded: false,
-        branch: 'general' as ChatBranch,
-        place: undefined,
-      };
-    }
     try {
     let observed: string[] = [];
     let discovered: string[] = [];
@@ -1741,10 +1752,22 @@ async function buildChatRequest(chatId: string, projectId: string, prompt: strin
     // no fault of the site. Rather than dead-end on "reload the page", do a
     // direct keyless web search so /data still returns real, cited data.
     if (blocks.length === 0) {
-      onStatus?.('Searching the web…');
-      const web = await gatherWebSnippets(q, { signal }).catch(() => null);
+      onStatus?.('Searching target site APIs & web data…');
+      let searchQ = q.replace(/^\/data\s+/i, '').trim();
+      const hasNettimoto = /\b(nettimoto|nettimopo)\b/i.test(searchQ);
+      const hasTori = /\btori(?:\.fi)?\b/i.test(searchQ);
+      if ((hasNettimoto || hasTori) && !/\bsite:\S+/i.test(searchQ)) {
+        if (hasNettimoto && hasTori) {
+          searchQ = `(site:nettimoto.com OR site:tori.fi) ${searchQ}`;
+        } else if (hasNettimoto) {
+          searchQ = `site:nettimoto.com ${searchQ}`;
+        } else if (hasTori) {
+          searchQ = `site:tori.fi ${searchQ}`;
+        }
+      }
+      const web = await gatherWebSnippets(searchQ, { signal }).catch(() => null);
       if (web?.context) {
-        blocks = [`\n\n--- WEB RESULTS ---\n${web.context}\n--- END WEB RESULTS ---`];
+        blocks = [`\n\n--- WEB DATA & LISTINGS ---\n${web.context}\n--- END WEB DATA ---`];
         sources = web.sources || [];
       }
     }
@@ -1920,13 +1943,27 @@ async function buildChatRequest(chatId: string, projectId: string, prompt: strin
     if (mem.recalled > 0) console.log(`[MEMORY] recalled ${mem.recalled} older exchange(s), ${mem.elided} messages elided`);
   }
 
+  // ── Intent classification (cheap heuristic, runs BEFORE the LLM page check) ──
+  // Matches only STRUCTURAL signals — directives like "create a report" (task),
+  // "search the web" (source), "my sources" (source), "this page" (target).
+  // Topic keywords (youtubers, game dev, reviews) are NOT matched — they say
+  // WHAT is asked, not WHERE to look. For ambiguous queries, the improved LLM
+  // page classifier and normal confidence routing handle it.
+  const detectedIntent = sourceMode === 'auto'
+    ? detectQueryIntent(effectiveQuery, { hasPage: !!pageContext, hasWorkspaceDocs: docIds.length > 0 })
+    : null;
+
   // Intent router: an attached page only wins when the question is actually
   // about it. "is it cold today?" with a docs page open must NOT be forced
   // through the page path (→ "the page doesn't cover weather"); route it to the
   // normal workspace/web/general pipeline instead.
+  // A clear web_search or workspace_docs intent from detectQueryIntent skips
+  // the LLM classification entirely — no point asking "is this about the page?"
+  // when the keywords already prove it isn't.
   //
-  const usePage = !!pageContext && await isQuestionAboutPage(effectiveQuery, pageContext, signal);
-  if (pageContext && !usePage) console.log('[ROUTER] question is not about the open page — routing to workspace/web/general');
+  const skipPageClassification = detectedIntent === 'web_search' || detectedIntent === 'workspace_docs';
+  const usePage = !skipPageClassification && sourceMode !== 'sources' && !!pageContext && await isQuestionAboutPage(effectiveQuery, pageContext, signal);
+  if (pageContext && !usePage) console.log(`[ROUTER] question is not about the open page — routing to workspace/web/general (detectedIntent=${detectedIntent})`);
   if (!usePage) onStatus?.('Searching your sources…');
 
   // ── Multi-Query Adaptive RAG ──
@@ -1939,8 +1976,9 @@ async function buildChatRequest(chatId: string, projectId: string, prompt: strin
   // Chit-chat already returned above.
   let relevantChunks: any[] = [];
   if (!usePage && docIds.length > 0) {
-    relevantChunks = await searchSessionChunks(projectId, effectiveQuery, 40, docIds, embedOpts());
-    console.log(`[RAG] Initial search for "${effectiveQuery.slice(0, 50)}..." returned ${relevantChunks.length} chunks`);
+    const ragQuery = stripConversationalPreamble(effectiveQuery);
+    relevantChunks = await searchSessionChunks(projectId, ragQuery, 40, docIds, embedOpts());
+    console.log(`[RAG] Initial search for "${ragQuery.slice(0, 50)}..." returned ${relevantChunks.length} chunks`);
 
     // Adaptive multi-query: only expand when initial results are sparse
     if (relevantChunks.length < 5 && effectiveQuery.length > 10) {
@@ -1959,28 +1997,30 @@ async function buildChatRequest(chatId: string, projectId: string, prompt: strin
               }
             }
           }
-          console.log(`[RAG] After multi-query expansion: ${relevantChunks.length} total chunks`);
         }
       } catch (e) {
         console.warn('[RAG] Query expansion failed, using initial results:', e);
       }
     }
 
-    // Fallback: search using document titles if still too few
-    if (relevantChunks.length < 3 && enabledDocs.length > 0) {
-      const existingIds = new Set(relevantChunks.map(c => c.id));
-      for (const doc of enabledDocs.slice(0, 3)) {
-        const titleChunks = await searchSessionChunks(projectId, doc.title, 5, docIds, embedOpts());
-        for (const chunk of titleChunks) {
-          if (!existingIds.has(chunk.id)) {
-            relevantChunks.push(chunk);
-            existingIds.add(chunk.id);
+    // Ensure all RELEVANT workspace documents in the project are represented
+    if (docIds.length > 1) {
+      const coveredDocIds = new Set(relevantChunks.map((c: any) => c.docId));
+      const missingDocIds = docIds.filter(id => !coveredDocIds.has(id));
+      if (missingDocIds.length > 0) {
+        console.log(`[RAG] Checking ${missingDocIds.length} remaining workspace docs for query relevance:`, missingDocIds);
+        const existingIds = new Set(relevantChunks.map((c: any) => c.id || c.anchorId));
+        for (const missingId of missingDocIds) {
+          const extra = await searchSessionChunks(projectId, ragQuery, 15, [missingId], embedOpts()).catch(() => []);
+          for (const chunk of extra) {
+            const cid = (chunk as any).id || chunk.anchorId;
+            if (!existingIds.has(cid)) {
+              relevantChunks.push(chunk);
+              existingIds.add(cid);
+            }
           }
         }
-        if (relevantChunks.length >= 15) break;
-      }
-      if (relevantChunks.length > 3) {
-        console.log(`[RAG] Title-based fallback found ${relevantChunks.length} total chunks`);
+        console.log(`[RAG] Total relevant chunks across workspace docs: ${relevantChunks.length}`);
       }
     }
   }
@@ -2016,22 +2056,80 @@ async function buildChatRequest(chatId: string, projectId: string, prompt: strin
   // gate — they asked for their own material, so a weak match beats silently
   // answering from somewhere else. 'web' refuses to ground, so the web branch
   // below takes the turn.
-  const groundOnWorkspace = sourceMode === 'web' ? false
-    : sourceMode === 'sources' ? relevantChunks.length > 0
+  // detectedIntent was already computed above (before usePage) so the page
+  // classifier doesn't hijack clear web-search / workspace-docs queries.
+
+  const groundOnWorkspace = sourceMode === 'web' || detectedIntent === 'web_search' ? false
+    : sourceMode === 'sources' ? true
     : (!usePage &&
        !isLocationDependent(effectiveQuery) &&
-       isConfidentMatch(relevantChunks as Array<{ rerankScore?: number }>));
+       (detectedIntent === 'workspace_docs' || isConfidentMatch(relevantChunks as Array<{ rerankScore?: number }>)));
+  let groundingSources: Array<{ docId: string; docTitle: string }> = [];
   if (groundOnWorkspace) {
     grounded = true;
-    // Build citation-anchored context (generous — favor fuller grounding over
-    // "I couldn't find it" cutoffs; only fires for library-source questions).
-    const context = buildCitationContext(relevantChunks, docTitles, 32000);
+    // Broad fallback search when initial retrieval returned nothing — applies
+    // both to explicit Sources mode AND when the intent heuristic routed here.
+    if (relevantChunks.length === 0 && docIds.length > 0) {
+      relevantChunks = await searchSessionChunks(projectId, '', 20, docIds, embedOpts()).catch(() => []);
+    }
+    if (relevantChunks.length > 0) {
+      const usedDocIds = Array.from(new Set(relevantChunks.map((c: any) => c.docId)));
+      groundingSources = usedDocIds.map(id => ({
+        docId: id,
+        docTitle: docTitles.get(id) || 'Workspace Document',
+      })).filter(s => s.docId);
 
-    // We add strict anti-hallucination prompts to the system prompt
-    systemPrompt = CITATION_SYSTEM_PROMPT +
-      `\nCRITICAL ANTI-HALLUCINATION RULE: If the answer cannot be found in the provided sources, reply with ONLY NO_SOURCES_IN_WORKSPACE. DO NOT rely on external knowledge.\n` +
-      RESPONSE_STYLE +
-      `\n--- SOURCES ---\n${context}\n--- END SOURCES ---`;
+      // Build citation-anchored context (generous — favor fuller grounding over
+      // "I couldn't find it" cutoffs; only fires for library-source questions).
+      const context = buildCitationContext(relevantChunks, docTitles, 32000);
+
+      systemPrompt =
+        `CRITICAL GROUNDING DIRECTIVE: You MUST answer using ONLY the text excerpts inside the --- SOURCES --- section below.\n` +
+        `DO NOT use your pre-trained memory to invent tools (such as Scenario, Inworld, or Promethean AI) unless those exact tool names appear in the --- SOURCES --- text below.\n` +
+        `Summarize ONLY what the provided --- SOURCES --- text actually discusses (e.g. Kimi K3, Claude Fable 5, Godot, Blender, Game Ideas).\n\n` +
+        CITATION_SYSTEM_PROMPT +
+        `\n--- SOURCES ---\n${context}\n--- END SOURCES ---\n\n` +
+        `REMINDER: Answer ONLY from the --- SOURCES --- above and cite every fact using its bracketed anchor ID e.g. [d550e84.s0.p1].`;
+    } else if (sourceMode === 'sources') {
+      // Explicit Sources mode: the user demanded workspace-only answers.
+      // Tell them plainly that no docs matched.
+      systemPrompt = `You are a helpful research assistant. The user set the source filter to "Sources" (workspace documents only), but no documents were found in their research workspace for this project. ` +
+        `Tell the user clearly in 1-2 friendly sentences that no workspace documents were found in this project for their query, and suggest adding/importing documents or running /research to gather sources on this topic. Do NOT answer from web search or general knowledge.` +
+        RESPONSE_STYLE;
+    } else {
+      // Auto mode routed here via intent heuristic but workspace was empty —
+      // degrade gracefully to web search / general knowledge instead of blocking.
+      console.log('[ROUTER] workspace_docs intent but no workspace matches — falling through to web/general');
+      grounded = false;
+      // Inline web search fallback (mirrors the else branch below)
+      let web: { context: string; sources: Array<{ title: string; url: string }> } = { context: '', sources: [] };
+      if (chatWebFallback) {
+        onStatus?.('Searching the web…');
+        try {
+          const webQuery = place && isLocationDependent(effectiveQuery) ? `${effectiveQuery} ${place}` : effectiveQuery;
+          web = await gatherWebSnippets(webQuery, { signal, onStatus });
+        } catch (e) {
+          if (signal.aborted) throw e;
+          console.warn('[chat web] fallback after empty workspace failed', e);
+        }
+      }
+      if (web.context) {
+        console.log(`[RAG] workspace empty — answered from ${web.sources.length} live web source(s)`);
+        webSources = web.sources;
+        systemPrompt =
+          `You are a friendly, knowledgeable assistant. The excerpts below were pulled from a live web search just now — treat them as your facts. ` +
+          `Answer the way a sharp, helpful friend would: lead with the direct answer in natural, plain language, then just enough detail — no more. ` +
+          `Do NOT clutter the prose with [W#] tags or "per [W2]" — the sources are already shown as links below; reference one inline only if it genuinely adds clarity. ` +
+          `Use only what the excerpts support; if they don't actually answer the question, say so plainly rather than padding. ` +
+          `Do NOT end your reply with a "Sources:" line or a list of URLs — the app shows sources separately.` +
+          RESPONSE_STYLE +
+          `\n--- WEB RESULTS ---\n${web.context}\n--- END WEB RESULTS ---`;
+      } else {
+        systemPrompt = `You are a helpful AI assistant. No relevant documents were found in the user's research workspace for this question. ` +
+          `Answer using your general knowledge. DO NOT generate fake bracket citations, anchor IDs, or simulated reference tags (e.g. [yt-corp-...], [source-1]) because no source documents were used for this answer.` +
+          RESPONSE_STYLE;
+      }
+    }
   } else if (usePage) {
     // The user attached the current page (📄 ON) AND the router judged the
     // question to be about it — answer from it (appended below), NOT from a live
@@ -2103,7 +2201,7 @@ async function buildChatRequest(chatId: string, projectId: string, prompt: strin
       // requested here — small models skipped the instruction, leaving users
       // unable to tell a sourced answer from a from-memory one.
       systemPrompt = `You are a helpful AI assistant. No relevant documents were found in the user's research workspace for this question. ` +
-        `Answer using your general knowledge. Do not fabricate citations.` +
+        `Answer using your general knowledge. DO NOT generate fake bracket citations, anchor IDs, or simulated reference tags (e.g. [yt-corp-...], [source-1]) because no source documents were used for this answer.` +
         RESPONSE_STYLE;
     }
   }
@@ -2286,7 +2384,7 @@ chatWebFallback
 
   onStatus?.('Writing the answer…');
   const branch: ChatBranch = grounded ? 'citation' : usePage ? 'page' : webSources.length ? 'web' : 'general';
-  return { systemPrompt: LANGUAGE_DIRECTIVE + rulesBlock + localeBlock + historyLedger + systemPrompt, formattedHistory, grounded, place, branch };
+  return { systemPrompt: LANGUAGE_DIRECTIVE + rulesBlock + localeBlock + historyLedger + systemPrompt, formattedHistory, grounded, place, branch, groundingSources };
 }
 
 // ─────────────────────────────────────────────
@@ -3245,7 +3343,7 @@ chrome.runtime.onConnect.addListener((port) => {
       // bug). Short-circuit: a vision system prompt, recent history for
       // follow-ups, and grounded:false so the web-escalation net below never
       // fires. The image itself rides in userContent to the vision model.
-      let built: { systemPrompt: string; formattedHistory: Array<{ role: string; content: string }>; grounded: boolean; place?: string; branch: ChatBranch };
+      let built: { systemPrompt: string; formattedHistory: Array<{ role: string; content: string }>; grounded: boolean; place?: string; branch: ChatBranch; groundingSources?: Array<{ docId: string; docTitle: string }> };
       if (imageDataUrl) {
         safePost({ type: 'STATUS', text: 'Looking at your image…' });
         const recent = (await getChatHistory(chatId).catch(() => []))
@@ -3268,6 +3366,9 @@ chrome.runtime.onConnect.addListener((port) => {
       }
       const { formattedHistory, grounded, place, branch } = built;
       let systemPrompt = built.systemPrompt;
+      if (built.groundingSources?.length) {
+        safePost({ type: 'SOURCES', sources: built.groundingSources });
+      }
 
       if (systemPromptOverride) {
         systemPrompt = systemPromptOverride + '\n\n' + systemPrompt;
@@ -3470,6 +3571,7 @@ chrome.runtime.onConnect.addListener((port) => {
           timestamp: new Date().toISOString(),
           provider: usedModel || 'custom',
           ...(generatedImages.length ? { images: generatedImages } : {}),
+          ...(built.groundingSources?.length ? { sources: built.groundingSources } : {}),
         });
       }
       safePost({ type: 'DONE', fullText: full, images: generatedImages });
@@ -4045,12 +4147,19 @@ async function executeResearch({ projectId, chatId, topic, effectiveTopic, mode,
   // lost a race with a worker death (fresh heartbeat → skip resume).
   const runStartedAt = Date.now();
 
-  // Unconditional progress heartbeat — nudges lastProgressAt every 30s so the
-  // watchdog never fires on a healthy-but-slow run. The phase-specific heartbeats
-  // (withKeepAlive wrappers) are the primary defense; this is the safety net.
-  const keepAliveInterval = setInterval(() => {
-    lastProgressAt = Date.now();
-  }, 30_000);
+  // NOTE: there used to be an "unconditional progress heartbeat" here that reset
+  // lastProgressAt every 30s. It DEFEATED the stall watchdog outright — the age
+  // of lastProgressAt could never exceed 30s, so `now - lastProgressAt >
+  // RESEARCH_STALL_MS` (8 min) was unreachable and a wedged run spun for the full
+  // 60-minute wall budget instead of failing loudly at 8. Its comment cited
+  // "withKeepAlive wrappers" as the real defense, but no such function exists.
+  //
+  // The watchdog now runs off REAL progress only. That is safe because a stuck
+  // run is unambiguous here: every intermediate LLM call self-aborts at
+  // LLM_CALL_TIMEOUT_MS (4 min), streams die at LLM_STREAM_IDLE_MS (3 min), and
+  // the pipeline emits progress from ~100 call sites — so 8 minutes of total
+  // silence means wedged, not slow. Worker liveness is a separate concern and is
+  // handled by getPlatformInfo() in the heartbeat below.
 
   const heartbeatInterval = setInterval(() => {
     chrome.runtime.getPlatformInfo?.().catch(() => {});
@@ -4135,7 +4244,6 @@ async function executeResearch({ projectId, chatId, topic, effectiveTopic, mode,
     await clearResearchJob().catch(() => {});
     return { success: false, error: message };
   } finally {
-    clearInterval(keepAliveInterval);
     clearInterval(heartbeatInterval);
     researchControllers.delete(projectId);
     // Evict the in-memory Orama index for this session; persisted documents
@@ -4899,4 +5007,128 @@ async function handleListDriveFiles(request?: Record<string, unknown>): Promise<
   // user select files that will be silently skipped.
   const known = await getKnownDriveFileIds();
   return { files: files.map(f => ({ ...f, alreadyImported: known.has(f.id) })) };
+}
+
+// ─────────────────────────────────────────────
+// YouTube Transcript Synthesis
+// ─────────────────────────────────────────────
+
+/**
+ * Synthesize a raw YouTube transcript into a rich, structured Markdown document
+ * with executive summary, key tools/concepts, costs/mistakes, and actionable advice.
+ * Updates IndexedDB content, re-chunks, re-embeds, and updates the vector store.
+ */
+async function synthesizeYouTubeCapture(
+  docId: string,
+  linkTarget: string | null,
+  title: string,
+  author: string,
+  url: string,
+  rawMarkdown: string
+): Promise<void> {
+  try {
+    console.log(`[YOUTUBE SYNTHESIS] Starting background synthesis for "${title}" (${docId})...`);
+
+    // Truncate raw transcript for LLM context window if exceptionally long (>60k chars)
+    const transcriptForLlm = rawMarkdown.length > 60000 
+      ? rawMarkdown.slice(0, 60000) + '\n\n[... transcript truncated for synthesis ...]'
+      : rawMarkdown;
+
+    const sysPrompt =
+      `You are an expert technical researcher and note-taker. ` +
+      `Synthesize the following YouTube video transcript into a comprehensive, highly structured research document in Markdown.\n\n` +
+      `Required Sections:\n` +
+      `## Executive Summary\n` +
+      `2-3 dense paragraphs summarizing the video's main thesis, key arguments, and primary conclusions.\n\n` +
+      `## Key Topics & Deep Dives\n` +
+      `Detailed sub-sections (###) covering specific concepts, tools mentioned (with pros/cons/pricing/costs if noted), workflows, processes, and technical details.\n\n` +
+      `## Mistakes, Pitfalls & Costs\n` +
+      `Specific mistakes, warnings, costs, traps, or negative experiences discussed in the video.\n\n` +
+      `## Actionable Takeaways & Recommendations\n` +
+      `Bullet points of concrete advice, best practices, and next steps for someone working in this domain.\n\n` +
+      `RULES:\n` +
+      `- Be dense with facts, names, tools, costs, and specific details mentioned in the video.\n` +
+      `- Do NOT use vague generalities ("the speaker discusses various tools"). Name the exact tools and exact points!\n` +
+      `- Write in clear Markdown with headings, bold terms, and structured lists.`;
+
+    const userPrompt = `Title: ${title}\nChannel: ${author || 'Unknown'}\nURL: ${url}\n\n${transcriptForLlm}`;
+
+    const synthesis = await chatWithCustom(sysPrompt, [], userPrompt);
+    if (!synthesis || synthesis.trim().length < 50) {
+      console.warn(`[YOUTUBE SYNTHESIS] Empty synthesis result for ${docId}, keeping raw capture.`);
+      return;
+    }
+
+    const now = new Date().toISOString();
+    const updatedBody =
+      `# ${title}\n\n` +
+      (author ? `**Channel:** ${author}\n\n` : '') +
+      `## Overview & Synthesized Notes\n\n` +
+      synthesis.trim() +
+      `\n\n---\n\n## Full Raw Transcript\n\n` +
+      rawMarkdown;
+
+    const newWordCount = updatedBody.split(/\s+/).filter(Boolean).length;
+
+    const fullMarkdown = buildFrontmatter({
+      title,
+      type: 'youtube',
+      source: url,
+      author,
+      captured: now,
+      wordCount: newWordCount,
+      extra: { synthesized: 1 }
+    }) + updatedBody;
+
+    const docShortId = makeDocShortId(docId);
+    const newChunks = chunkDocument({
+      docShortId,
+      content: fullMarkdown
+    });
+
+    const savedChunks = await updateDocumentContent(docId, fullMarkdown, newChunks);
+
+    if (linkTarget) {
+      invalidateDocInVectorStore(linkTarget, docId);
+      await addChunksToVectorStore(linkTarget, savedChunks);
+    }
+    invalidateDocInVectorStore('__library__', docId);
+    await addChunksToVectorStore('__library__', savedChunks);
+
+    console.log(`[YOUTUBE SYNTHESIS] Successfully synthesized and re-indexed "${title}" (${docId})! Chunks: ${savedChunks.length}`);
+  } catch (e) {
+    console.warn(`[YOUTUBE SYNTHESIS] Background synthesis failed for ${docId}:`, e);
+  }
+}
+
+/**
+ * Scan for un-synthesized YouTube documents in IndexedDB and synthesize them in the background.
+ */
+async function synthesizePendingYouTubeDocs(): Promise<number> {
+  try {
+    const docs = await listDocuments();
+    const youtubeDocs = docs.filter(d => 
+      (d.url?.includes('youtube.com/watch') || d.title?.toLowerCase().includes('youtube') || (d.content && d.content.includes('## Transcript'))) &&
+      !d.content?.includes('## Overview & Synthesized Notes')
+    );
+
+    if (youtubeDocs.length === 0) return 0;
+    console.log(`[YOUTUBE SYNTHESIS] Found ${youtubeDocs.length} un-synthesized YouTube doc(s). Processing...`);
+
+    let count = 0;
+    for (const doc of youtubeDocs) {
+      const projects = await listProjects().catch(() => []);
+      const linkTarget = projects.find(p => p.documentIds?.includes(doc.id))?.id || null;
+
+      const authorMatch = /\*\*Channel:\*\*\s*(.+)/.exec(doc.content || '') || /author:\s*(.+)/.exec(doc.content || '');
+      const author = authorMatch ? authorMatch[1].trim() : '';
+
+      await synthesizeYouTubeCapture(doc.id, linkTarget, doc.title, author, doc.url, doc.content);
+      count++;
+    }
+    return count;
+  } catch (e) {
+    console.warn('[YOUTUBE SYNTHESIS] Error checking pending YouTube docs:', e);
+    return 0;
+  }
 }

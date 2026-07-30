@@ -1,5 +1,5 @@
 import { create, insert, search as oramaSearch } from '@orama/orama';
-import { Chunk, listDocuments, getChunksForDocs } from './db';
+import { Chunk, listDocuments, getChunksForDocs, isPrimaryCapture } from './db';
 import { sendToOffscreen } from './offscreen-client';
 import { crumb } from './crash-log';
 import { meaningfulTokens } from './unicode-text';
@@ -11,7 +11,7 @@ import { meaningfulTokens } from './unicode-text';
 // mid-gather (the confirmed crash: dies at ~source 30-40 regardless of URL). The
 // chunks remain in IndexedDB (keyword/vector searchable after a capped
 // rehydrate), so this only bounds the heap, matching the rehydrate cap below.
-const MAX_SESSION_CHUNKS = 2000;
+const MAX_SESSION_CHUNKS = 3000;
 const sessionChunkCount = new Map<string, number>();
 
 // ─────────────────────────────────────────────
@@ -24,6 +24,12 @@ const sessionChunkCount = new Map<string, number>();
 const sessionVectorDBs = new Map<string, any>();
 // Tracks which docIds are already indexed per session, to avoid duplicate inserts.
 const indexedDocIds = new Map<string, Set<string>>();
+
+export function invalidateProjectVectorStore(sessionId: string): void {
+  indexedDocIds.delete(sessionId);
+  sessionVectorDBs.delete(sessionId);
+  sessionChunkCount.delete(sessionId);
+}
 
 async function initSessionDB(sessionId: string) {
   const db = await create({
@@ -66,6 +72,13 @@ function getIndexedSet(sessionId: string): Set<string> {
   return set;
 }
 
+export function invalidateDocInVectorStore(sessionId: string, docId: string): void {
+  const set = indexedDocIds.get(sessionId);
+  if (set) {
+    set.delete(docId);
+  }
+}
+
 async function insertChunks(db: any, chunks: Chunk[]) {
   let n = 0;
   for (const chunk of chunks) {
@@ -92,7 +105,7 @@ async function insertChunks(db: any, chunks: Chunk[]) {
 // Prevent concurrent rehydration (chat question + research both calling this)
 const rehydrating = new Map<string, Promise<void>>();
 
-export async function ensureProjectIndexed(projectId: string, maxChunks = 2000, priorityDocIds?: string[]): Promise<void> {
+export async function ensureProjectIndexed(projectId: string, maxChunks = 3000, priorityDocIds?: string[]): Promise<void> {
   // If already rehydrating this session, wait for it to finish
   const existing = rehydrating.get(projectId);
   if (existing) return existing;
@@ -110,30 +123,54 @@ async function _ensureProjectIndexedInner(projectId: string, maxChunks: number, 
   const db = await getSessionDB(projectId);
   const indexed = getIndexedSet(projectId);
 
-  const docs = await listDocuments(projectId);
+  const allDocs = await listDocuments(projectId);
+  const docs = allDocs.filter(d => isPrimaryCapture(d));
   const missing = docs.filter(d => !indexed.has(d.id)).map(d => d.id);
   if (missing.length === 0) return;
 
-  let chunks = await getChunksForDocs(missing);
+  const rawChunks = await getChunksForDocs(missing);
 
-  // Insert the caller's priority docs FIRST. Without this, the cap fills in
-  // document (chronological) order, so a later research stage's freshly-scraped
-  // docs get capped out and its retrieval returns nothing → "No brief generated".
-  // Ordering priority chunks to the front guarantees they fit under the cap.
-  if (priorityDocIds?.length) {
-    const prio = new Set(priorityDocIds);
-    chunks = [...chunks.filter(c => prio.has(c.docId)), ...chunks.filter(c => !prio.has(c.docId))];
+  // Group chunks by docId so we can interleave them round-robin across documents
+  const chunksByDoc = new Map<string, Chunk[]>();
+  for (const c of rawChunks) {
+    let list = chunksByDoc.get(c.docId);
+    if (!list) {
+      list = [];
+      chunksByDoc.set(c.docId, list);
+    }
+    list.push(c);
   }
 
-  // Index ALL chunks (not just one per doc), capped at maxChunks
+  const docLists = Array.from(chunksByDoc.values());
+  if (priorityDocIds?.length) {
+    const prioSet = new Set(priorityDocIds);
+    docLists.sort((a, b) => {
+      const aPrio = a.length > 0 && prioSet.has(a[0].docId) ? 1 : 0;
+      const bPrio = b.length > 0 && prioSet.has(b[0].docId) ? 1 : 0;
+      return bPrio - aPrio;
+    });
+  }
+
+  let maxLen = 0;
+  for (const l of docLists) {
+    if (l.length > maxLen) maxLen = l.length;
+  }
+
+  const orderedChunks: Chunk[] = [];
+  for (let i = 0; i < maxLen; i++) {
+    for (const l of docLists) {
+      if (i < l.length) {
+        orderedChunks.push(l[i]);
+      }
+    }
+  }
+
+  // Index ALL chunks (interleaved), capped at maxChunks
   const cur = sessionChunkCount.get(projectId) ?? 0;
-  const toInsert = chunks.slice(0, Math.max(0, maxChunks - cur));
+  const toInsert = orderedChunks.slice(0, Math.max(0, maxChunks - cur));
   await insertChunks(db, toInsert);
   sessionChunkCount.set(projectId, cur + toInsert.length);
-  // Mark only the docs we actually inserted chunks for as indexed. Docs whose
-  // chunks were cut by the cap stay "missing" so a later call (with them as
-  // priority, or after a reset) can still index them — the old code marked ALL
-  // missing docs indexed even when capped, permanently starving them.
+
   const insertedDocs = new Set(toInsert.map(c => c.docId));
   missing.forEach(docId => { if (insertedDocs.has(docId)) indexed.add(docId); });
 }
@@ -242,6 +279,42 @@ export async function searchSessionChunks(
           }
         }
       }
+    }
+  }
+
+  // ── Strategy 3: Un-indexed Document Search (for large workspace libraries >2000 chunks) ──
+  if (candidateChunks.length < limit) {
+    try {
+      const allDocs = await listDocuments(sessionId);
+      const indexed = getIndexedSet(sessionId);
+      const unindexedDocs = allDocs.filter(d => isPrimaryCapture(d) && !indexed.has(d.id));
+      if (unindexedDocs.length > 0) {
+        const queryWords = meaningfulTokens(query).map(w => w.toLowerCase()).filter(w => w.length > 2);
+        const matchingDocIds = unindexedDocs.filter(d => {
+          const text = `${d.title || ''} ${(d as any).summary || ''} ${d.url || ''}`.toLowerCase();
+          return queryWords.some(w => text.includes(w));
+        }).map(d => d.id).slice(0, 15);
+
+        if (matchingDocIds.length > 0) {
+          const freshChunks = await getChunksForDocs(matchingDocIds);
+          if (freshChunks.length > 0) {
+            await insertChunks(db, freshChunks.slice(0, 500));
+            matchingDocIds.forEach(id => indexed.add(id));
+
+            const newHits = await runSearch(db, query, queryVector, retrieveLimit, 2);
+            const existingIds = new Set(candidateChunks.map(c => (c as any).id || c.anchorId));
+            for (const chunk of newHits) {
+              const cid = (chunk as any).id || chunk.anchorId;
+              if (!existingIds.has(cid)) {
+                candidateChunks.push(chunk);
+                existingIds.add(cid);
+              }
+            }
+          }
+        }
+      }
+    } catch (e) {
+      console.warn('Unindexed document fallback search failed:', e);
     }
   }
 
