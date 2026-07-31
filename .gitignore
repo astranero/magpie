@@ -34,3 +34,31 @@ yarn-error.log*
 # Opencode (local session/cache state only — skills are tracked)
 .opencode/*
 !.opencode/skill/
+# ── Quarantine ──
+# `.trash/` holds files removed from the project but kept locally until you are
+# sure they are not needed. Never committed.
+.trash/
+
+# ── Never commit ──
+# Extension signing keys and packed builds. A .pem here is a private key: anyone
+# who has it can sign a package Chrome accepts as an authentic update.
+*.pem
+*.crx
+*.p12
+*.key
+
+# Build output
+dist/
+build/
+*.tsbuildinfo
+
+# Local env / secrets
+.env
+.env.*
+!.env.example
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
+*.swp
+*~
