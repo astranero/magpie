@@ -12,6 +12,7 @@ import {
   saveDocImages, getDocImage, listDocImages, isPrimaryCapture
 } from '../lib/db';
 import { chunkDocument, makeDocShortId } from '../lib/chunker';
+import { PROJECT_FOLDERS, folderForDocument, frontmatterType } from '../lib/vault-layout';
 import { selectHistory } from '../lib/chat-memory';
 import { shouldSuggestFollowUps, parseFollowUps, FOLLOW_UP_PROMPT } from '../lib/follow-ups';
 import type { EmbeddedImage } from '../lib/pdf-parser';
@@ -4663,7 +4664,24 @@ async function handleSyncToDrive(request?: Record<string, unknown>): Promise<Rec
             subId = await ensureSubfolder(token, magpieFolderId, sanitizeSegment(projectName));
             subfolderCache.set(doc.projectId, subId);
           }
-          targetFolderId = subId;
+          // This Drive folder is an Obsidian vault, and its projects have a
+          // layout: captures/, research/, specs/, decisions/. Everything used to
+          // land flat in the project root, beside those folders rather than in
+          // them. Cached per project+folder, so this costs one extra Drive call
+          // per folder actually used, not one per document.
+          const leaf = folderForDocument({
+            url: doc.url,
+            title: doc.title,
+            isResearchSource: doc.isResearchSource,
+            frontmatterType: frontmatterType(doc.content || ''),
+          });
+          const leafKey = `${doc.projectId}/${leaf}`;
+          let leafId = subfolderCache.get(leafKey);
+          if (!leafId) {
+            leafId = await ensureSubfolder(token, subId, leaf);
+            subfolderCache.set(leafKey, leafId);
+          }
+          targetFolderId = leafId;
         }
       }
 
@@ -4978,6 +4996,12 @@ async function handleEnsureProjectSubfolder(request?: Record<string, unknown>): 
     const token = await getToken(false);
     const rootId = await ensureFolder(token);
     const subId = await ensureSubfolder(token, rootId, sanitizeSegment(project.title));
+    // Lay the project out the way every project in this vault is laid out, so
+    // the folders exist before anything needs them and the project is
+    // recognisable to the Obsidian side even while empty.
+    for (const name of PROJECT_FOLDERS) {
+      await ensureSubfolder(token, subId, name).catch(() => {});
+    }
     return { ok: true, subId };
   } catch {
     // Not signed in / transient Drive error — the 5-min auto-sync will handle it.
