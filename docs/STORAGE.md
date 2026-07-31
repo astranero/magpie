@@ -77,7 +77,14 @@ Magpie provides two main synchronization mechanisms for matching your local rese
 ### 1. Google Drive Sync (Remote)
 * **Auth & Scopes:** Uses Google OAuth2 (interactive sign-in). The `drive.file` scope means Magpie can only view and edit files/folders it created itself; `userinfo.email` + `userinfo.profile` are also granted, used only to display the connected account. See `docs/SECURITY.md` for the full egress inventory.
 * **Obsidian Formatting:** Syncs research documents as `.md` files with Obsidian-compatible YAML frontmatter to a configured sync folder (`driveFolderName`, default: `Magpie`).
-* **Layout — one subfolder per workspace:** documents are stored as `Magpie/<workspace>/<doc>.md`, never as loose files in the root. Routing keys off the document's own `projectId` (stamped by `linkDocumentToProject`), and a workspace's subfolder is created eagerly the moment the workspace is made (`ENSURE_PROJECT_SUBFOLDER`), so it appears before the first document syncs.
+* **Layout — the vault's own project structure:** documents are stored as `Magpie/<workspace>/<folder>/<doc>.md`, never as loose files in the root. Routing keys off the document's own `projectId` (stamped by `linkDocumentToProject`), and a workspace's folders are created eagerly the moment the workspace is made (`ENSURE_PROJECT_SUBFOLDER`), so they appear before the first document syncs.
+* **Which folder a document lands in:** the sync target is an Obsidian vault whose projects all use the same five folders — `_schemas/`, `captures/`, `decisions/`, `research/`, `specs/`. `src/lib/vault-layout.ts` decides, in priority order:
+  1. **Frontmatter `type:`** when the writer declared one — `web-capture`, `pdf`, `selection`, `image`, `local-import` → `captures/`; `research-sources`, `syllabus`, `flashcards` → `research/`.
+  2. **`isResearchSource`** → `captures/`. A raw scrape kept for citation links came from the web, so it is captured material rather than one of Magpie's reports.
+  3. **The source URL** — a real `http(s)` URL means the document came from elsewhere (`captures/`); no URL means Magpie wrote it (`research/`).
+  4. **The title**, for documents saved before frontmatter carried a type: `SPEC …` → `specs/`, `ADR …` / `Decision: …` → `decisions/`.
+
+  Folder ids are cached per workspace + folder, so this costs one extra Drive call per folder actually used, not one per document. Writing everything flat into the workspace root — the previous behaviour — put captures and reports *beside* the folders they belonged in, leaving those folders empty.
 * **Automatic Background Sync:** Runs silently in the background:
   * When capturing a web page (`captureTab`).
   * When importing local files (Markdown, PDF, Images).

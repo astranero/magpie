@@ -87,6 +87,15 @@ export interface StoredDocument {
    *  backfilled in the background. Cleared once embeddings are written. A killed
    *  service worker leaves this set, so resumePendingEmbeds() can finish it. */
   pendingEmbed?: boolean;
+  /** True if this document is a raw scraped web page saved during deep research
+   *  for link citations only (not a user capture or synthesized .md file). */
+  isResearchSource?: boolean;
+}
+
+export function isPrimaryCapture(doc: StoredDocument): boolean {
+  // Explicit temporary research scrapes from /research have isResearchSource === true — exclude only those
+  if (doc.isResearchSource === true) return false;
+  return true;
 }
 
 export interface Chunk {

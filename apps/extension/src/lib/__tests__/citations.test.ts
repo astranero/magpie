@@ -83,41 +83,41 @@ describe('stripCitations — extended', () => {
 // ─── buildCitationContext ─────────────────────────────────────────────────────
 
 describe('buildCitationContext', () => {
-  it('renders a [Source:] header and <c> anchor tag for a single chunk', () => {
+  it('renders a [Source Document:] header and [anchorId] tag for a single chunk', () => {
     const chunks = [makeChunk({ docId: 'd1', anchorId: 'd1.s0.p0', text: 'Hello world.' })];
     const titles = new Map([['d1', 'Doc A']]);
     const ctx = buildCitationContext(chunks, titles);
 
-    expect(ctx).toContain('[Source: Doc A]');
-    expect(ctx).toContain('<c>d1.s0.p0</c>');
+    expect(ctx).toContain('[Source Document: Doc A]');
+    expect(ctx).toContain('[d1.s0.p0]');
     expect(ctx).toContain('Hello world.');
   });
 
-  it('emits only one [Source:] header for multiple chunks from the same document', () => {
+  it('emits only one [Source Document:] header for multiple chunks from the same document', () => {
     const chunks = [
       makeChunk({ docId: 'd1', anchorId: 'd1.s0.p0', text: 'First chunk.', chunkIndex: 0 }),
       makeChunk({ docId: 'd1', anchorId: 'd1.s0.p1', text: 'Second chunk.', chunkIndex: 1 }),
     ];
     const ctx = buildCitationContext(chunks, new Map([['d1', 'Doc A']]));
-    const headerCount = (ctx.match(/\[Source:/g) ?? []).length;
+    const headerCount = (ctx.match(/\[Source Document:/g) ?? []).length;
     expect(headerCount).toBe(1);
   });
 
-  it('emits separate [Source:] headers for each distinct document in order', () => {
+  it('emits separate [Source Document:] headers for each distinct document in order', () => {
     const chunks = [
       makeChunk({ docId: 'd1', anchorId: 'd1.s0.p0', text: 'From doc 1.' }),
       makeChunk({ docId: 'd2', anchorId: 'd2.s0.p0', text: 'From doc 2.' }),
     ];
     const ctx = buildCitationContext(chunks, new Map([['d1', 'Doc A'], ['d2', 'Doc B']]));
-    const headerCount = (ctx.match(/\[Source:/g) ?? []).length;
+    const headerCount = (ctx.match(/\[Source Document:/g) ?? []).length;
     expect(headerCount).toBe(2);
-    expect(ctx.indexOf('[Source: Doc A]')).toBeLessThan(ctx.indexOf('[Source: Doc B]'));
+    expect(ctx.indexOf('[Source Document: Doc A]')).toBeLessThan(ctx.indexOf('[Source Document: Doc B]'));
   });
 
   it('falls back to "Unknown" for a docId not present in the titles map', () => {
     const chunks = [makeChunk({ docId: 'mystery', anchorId: 'mystery.s0.p0', text: 'Text.' })];
     const ctx = buildCitationContext(chunks, new Map());
-    expect(ctx).toContain('[Source: Unknown]');
+    expect(ctx).toContain('[Source Document: Unknown]');
   });
 
   it('stops adding chunks once maxChars is exceeded', () => {
@@ -126,7 +126,7 @@ describe('buildCitationContext', () => {
       makeChunk({ docId: 'd1', anchorId: `d1.s0.p${i}`, text: 'x'.repeat(20), chunkIndex: i })
     );
     const ctx = buildCitationContext(chunks, new Map([['d1', 'D']]), 50);
-    const anchorsRendered = (ctx.match(/<c>/g) ?? []).length;
+    const anchorsRendered = (ctx.match(/\[d1\.s0\.p\d+\]/g) ?? []).length;
     expect(anchorsRendered).toBeGreaterThan(0);
     expect(anchorsRendered).toBeLessThan(10);
   });
@@ -140,7 +140,7 @@ describe('buildCitationContext', () => {
 
 describe('CITATION_SYSTEM_PROMPT', () => {
   it('instructs the model to answer only from provided sources', () => {
-    expect(CITATION_SYSTEM_PROMPT).toContain('ONLY using the provided source documents');
+    expect(CITATION_SYSTEM_PROMPT).toContain('Answer ONLY using the excerpts provided in the --- SOURCES --- section below.');
   });
 
   it('shows a concrete anchor ID example so the model knows the format', () => {

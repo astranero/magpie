@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { needsIntentResolution, formatHistoryForIntent, parseRepoUrl, selectTreePaths, formatTreeBlock, isStructureQuestion, questionKeywords, expandNavKeywords, isImplementationQuestion, findRepoUrlInText, isPageMetaQuestion, mentionsPageDeixis, overlapsPage, isLocationDependent, timezoneToPlace, isEnumerationQuestion, isAssistantMetaQuestion } from '../query-intent';
+import { needsIntentResolution, formatHistoryForIntent, parseRepoUrl, selectTreePaths, formatTreeBlock, isStructureQuestion, questionKeywords, expandNavKeywords, isImplementationQuestion, findRepoUrlInText, isPageMetaQuestion, mentionsPageDeixis, overlapsPage, isLocationDependent, timezoneToPlace, isEnumerationQuestion, isAssistantMetaQuestion, stripConversationalPreamble } from '../query-intent';
 
 describe('isStructureQuestion', () => {
   it('true for layout / file-location questions', () => {
@@ -455,3 +455,17 @@ describe('parallel fetch stays fast', () => {
     expect(elapsed).toBeLessThan(6 * 50 * 0.6);   // ~50ms, not ~300ms
   });
 });
+
+describe('stripConversationalPreamble', () => {
+  it('strips conversational preambles and task directives from queries', () => {
+    expect(stripConversationalPreamble('According to my sources, create a report on AI tools for game dev'))
+      .toBe('AI tools for game dev');
+    expect(stripConversationalPreamble('In my documents, summarize all mistakes to avoid in game development'))
+      .toBe('mistakes to avoid in game development');
+    expect(stripConversationalPreamble('Can you please create a report on vector stores?'))
+      .toBe('vector stores?');
+    expect(stripConversationalPreamble('what YouTubers say about game dev'))
+      .toBe('what YouTubers say about game dev');
+  });
+});
+

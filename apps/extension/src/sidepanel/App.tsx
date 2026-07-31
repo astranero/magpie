@@ -2290,6 +2290,15 @@ loadChatHistory(activeChatId).then(() => {
         resetStreamingMessage(currentChatId, assistantId);
       } else if (m?.type === 'FOLLOWUPS') {
         setFollowUps(prev => ({ ...prev, [currentChatId]: (m.items as string[]) || [] }));
+      } else if (m?.type === 'SOURCES') {
+        setMessages(prev => {
+          const list = prev[currentChatId] || [];
+          const idx = list.findIndex(x => x.id === assistantId);
+          if (idx === -1) return prev;
+          const copy = [...list];
+          copy[idx] = { ...copy[idx], sources: m.sources };
+          return { ...prev, [currentChatId]: copy };
+        });
       } else if (m?.type === 'REASONING') {
         setReasoning(prev => ({ ...prev, [currentChatId]: (prev[currentChatId] || '') + (m.text || '') }));
       } else if (m?.type === 'DELTA') {

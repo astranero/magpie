@@ -1,4 +1,5 @@
 import React from 'react';
+import { crumb } from '../../lib/crash-log';
 
 interface ErrorBoundaryProps {
   children: React.ReactNode;
@@ -27,7 +28,25 @@ export class ErrorBoundary extends React.Component<ErrorBoundaryProps, ErrorBoun
   }
 
   componentDidCatch(error: Error, info: React.ErrorInfo) {
-    console.error(`[ErrorBoundary${this.props.label ? `:${this.props.label}` : ''}]`, error, info.componentStack);
+    const label = this.props.label || 'unknown';
+    console.error(`[ErrorBoundary:${label}]`, error, info.componentStack);
+    // React SWALLOWS render errors — they never reach window.onerror, so
+    // installCrashHandlers() never sees them and a "random" panel crash left no
+    // evidence unless devtools happened to be open. Persist a breadcrumb so the
+    // crash shows up in Settings → Copy crash log with the frame that threw.
+    try {
+      const frame = (info.componentStack || '')
+        .split('\n')
+        .map(s => s.trim())
+        .filter(Boolean)
+        .slice(0, 3)
+        .join(' < ');
+      crumb('sidepanel', 'render-error', {
+        boundary: label,
+        error: `${error.name}: ${error.message}`,
+        at: frame,
+      });
+    } catch { /* breadcrumbing must never itself throw */ }
   }
 
   render() {

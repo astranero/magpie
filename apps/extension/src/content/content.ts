@@ -525,7 +525,7 @@ async function scrapePage(): Promise<{
         try {
           transcriptText = await fetchTimedtextTranscript(ytResponse);
         } catch (e) {
-          console.warn('YouTube timedtext fetch failed:', e);
+          console.log('YouTube timedtext fetch notice:', e);
         }
       }
 
@@ -549,9 +549,9 @@ async function scrapePage(): Promise<{
 
         return { title, url, favicon, markdown, wordCount, kind: 'youtube', author };
       }
-      console.warn('YouTube transcript: no captions found via timedtext or panel; falling back to page extraction');
+      console.log('YouTube transcript: no captions found via timedtext or panel; falling back to page extraction');
     } catch (err) {
-      console.error('Failed to extract YouTube transcript:', err);
+      console.log('YouTube transcript fallback:', err);
       // Fallback to standard extraction
     }
   }

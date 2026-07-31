@@ -521,6 +521,7 @@ interface MessageBodyProps {
   resolveCitations: (text: string) => Promise<ResolvedCitation[]>;
   onOpenDocument?: (docId: string, anchorId?: string) => void;
   onOpenExternalLink?: (url: string) => void;
+  sources?: Array<{ docId: string; docTitle: string; url?: string }>;
 }
 
 // A single anchor, no surrounding brackets (used to normalize grouped citations)
@@ -536,9 +537,13 @@ function normalizeCitations(text: string): string {
     `\\[(${ANCHOR_SOURCE.source}(?:\\s*,\\s*${ANCHOR_SOURCE.source})+)\\]`,
     'g'
   );
-  return text.replace(groupRegex, (_full, group: string) =>
+  let cleaned = text.replace(groupRegex, (_full, group: string) =>
     group.split(',').map(a => `[${a.trim()}]`).join('')
   );
+  // Models (e.g. flash-lite) sometimes emit bare trailing footnote numbers like "concept art 1."
+  // Strip the bare footnote numbers so the text stays clean while the Sources footer lists the documents.
+  cleaned = cleaned.replace(/([a-zA-Z0-9_]+)\s+(\d{1,2})([\.,\s]|$)/g, '$1$3');
+  return cleaned;
 }
 
 /**
@@ -553,23 +558,36 @@ function normalizeLatexDelimiters(text: string): string {
   for (let i = 0; i < parts.length; i++) {
     // Odd indices are the captured code spans/fences from the split — skip them
     if (i % 2 === 1) continue;
-    parts[i] = parts[i].replace(/(\\)?\\\[([\s\S]*?)\\\]/g, (full, escape, inner) => {
-      if (escape) return full; // It was an escaped bracket, so leave it alone
-      return `$$${inner}$$`;
-    }).replace(/(\\)?\\\(([\s\S]*?)\\\)/g, (full, escape, inner) => {
-      if (escape) return full; // It was an escaped parenthesis, so leave it alone
-      return `$${inner}$`;
-    })
-    // Currency guard: LLM answers full of "$20 … $750 … $4,000" made remark-math
-    // pair the dollar signs into (garbled) inline math. A `$` immediately before
-    // a digit is currency, never a TeX opener — escape it so KaTeX ignores it.
-    // Skip when preceded by `\` (already escaped) or `$` (display-math `$$…$$`).
-    .replace(/(?<![\\$])\$(?=\d)/g, '\\$');
+    parts[i] = parts[i]
+      .replace(/(\\)?\\\[([\s\S]*?)\\\]/g, (full, escape, inner) => {
+        if (escape) return full; // It was an escaped bracket, so leave it alone
+        const safeInner = inner.replace(/€/g, '\\text{EUR}').replace(/£/g, '\\text{GBP}').replace(/¥/g, '\\text{JPY}');
+        return `$$${safeInner}$$`;
+      })
+      .replace(/(\\)?\\\(([\s\S]*?)\\\)/g, (full, escape, inner) => {
+        if (escape) return full; // It was an escaped parenthesis, so leave it alone
+        const safeInner = inner.replace(/€/g, '\\text{EUR}').replace(/£/g, '\\text{GBP}').replace(/¥/g, '\\text{JPY}');
+        return `$${safeInner}$`;
+      })
+      // Currency guard: LLM answers full of "$20 … $750 … $4,000" made remark-math
+      // pair the dollar signs into (garbled) inline math. A `$` immediately before
+      // a digit is currency, never a TeX opener — escape it so KaTeX ignores it.
+      // Skip when preceded by `\` (already escaped) or `$` (display-math `$$…$$`).
+      .replace(/(?<![\\$])\$(?=\d)/g, '\\$')
+      // KaTeX font metrics guard: KaTeX JS throws an unhandled error "No character metrics for '€'"
+      // for non-ASCII currency symbols inside math blocks. Replace them safely so KaTeX never crashes.
+      .replace(/(\$\$[\s\S]*?\$\$|\$[^$\n]+\$)/g, (mathBlock) => {
+        return mathBlock
+          .replace(/€/g, '\\text{EUR}')
+          .replace(/£/g, '\\text{GBP}')
+          .replace(/¥/g, '\\text{JPY}')
+          .replace(/₹/g, '\\text{INR}');
+      });
   }
   return parts.join('');
 }
 
-const MessageBody: React.FC<MessageBodyProps> = React.memo(({ text: rawText, compact, streaming, renderLive, resolveCitations, onOpenDocument, onOpenExternalLink }) => {
+const MessageBody: React.FC<MessageBodyProps> = React.memo(({ text: rawText, compact, streaming, renderLive, resolveCitations, onOpenDocument, onOpenExternalLink, sources }) => {
   const [citations, setCitations] = useState<Map<string, ResolvedCitation>>(new Map());
   // The raw-markdown plaintext fast-path is for fast token-by-token chat. The
   // research report streams as coalesced chunks and should arrive FORMATTED, so
@@ -760,6 +778,29 @@ const MessageBody: React.FC<MessageBodyProps> = React.memo(({ text: rawText, com
           </div>
         );
       })()}
+
+      {/* Fallback Sources footer when LLM emitted no anchor tags */}
+      {(!anchorOrder.length || citations.size === 0) && sources && sources.length > 0 && (
+        <div className="mt-3 pt-2 border-t border-border/60">
+          <div className="text-xs font-medium text-muted-foreground mb-1.5">Sources</div>
+          <ol className="space-y-1 list-none p-0 m-0">
+            {sources.map((src, idx) => (
+              <li key={src.docId || idx} className="flex items-start gap-1.5 text-[11px] text-muted-foreground">
+                <span className="font-semibold text-primary shrink-0 tabular-nums">
+                  [{idx + 1}]
+                </span>
+                <button
+                  onClick={() => src.docId && onOpenDocument?.(src.docId)}
+                  className="text-left cursor-pointer bg-transparent border-none p-0 hover:text-primary hover:underline transition-colors leading-snug truncate max-w-[300px]"
+                  title="Click to view source"
+                >
+                  {src.docTitle}
+                </button>
+              </li>
+            ))}
+          </ol>
+        </div>
+      )}
     </div>
   );
 }, (prev, next) =>
@@ -1646,7 +1687,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
                   <ErrorRecovery raw={m.error} onSettings={onOpenSettings} onRetry={onRetryLast} />
                 ) : m.role === 'assistant' || m.role === 'system' ? (
                   <CollapsibleMessage text={m.text} streaming={m.streaming} defaultExpanded={!!(m.quiz?.length || m.actions?.length)}>
-                    <MessageBody text={m.text} compact={m.role === 'system'} streaming={m.streaming} renderLive={m.renderLive} resolveCitations={resolveCitations} onOpenDocument={onOpenDocument} onOpenExternalLink={onOpenExternalLink} />
+                    <MessageBody text={m.text} compact={m.role === 'system'} streaming={m.streaming} renderLive={m.renderLive} resolveCitations={resolveCitations} onOpenDocument={onOpenDocument} onOpenExternalLink={onOpenExternalLink} sources={m.sources} />
                   </CollapsibleMessage>
                 ) : editingId === m.id ? (
                   <MessageEditor

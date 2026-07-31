@@ -515,3 +515,89 @@ export function formatTreeBlock(ref: RepoRef, paths: string[], truncated: boolea
     `If a file is not in the tree, say it does not exist in the repo rather than guessing a location.`
   );
 }
+
+export type ChatIntent = 'workspace_docs' | 'open_page' | 'web_search' | 'general';
+
+/**
+ * Classify a user question's intent for Auto mode routing.
+ *
+ * IMPORTANT: This function must only match STRUCTURAL intent signals —
+ * directives that tell us WHERE to look (page / workspace / web), or TASK
+ * patterns that imply breadth (reports, comprehensive summaries).
+ *
+ * Topic keywords like "youtubers", "game dev", "reviews" are NOT intent
+ * signals — they say WHAT the user is asking about, not WHERE to find the
+ * answer. A user on a YouTube page could ask "what do youtubers think
+ * about this?" (page intent). The same word in "create a report about
+ * youtubers" is a workspace/web intent. The topic keyword is ambiguous;
+ * only the structural pattern ("create a report") disambiguates.
+ *
+ * Returns 'general' for anything ambiguous — the normal confidence-based
+ * routing (workspace retrieval → isConfidentMatch → web fallback) handles it.
+ */
+export function detectQueryIntent(
+  prompt: string,
+  opts: { hasPage?: boolean; hasWorkspaceDocs?: boolean } = {}
+): ChatIntent {
+  const p = (prompt || '').trim().toLowerCase();
+  if (!p) return 'general';
+
+  // ── 1. Explicit page directives ──
+  // "this page", "summarize page", "on this site" — the user is pointing at
+  // the open tab. Only fires when a page is actually attached.
+  if (opts.hasPage && /\b(this page|current page|open page|summarize page|read page|page content|on this page)\b/i.test(p)) {
+    return 'open_page';
+  }
+
+  // ── 2. Explicit workspace / my-sources directives ──
+  // "my docs", "in my project", "according to my sources" — the user is
+  // pointing at their captured material.
+  if (/\b(my (docs|documents|papers|notes|workspace|sources|files|captures?|library)|in my project|saved (papers|articles|docs)|from my (sources|captures?|research)|according to (my|the) (sources|documents|papers))\b/i.test(p)) {
+    return opts.hasWorkspaceDocs ? 'workspace_docs' : 'general';
+  }
+
+  // ── 3. Report / synthesis TASK patterns ──
+  // "create a report", "find out everything", "comprehensive overview" —
+  // these are TASKS that imply multi-source breadth. They should never be
+  // answered from a single open page. When workspace has captures, search
+  // those first; otherwise web search.
+  if (/\b(create a report|write a report|make a report|generate a report|find out everything|comprehensive (list|overview|guide|summary|analysis|report)|summarize (all|everything|what))\b/i.test(p)) {
+    return opts.hasWorkspaceDocs ? 'workspace_docs' : 'web_search';
+  }
+
+  // ── 4. Explicit web / live-data directives ──
+  // "search the web", "latest news", "current prices" — the user is
+  // explicitly asking for live/current data that workspace docs can't have.
+  if (/\b(search the web|search online|live web|latest news|current (market|price|weather|events|status)|recent updates?|right now|as of today)\b/i.test(p)) {
+    return 'web_search';
+  }
+
+  // Everything else is ambiguous — let the normal routing handle it:
+  // workspace retrieval → confidence check → web fallback → general knowledge.
+  return 'general';
+}
+
+/**
+ * Strips meta preambles and conversational directives ("according to my sources",
+ * "create a report on", "find out everything about", "summarize all") from a user
+ * prompt to produce a clean topic query for vector & BM25 retrieval.
+ */
+export function stripConversationalPreamble(query: string): string {
+  if (!query) return '';
+  let cleaned = query.trim();
+
+  // Strip leading conversational/source phrases (including optional punctuation/commas)
+  cleaned = cleaned.replace(/^(according to (my|the) (sources|documents|papers|library|workspace|captures?)|based on (my|the) (sources|documents|papers)|from my (sources|captures?|notes)|in my (sources|documents|workspace)|can you (please )?|please )[\s,:]*/i, '');
+
+  // Strip task directives ("create a report on", "summarize all", "find out everything about")
+  cleaned = cleaned.replace(/^(create|write|make|generate) a (report|summary|overview|analysis) (on|about|of|regarding)\s*/i, '');
+  cleaned = cleaned.replace(/^summarize (all|everything|what|the)\s*/i, '');
+  cleaned = cleaned.replace(/^find out (everything|all) (about|on)\s*/i, '');
+
+  // Strip trailing meta requests ("find out everything that can help...")
+  cleaned = cleaned.replace(/\s*[\.,]*\s*find out (everything|all).*$/i, '');
+
+  cleaned = cleaned.trim();
+  return cleaned.length > 3 ? cleaned : query;
+}
+

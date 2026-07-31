@@ -5,6 +5,49 @@ versions follow the extension manifest.
 
 ## [Unreleased]
 
+### Added — vault-aware Drive sync
+
+- **Documents file into the project's folders, not its root.** The Drive folder
+  Magpie syncs into is an Obsidian vault, and every project in it uses one
+  layout — `_schemas/ captures/ decisions/ research/ specs/`. Sync wrote every
+  document flat into `Magpie/<project>/`, so a captured page and a deep-research
+  report landed side by side in the project root, *beside* the folders they
+  belonged in. Nothing errored and nothing was lost; the convention was simply
+  ignored and those folders stayed empty.
+
+  Routing is by what a document is, in priority order: the frontmatter `type:`
+  when the writer declared one (`web-capture`/`pdf`/`selection`/`image`/
+  `local-import` → `captures/`; `research-sources`/`syllabus`/`flashcards` →
+  `research/`), then the source URL — a real http(s) URL means it came from
+  elsewhere and is a capture, no URL means Magpie wrote it and it is a report.
+  Titles route specs and ADRs for documents saved before frontmatter carried a
+  type. A raw research scrape counts as captured material rather than a report:
+  it came from the web and is kept only for citation links.
+
+  Creating a project lays out all five folders up front. Folder ids cache per
+  project + leaf, so this costs one extra Drive call per folder actually used
+  rather than one per document. The routing rule is a pure function with tests
+  (`src/lib/vault-layout.ts`) — misfiling is silent, since the file syncs fine
+  and is merely in the wrong place.
+
+### Added — intent-routed chat context
+
+- **Follow-up questions are resolved before retrieval.** "how to use it?" carries
+  no retrieval signal on its own: BM25, vector search and page-section selection
+  all see only pronouns. Such questions are rewritten into standalone ones with
+  one small LLM call, gated by heuristics so the call only happens when it is
+  worth making. Word counting is language-aware — `split(/\s+/)` counted every
+  CJK sentence as a single word and over-triggered the rewrite.
+- **Greetings are answered, not searched.** "hi", "thanks", "kiitos" ran through
+  source retrieval, returned weak chunks, and tripped the strict "cannot answer
+  from sources" refusal. The matcher is deliberately conservative: only short
+  messages made *entirely* of chit-chat tokens qualify, so a real short question
+  like "what is TLS" is never misclassified.
+
+### Fixed
+
+- A stall watchdog that could never fire.
+
 ### Added — web-data agent
 
 - **`/data` — discover a site's APIs, fetch, and analyze.** A gated agent loop

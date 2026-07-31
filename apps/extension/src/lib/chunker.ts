@@ -134,27 +134,42 @@ export function chunkDocument(input: ChunkInput): Omit<Chunk, 'id' | 'docId'>[] 
       // Split oversized chunks at sentence boundaries
       if (text.length > MAX_CHUNK_CHARS * MAX_CHUNK_SLACK) {
         const subChunks = splitAtSentences(text, MAX_CHUNK_CHARS);
-        // Locate each sub-chunk inside the paragraph text for real offsets
+        // Locate each raw sub-chunk inside the paragraph text for real offsets
         // (splitAtSentences trims, so arithmetic lengths would drift).
         let searchFrom = 0;
 
         for (let subIdx = 0; subIdx < subChunks.length; subIdx++) {
-          const subText = subChunks[subIdx];
+          const rawSubText = subChunks[subIdx];
           const anchorId = `${docShortId}.s${sIdx}.p${pIdx}.${subIdx}`;
-          const rel = text.indexOf(subText, searchFrom);
+          const rel = text.indexOf(rawSubText, searchFrom);
           const subStart = rel >= 0 ? charStart + rel : charStart + searchFrom;
-          if (rel >= 0) searchFrom = rel + subText.length;
+          if (rel >= 0) searchFrom = rel + rawSubText.length;
+          const subEnd = subStart + rawSubText.length;
+
+          // 10–15% sentence-level overlap: prepend the last sentence of sub-chunk N-1 into
+          // sub-chunk N for vector retrieval context, while keeping charStart/charEnd precise.
+          let textWithOverlap = rawSubText;
+          if (subIdx > 0) {
+            const prevText = subChunks[subIdx - 1];
+            const prevSentences = prevText.match(/[^.!?\n。！？]+[.!?\n。！？]+[\s]*/g);
+            if (prevSentences && prevSentences.length >= 2) {
+              const lastSent = prevSentences[prevSentences.length - 1].trim();
+              if (lastSent.length > 20 && lastSent.length < MAX_CHUNK_CHARS * 0.2) {
+                textWithOverlap = lastSent + ' ' + rawSubText;
+              }
+            }
+          }
 
           lastChunkSectionIdx = sIdx;
           chunks.push({
             chunkIndex: globalChunkIndex++,
-            text: subText,
+            text: textWithOverlap,
             heading: section.heading,
             sectionPath,
             paragraphIndex: pIdx,
             anchorId,
             charStart: subStart,
-            charEnd: subStart + subText.length
+            charEnd: subEnd
           });
         }
         continue; // Move to the next paragraph
@@ -293,21 +308,6 @@ function splitAtSentences(text: string, maxChars: number): string[] {
   if (result.length > 1 && result[result.length - 1].length < MIN_CHUNK_CHARS * 2) {
     const tail = result.pop()!;
     result[result.length - 1] += ' ' + tail;
-  }
-
-  // 10–15% sentence-level overlap: prepend the last sentence of chunk N into
-  // chunk N+1 so boundary context is never lost. Only when there are ≥2 chunks
-  // and the overlap fits (skip if the sentence is itself most of the chunk).
-  if (result.length >= 2) {
-    for (let i = 1; i < result.length; i++) {
-      const prevSentences = result[i - 1].match(/[^.!?\n。！？]+[.!?\n。！？]+[\s]*/g);
-      if (prevSentences && prevSentences.length >= 2) {
-        const lastSent = prevSentences[prevSentences.length - 1].trim();
-        if (lastSent.length > 20 && lastSent.length < maxChars * 0.2) {
-          result[i] = lastSent + ' ' + result[i];
-        }
-      }
-    }
   }
 
   return result.length > 0 ? result : [text];
